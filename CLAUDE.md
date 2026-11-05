@@ -36,7 +36,7 @@ Guidance for Claude Code when working in this repository.
 
 **Sparse-View 3D Gaussian Splatting for Mac** — a native macOS app that reconstructs a 3D Gaussian Splatting scene from only a few input images and renders/inspects it interactively on Apple Silicon.
 
-> Status: Phase 1 (viewer) done and green on CI; Phase 2 (differentiable rasterizer) in progress — plans live in `docs/superpowers/plans/`. **`docs/ARCHITECTURE.md` is the source of truth** for all decisions (decision log, modules, phases, defaults). Read it before any implementation work. Changing a recorded decision requires asking the user first (use the `grill-me` skill).
+> Status: Phases 1 (viewer) and 2 (differentiable rasterizer: CPU + Metal backward, verified against PyTorch goldens and finite differences) done and green on CI; Phase 3 (training) planned — plans live in `docs/superpowers/plans/`. **`docs/ARCHITECTURE.md` is the source of truth** for all decisions (decision log, modules, phases, defaults). Read it before any implementation work. Changing a recorded decision requires asking the user first (use the `grill-me` skill).
 
 ## Tech stack (target)
 - **Platform:** macOS 26+ (macOS 27 APIs gated with `#available`) on Apple Silicon. Baseline M1 / 8 GB with an adaptive Gaussian budget; M3+ extras (`MTLGPUFamily.apple9`, hardware ray tracing) enabled at runtime, always with a base-tier fallback.
