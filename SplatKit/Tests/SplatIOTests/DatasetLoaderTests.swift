@@ -201,8 +201,13 @@ private func arkitFrame(name: String = "f.ppm",
 // MARK: - PPM
 
 @Test func ppmRoundTrip() throws {
-    let pixels: [SIMD3<Float>] = (0..<6).map { index in
-        SIMD3(Float(index * 40) / 255, Float(255 - index * 40) / 255, Float(index) / 255)
+    // Explicit steps: Xcode's type checker times out on the one-expression form.
+    var pixels: [SIMD3<Float>] = []
+    for index in 0..<6 {
+        let r: Float = Float(index * 40) / 255
+        let g: Float = Float(255 - index * 40) / 255
+        let b: Float = Float(index) / 255
+        pixels.append(SIMD3<Float>(r, g, b))
     }
     let image = RGBImage(width: 3, height: 2, pixels: pixels)
     let decoded = try PPMCodec.decode(PPMCodec.encode(image))
