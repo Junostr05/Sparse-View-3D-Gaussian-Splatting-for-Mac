@@ -3,6 +3,7 @@ import SplatCore
 
 /// Device buffers that receive the parameter gradients of one backward pass. Layouts match
 /// `GaussianGradients`: `sh` is [gaussian][coefficient][channel] with K = (shDegree + 1)².
+/// The allocation holds `capacity` Gaussians; a backward pass fills only the first `gaussians.count`.
 public final class GradientBuffers {
     public let positions: MTLBuffer
     public let logScales: MTLBuffer
@@ -10,7 +11,8 @@ public final class GradientBuffers {
     public let opacityLogits: MTLBuffer
     public let sh: MTLBuffer
 
-    let count: Int
+    /// Number of Gaussians the buffers can hold (the `count:` argument of `init`).
+    let capacity: Int
     let shDegree: Int
 
     public init(context: MetalContext, count: Int, shDegree: Int) throws(MetalError) {
@@ -23,11 +25,12 @@ public final class GradientBuffers {
         rotations = try context.makeBuffer(length: 4 * count * floatSize)
         opacityLogits = try context.makeBuffer(length: count * floatSize)
         sh = try context.makeBuffer(length: count * coefficients * 3 * floatSize)
-        self.count = count
+        self.capacity = count
         self.shDegree = shDegree
     }
 
-    /// Copies the gradients to the CPU. `count` and `shDegree` must match the allocation.
+    /// Copies the first `count` Gaussians to the CPU. `count` must not exceed the capacity, and
+    /// `shDegree` must match the allocation.
     public func toGaussianGradients(count: Int, shDegree: Int) -> GaussianGradients {
         let coefficients = GaussianCloud.coefficientCount(degree: shDegree)
         return GaussianGradients(

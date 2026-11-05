@@ -15,7 +15,7 @@ public final class MetalContext {
     public let queue: MTLCommandQueue
     public let library: MTLLibrary
 
-    static let shaderFiles = ["Common", "PrefixSum", "RadixSort", "Rasterizer", "Backward"]
+    static let shaderFiles = ["Common", "PrefixSum", "RadixSort", "Rasterizer", "Backward", "Adam", "Loss", "Densify"]
 
     init(device: MTLDevice, queue: MTLCommandQueue, library: MTLLibrary) {
         self.device = device
