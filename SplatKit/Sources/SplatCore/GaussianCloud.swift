@@ -42,7 +42,7 @@ public struct GaussianCloud: Sendable {
     }
 
     /// Unchecked initializer for data whose lengths are already known to be consistent.
-    private init(validated shDegree: Int,
+    init(validated shDegree: Int,
                  positions: [Float],
                  logScales: [Float],
                  rotations: [Float],
