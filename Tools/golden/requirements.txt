@@ -1,0 +1,10 @@
+# Golden generator (Tools/golden). Reference tooling only: never shipped, never imported by Swift.
+# Install torch from the CPU index and gsplat with --no-deps as described in README.md.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+numpy
+jaxtyping
+typing_extensions
+rich
+# Reference implementation used for cross-checks. Install with --no-deps (see README.md).
+gsplat==1.5.3

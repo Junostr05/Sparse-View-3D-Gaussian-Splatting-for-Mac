@@ -9,7 +9,7 @@ var products: [Product] = [
 var targets: [Target] = [
     .target(name: "SplatCore"),
     .target(name: "SplatIO", dependencies: ["SplatCore"]),
-    .testTarget(name: "SplatCoreTests", dependencies: ["SplatCore"]),
+    .testTarget(name: "SplatCoreTests", dependencies: ["SplatCore"], resources: [.copy("Fixtures")]),
     .testTarget(name: "SplatIOTests", dependencies: ["SplatIO"]),
 ]
 
@@ -21,7 +21,11 @@ targets += [
         dependencies: ["SplatCore"],
         resources: [.copy("Shaders")]
     ),
-    .testTarget(name: "SplatMetalTests", dependencies: ["SplatMetal", "SplatCore"]),
+    .testTarget(
+        name: "SplatMetalTests",
+        dependencies: ["SplatMetal", "SplatCore"],
+        resources: [.copy("Fixtures")]
+    ),
 ]
 #endif
 

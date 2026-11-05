@@ -19,6 +19,7 @@ Packages/
 __pycache__/
 *.pyc
 .venv/
+.venv-golden/
 
 # Datasets & trained scenes (keep out of git)
 data/
@@ -29,7 +30,7 @@ outputs/
 *.spz
 *.gsproj/
 # Small test fixtures (goldens, format round-trips) are allowed
-!Tests/**/Fixtures/**
+!**/Tests/**/Fixtures/**
 
 # Secrets
 .env

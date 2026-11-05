@@ -379,3 +379,32 @@ private let fdThreshold: Float = 1e-2
                                    imageGradient: [SIMD3<Float>](repeating: .zero, count: 40 * 28))
     #expect(g == GaussianGradients(zeroLike: scene.cloud))
 }
+
+// MARK: - Golden comparison (PyTorch autograd)
+
+@Test(arguments: ["single", "multi", "rotated", "occluded"])
+func backwardMatchesGolden(name: String) throws {
+    let golden = try GoldenCase.load(name)
+    let cloud = try golden.cloud()
+    let gradients = CPURasterizer.backward(
+        cloud, camera: golden.camera(), settings: golden.settings(),
+        imageGradient: golden.imageGradientPixels)
+
+    func check(_ label: String, _ actual: [Float], _ expected: [Float]) {
+        #expect(actual.count == expected.count, "\(name).\(label): length")
+        guard actual.count == expected.count else { return }
+        var worst: Float = 0
+        var worstIndex = 0
+        for i in 0..<actual.count {
+            let allowed = 1e-4 + 1e-3 * abs(expected[i])
+            let excess = abs(actual[i] - expected[i]) - allowed
+            if excess > worst { worst = excess; worstIndex = i }
+        }
+        #expect(worst <= 0, "\(name).\(label)[\(worstIndex)]: cpu \(actual[worstIndex]) golden \(expected[worstIndex])")
+    }
+    check("positions", gradients.positions, golden.gradients.positions)
+    check("logScales", gradients.logScales, golden.gradients.logScales)
+    check("rotations", gradients.rotations, golden.gradients.rotations)
+    check("opacityLogits", gradients.opacityLogits, golden.gradients.opacityLogits)
+    check("sh", gradients.sh, golden.gradients.sh)
+}
