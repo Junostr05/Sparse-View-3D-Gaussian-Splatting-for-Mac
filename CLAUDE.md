@@ -87,6 +87,7 @@ Guidance for Claude Code when working in this repository.
 ## Git
 - Never commit secrets, datasets, trained scenes (`*.ply`, `*.splat`) or large binaries — keep them out of git.
 - Clear, descriptive commit messages. Do not open pull requests unless asked.
+- **Checkpoint regularly (user request 2026-11-05):** commit and push to the working branch after every reviewed and merged task, and at the latest every ~30 minutes of work (use a `WIP:` commit if a task is half done). Worker output only exists in ephemeral worktrees (they were lost once on a session restart): merge or WIP-commit it as soon as it returns, never let several finished tasks pile up uncommitted. Before pausing or ending a session, make sure `git status` is clean and the remote head equals the local head.
 
 ## Communication
 - The user writes in German — answer in German. Code, identifiers, comments and commit messages in English.
