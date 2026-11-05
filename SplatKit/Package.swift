@@ -21,7 +21,7 @@ targets += [
         dependencies: ["SplatCore"],
         resources: [.copy("Shaders")]
     ),
-    .testTarget(name: "SplatMetalTests", dependencies: ["SplatMetal"]),
+    .testTarget(name: "SplatMetalTests", dependencies: ["SplatMetal", "SplatCore"]),
 ]
 #endif
 

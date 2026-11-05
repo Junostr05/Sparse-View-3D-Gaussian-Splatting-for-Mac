@@ -1,0 +1,224 @@
+// Forward splatting pipeline: projection, key duplication, tile ranges, tile rasterization.
+
+kernel void projectGaussians(
+    device const float* positions [[buffer(0)]],
+    device const float* logScales [[buffer(1)]],
+    device const float* rotations [[buffer(2)]],
+    device const float* opacityLogits [[buffer(3)]],
+    device const float* shCoeffs [[buffer(4)]],
+    device float4* outMeanDepth [[buffer(5)]],
+    device float4* outConicOpacity [[buffer(6)]],
+    device float4* outColor [[buffer(7)]],
+    device int4* outTileRect [[buffer(8)]],
+    device uint* outTilesTouched [[buffer(9)]],
+    constant ProjectUniforms& u [[buffer(10)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= u.counts.x) return;
+    outTilesTouched[gid] = 0u;
+
+    float3 pw = float3(positions[3 * gid], positions[3 * gid + 1], positions[3 * gid + 2]);
+    float3 pc = float3(dot(u.rotRow0.xyz, pw) + u.rotRow0.w,
+                       dot(u.rotRow1.xyz, pw) + u.rotRow1.w,
+                       dot(u.rotRow2.xyz, pw) + u.rotRow2.w);
+    float z = pc.z;
+    if (z < u.limits.x || z > u.limits.y) return;
+
+    float fx = u.intrinsics.x, fy = u.intrinsics.y, cx = u.intrinsics.z, cy = u.intrinsics.w;
+    float W = float(u.counts.y), H = float(u.counts.z);
+    float2 mean = float2(fx * pc.x / z + cx, fy * pc.y / z + cy);
+
+    // Covariance.
+    float4 qr = float4(rotations[4 * gid], rotations[4 * gid + 1], rotations[4 * gid + 2], rotations[4 * gid + 3]);
+    float qlen2 = dot(qr, qr);
+    float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+    if (qlen2 > 0.0f) {
+        float inv = 1.0f / sqrt(qlen2);
+        qw = qr.x * inv; qx = qr.y * inv; qy = qr.z * inv; qz = qr.w * inv;
+    }
+    float3x3 Rq = float3x3(
+        float3(1.0f - 2.0f * (qy * qy + qz * qz), 2.0f * (qx * qy + qw * qz), 2.0f * (qx * qz - qw * qy)),
+        float3(2.0f * (qx * qy - qw * qz), 1.0f - 2.0f * (qx * qx + qz * qz), 2.0f * (qy * qz + qw * qx)),
+        float3(2.0f * (qx * qz + qw * qy), 2.0f * (qy * qz - qw * qx), 1.0f - 2.0f * (qx * qx + qy * qy)));
+    float3 s = float3(exp(logScales[3 * gid]), exp(logScales[3 * gid + 1]), exp(logScales[3 * gid + 2]));
+    float3x3 M = float3x3(Rq[0] * s.x, Rq[1] * s.y, Rq[2] * s.z);
+    float3x3 sigma3 = M * transpose(M);
+
+    // Clamped Jacobian.
+    float tanFovX = 0.5f * W / fx;
+    float tanFovY = 0.5f * H / fy;
+    float limXPos = (W - cx) / fx + 0.3f * tanFovX;
+    float limXNeg = cx / fx + 0.3f * tanFovX;
+    float limYPos = (H - cy) / fy + 0.3f * tanFovY;
+    float limYNeg = cy / fy + 0.3f * tanFovY;
+    float tx = z * clamp(pc.x / z, -limXNeg, limXPos);
+    float ty = z * clamp(pc.y / z, -limYNeg, limYPos);
+    float3 j0 = float3(fx / z, 0.0f, -fx * tx / (z * z));
+    float3 j1 = float3(0.0f, fy / z, -fy * ty / (z * z));
+
+    // Camera rotation as a column-major matrix (columns of R).
+    float3x3 Rc = float3x3(float3(u.rotRow0.x, u.rotRow1.x, u.rotRow2.x),
+                           float3(u.rotRow0.y, u.rotRow1.y, u.rotRow2.y),
+                           float3(u.rotRow0.z, u.rotRow1.z, u.rotRow2.z));
+    float3 r0 = float3(dot(j0, Rc[0]), dot(j0, Rc[1]), dot(j0, Rc[2]));
+    float3 r1 = float3(dot(j1, Rc[0]), dot(j1, Rc[1]), dot(j1, Rc[2]));
+    float a = dot(r0, sigma3 * r0) + u.limits.z;
+    float b = dot(r0, sigma3 * r1);
+    float c = dot(r1, sigma3 * r1) + u.limits.z;
+
+    float det = a * c - b * b;
+    if (det <= 0.0f) return;
+    float3 conic = float3(c / det, -b / det, a / det);
+
+    float mid = 0.5f * (a + c);
+    float lambda = mid + sqrt(max(0.1f, mid * mid - det));
+    float radius = ceil(3.0f * sqrt(lambda));
+    if (radius <= 0.0f) return;
+
+    int tilesX = int(u.counts.w);
+    int tilesY = int(u.shInfo.x);
+    float tile = float(SPLAT_TILE);
+    float lo = 1.0e8f;
+    int minX = clamp(int(clamp((mean.x - radius) / tile, -lo, lo)), 0, tilesX);
+    int maxX = clamp(int(clamp((mean.x + radius + 15.0f) / tile, -lo, lo)), 0, tilesX);
+    int minY = clamp(int(clamp((mean.y - radius) / tile, -lo, lo)), 0, tilesY);
+    int maxY = clamp(int(clamp((mean.y + radius + 15.0f) / tile, -lo, lo)), 0, tilesY);
+    if (maxX <= minX || maxY <= minY) return;
+
+    // Color.
+    float3 dir = normalize(pw - u.camCenter.xyz);
+    ulong shBase = ulong(gid) * ulong(u.shInfo.z) * 3ul;
+    float3 raw = evaluateSH(shCoeffs, shBase, u.shInfo.y, dir);
+    float3 color = max(raw + 0.5f, float3(0.0f));
+
+    float opacity = 1.0f / (1.0f + exp(-opacityLogits[gid]));
+
+    outMeanDepth[gid] = float4(mean.x, mean.y, z, radius);
+    outConicOpacity[gid] = float4(conic.x, conic.y, conic.z, opacity);
+    outColor[gid] = float4(color, 1.0f);
+    outTileRect[gid] = int4(minX, minY, maxX, maxY);
+    outTilesTouched[gid] = uint((maxX - minX) * (maxY - minY));
+}
+
+kernel void duplicateKeys(
+    device const uint* tilesTouched [[buffer(0)]],
+    device const uint* offsets [[buffer(1)]],
+    device const int4* tileRect [[buffer(2)]],
+    device const float4* meanDepth [[buffer(3)]],
+    device ulong* keys [[buffer(4)]],
+    device uint* values [[buffer(5)]],
+    constant DuplicateUniforms& u [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= u.info.x) return;
+    if (tilesTouched[gid] == 0u) return;
+    uint pos = offsets[gid];
+    int4 rect = tileRect[gid];
+    uint depthBits = as_type<uint>(meanDepth[gid].z);
+    uint tilesX = u.info.y;
+    for (int ty = rect.y; ty < rect.w; ++ty) {
+        for (int tx = rect.x; tx < rect.z; ++tx) {
+            uint tileID = uint(ty) * tilesX + uint(tx);
+            keys[pos] = (ulong(tileID) << 32) | ulong(depthBits);
+            values[pos] = gid;
+            pos += 1u;
+        }
+    }
+}
+
+// ranges[tile] = (start, end) into the sorted arrays; untouched tiles keep (0, 0).
+kernel void tileRanges(
+    device const ulong* keys [[buffer(0)]],
+    device uint2* ranges [[buffer(1)]],
+    constant uint& total [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= total) return;
+    uint tile = uint(keys[gid] >> 32);
+    if (gid == 0u || uint(keys[gid - 1u] >> 32) != tile) {
+        ranges[tile].x = gid;
+    }
+    if (gid == total - 1u || uint(keys[gid + 1u] >> 32) != tile) {
+        ranges[tile].y = gid + 1u;
+    }
+}
+
+kernel void rasterizeTiles(
+    device const float4* meanDepth [[buffer(0)]],
+    device const float4* conicOpacity [[buffer(1)]],
+    device const float4* colors [[buffer(2)]],
+    device const uint* values [[buffer(3)]],
+    device const uint2* ranges [[buffer(4)]],
+    constant RasterUniforms& u [[buffer(5)]],
+    texture2d<float, access::write> outTexture [[texture(0)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint lid [[thread_index_in_threadgroup]])
+{
+    threadgroup float2 sMean[SPLAT_TILE * SPLAT_TILE];
+    threadgroup float4 sConic[SPLAT_TILE * SPLAT_TILE];
+    threadgroup float4 sColor[SPLAT_TILE * SPLAT_TILE];
+    threadgroup atomic_uint doneCount;
+
+    uint px = tgid.x * uint(SPLAT_TILE) + tid.x;
+    uint py = tgid.y * uint(SPLAT_TILE) + tid.y;
+    bool inside = px < u.info.x && py < u.info.y;
+    float2 p = float2(float(px) + 0.5f, float(py) + 0.5f);
+
+    uint2 range = ranges[tgid.y * u.info.z + tgid.x];
+    const uint batch = uint(SPLAT_TILE * SPLAT_TILE);
+
+    if (lid == 0u) {
+        atomic_store_explicit(&doneCount, 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float3 rgb = float3(0.0f);
+    float T = 1.0f;
+    bool done = !inside;
+    bool counted = false;
+
+    for (uint base = range.x; base < range.y; base += batch) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint idx = base + lid;
+        if (idx < range.y) {
+            uint g = values[idx];
+            sMean[lid] = meanDepth[g].xy;
+            sConic[lid] = conicOpacity[g];
+            sColor[lid] = colors[g];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint n = min(batch, range.y - base);
+        if (!done) {
+            for (uint j = 0; j < n; ++j) {
+                float2 d = sMean[j] - p;
+                float4 co = sConic[j];
+                float sigma = 0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) + co.y * d.x * d.y;
+                if (sigma < 0.0f) continue;
+                float alpha = min(0.999f, co.w * exp(-sigma));
+                if (alpha < (1.0f / 255.0f)) continue;
+                float nextT = T * (1.0f - alpha);
+                if (nextT <= 1.0e-4f) {
+                    done = true;
+                    break;
+                }
+                rgb += sColor[j].xyz * (alpha * T);
+                T = nextT;
+            }
+        }
+        if (done && !counted) {
+            counted = true;
+            atomic_fetch_add_explicit(&doneCount, 1u, memory_order_relaxed);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (atomic_load_explicit(&doneCount, memory_order_relaxed) >= batch) {
+            break;
+        }
+    }
+
+    if (inside) {
+        float3 outRGB = rgb + T * u.background.xyz;
+        outTexture.write(float4(outRGB, 1.0f), uint2(px, py));
+    }
+}
