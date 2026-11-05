@@ -27,6 +27,14 @@ A native macOS app that reconstructs a high-quality 3D Gaussian Splatting scene 
 | 15 | SH / opacity | SH degree **1** by default (inspector allows 0–3, warning ≥ 2). Periodic opacity reset **off** (`opacity_reset_interval = 0`). |
 | 16 | Export | `.ply` (standard 3DGS layout), `.splat`, `.spz` — all implemented natively in Swift (`.spz` via Apple's Compression framework). |
 | 17 | Viewer | Uses the **same tile-based forward rasterizer** as training, so preview and result are identical. |
+| 18 | GPU parameter storage | **SoA** `GaussianBuffers` with capacity and count (one buffer per group); Adam m/v use the same layout; initial capacity `min(cap, max(2·n₀, 65 536))`; densification via scan + per-group scatter and blit-back, growth ×1.5 only at densify boundaries (Phase 3 plan D1, D2). |
+| 19 | Optimizer | **Adam** (PyTorch form with bias correction, ε 1e-15), gsplat default learning rates, position LR × scene radius with exponential decay, SH DC and rest on separate rates. No optimizer state in checkpoints (D5, D11). |
+| 20 | Photometric loss | **L1 + D-SSIM** (λ 0.2, 11×11 σ 1.5 separable window, zero padding), sRGB values without linearization (D6, D7). |
+| 21 | Densification | gsplat-style strategy semantics (gradient threshold 2e-4 in NDC-scaled pixels, clone/split at 0.01·R, prune opacity 0.005, prune scale 0.1·R after iteration 3 000); **prune is decided on the parent, before growing**; deterministic budget demotion; the model is never emptied (D8). Deviation from gsplat, which grows first and prunes the grown set. |
+| 22 | Initialization | SfM points with 3-nearest-neighbour k-d-tree scales, opacity 0.1; random-cube fallback; no world normalization, a `SceneExtent` scales learning rates and thresholds instead (D9). |
+| 23 | Import | COLMAP binaries (SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, OPENCV with CPU undistortion; other models rejected with a clear error); ARKit JSON schema v1; intrinsics rescaled when the image size differs (same aspect within 1 %); all missing images are reported in one error (D10). |
+| 24 | Training concurrency | `TrainingSession` actor around a synchronous `GPUTrainer`; one command buffer per iteration, waiting only at log, densify, preview and final steps; progress as `AsyncStream`; previews are `GaussianCloud` snapshots, never shared GPU buffers (D4, D12). |
+| 25 | Memory budget formula | `16·P + 12·K + 340` bytes per Gaussian with `P = 11 + 3K` (756 B at SH 1), cap `0.6 × recommendedMaxWorkingSetSize`, configured maximum 1.5 M (D13). |
 
 ## Module layout (Swift package)
 
@@ -49,6 +57,7 @@ Tools/golden/          Python script generating golden cases with gsplat (not sh
 ```
 
 - Library modules use default (nonisolated) isolation; only the app target uses `@MainActor` default isolation.
+- CPU reference implementations of every training algorithm live in `SplatCore/Training/` and are verified on Linux; `SplatTraining` (macOS-only) wires the Metal kernels into `GPUTrainer` and `TrainingSession`. Image decoding via ImageIO lives in the app; `SplatIO` receives an injected decoder.
 - `SplatCore` and `SplatIO` use only the Swift stdlib + Foundation (stdlib `SIMD` types, no `simd` module), so they build and test on Linux — including the cloud container (`Tools/install-swift-linux.sh`).
 - Shaders ship as resources (`.copy("Shaders")`) and are compiled at runtime with `MTLCompileOptions.mathMode = .safe`. This makes `swift test` work on macOS without Xcode's `.metal` build step and keeps GPU results comparable to the CPU reference.
 - Phase 1 opens `.ply` / `.splat` directly as read-only documents; the `.gsproj` project document arrives with training in Phase 3.
@@ -59,7 +68,7 @@ Named *Phase* (not "M1…") to avoid confusion with chip names.
 
 1. **Viewer** — document app shell, Metal viewport, import and smooth rendering of `.ply` / `.splat`.
 2. **Differentiable rasterizer** — forward/backward kernels, CPU reference, gsplat goldens, finite-difference checks.
-3. **Training** — COLMAP/ARKit import, Adam, densification/pruning, training from SfM points.
+3. **Training** — COLMAP/ARKit import, Adam, densification/pruning, training from SfM points. *(Phase 3 core verified on CI; app integration in progress.)*
 4. **Sparse-view quality** — depth prior (Pearson + optional L1), dense depth init, pseudo-views, artifact regularizers, leave-one-out scheduling.
 5. **Editing & export** — brush tool for floaters in the viewport, `.ply` / `.splat` / `.spz` export.
 6. *(later)* **Pose-free** — MASt3R-style initialization via Core ML for uncalibrated images.
@@ -77,6 +86,11 @@ Named *Phase* (not "M1…") to avoid confusion with chip names.
 | Isolation pruning | k-NN distance outliers |
 | Pseudo-views | interpolated poses between training cameras, depth-regularized |
 | Early stopping | leave-one-out (held-out view: an interior/interpolating camera, not an extreme one), then full retrain |
+| Iterations | 10 000 (SH degree grows by one every 1 000 iterations) |
+| Densification | iterations 500–6 000, every 100 |
+| Maximum image side | 1 600 px (integer box downsampling, intrinsics scaled) |
+| Background | black |
+| Maximum Gaussians | 1.5 M, further limited by the memory budget |
 
 ## Memory budget (Unified Memory)
 
@@ -84,6 +98,8 @@ Per Gaussian during training: parameters + gradients + Adam m + Adam v = 4 × fl
 
 - SH 1: 23 floats → ~368 B per Gaussian
 - SH 3: 59 floats → ~944 B per Gaussian
+
+The measured budget per Gaussian is higher because of the renderer, statistics and densify scratch buffers (see decision 25: 756 B at SH 1, 1 476 B at SH 3).
 
 Plus tile binning/sort buffers. The budget is derived at runtime from `MTLDevice.recommendedMaxWorkingSetSize` and the SH degree; densification stops at the cap. 8 GB machines target roughly 1–2 M Gaussians; sparse-view scenes usually need a few hundred thousand.
 
@@ -98,15 +114,18 @@ Every feature must have a base-tier fallback.
 
 ## Project bundle (`.gsproj`)
 
+A `FileDocument` whose contents are a manifest plus relative-path files (all on `Data`, Linux-testable in `SplatIO`):
+
 ```
 Scene.gsproj/
-  manifest.json      version, settings, training parameters
+  manifest.json      formatVersion 1, source, training configuration, checkpoint record
   images/            copied input images (self-contained)
-  poses/             colmap/ (sparse/0) or arkit.json
-  depth/             cached depth maps
+  poses/colmap/      cameras.bin, images.bin, points3D.bin   (or poses/arkit.json)
   checkpoints/
-  exports/
+    latest.ply       standard 3DGS PLY, no optimizer state (resume restarts Adam)
 ```
+
+Newer `formatVersion`s are rejected. `depth/` and `exports/` are added by Phases 4 and 5.
 
 ## UI (Liquid Glass)
 
