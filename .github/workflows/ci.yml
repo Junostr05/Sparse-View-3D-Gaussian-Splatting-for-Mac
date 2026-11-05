@@ -21,3 +21,9 @@ jobs:
       - name: Test SplatKit (including SplatMetal)
         working-directory: SplatKit
         run: swift test
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build SparseSplat app
+        run: xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO

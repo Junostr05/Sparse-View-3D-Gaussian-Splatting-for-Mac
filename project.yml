@@ -1,0 +1,45 @@
+name: SparseSplat
+options:
+  deploymentTarget:
+    macOS: "26.0"
+packages:
+  SplatKit:
+    path: SplatKit
+targets:
+  SparseSplat:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: SplatKit
+        product: SplatCore
+      - package: SplatKit
+        product: SplatIO
+      - package: SplatKit
+        product: SplatMetal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.junostr05.SparseSplat
+        SWIFT_VERSION: "6.0"
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/SparseSplat.entitlements
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+schemes:
+  SparseSplat:
+    build:
+      targets:
+        SparseSplat: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
