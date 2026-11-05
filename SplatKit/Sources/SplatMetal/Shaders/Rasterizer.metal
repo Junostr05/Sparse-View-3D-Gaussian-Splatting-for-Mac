@@ -126,20 +126,22 @@ kernel void duplicateKeys(
     }
 }
 
-// ranges[tile] = (start, end) into the sorted arrays; untouched tiles keep (0, 0).
+// ranges[2*tile] = start, ranges[2*tile+1] = end into the sorted arrays; untouched tiles keep (0, 0).
+// Start and end are written as separate uints: they are usually written by different threads, and a
+// component store into a shared uint2 is not guaranteed to be free of read-modify-write races.
 kernel void tileRanges(
     device const ulong* keys [[buffer(0)]],
-    device uint2* ranges [[buffer(1)]],
+    device uint* ranges [[buffer(1)]],
     constant uint& total [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= total) return;
     uint tile = uint(keys[gid] >> 32);
     if (gid == 0u || uint(keys[gid - 1u] >> 32) != tile) {
-        ranges[tile].x = gid;
+        ranges[2u * tile] = gid;
     }
     if (gid == total - 1u || uint(keys[gid + 1u] >> 32) != tile) {
-        ranges[tile].y = gid + 1u;
+        ranges[2u * tile + 1u] = gid + 1u;
     }
 }
 
@@ -148,7 +150,7 @@ kernel void rasterizeTiles(
     device const float4* conicOpacity [[buffer(1)]],
     device const float4* colors [[buffer(2)]],
     device const uint* values [[buffer(3)]],
-    device const uint2* ranges [[buffer(4)]],
+    device const uint* ranges [[buffer(4)]],
     constant RasterUniforms& u [[buffer(5)]],
     texture2d<float, access::write> outTexture [[texture(0)]],
     uint2 tgid [[threadgroup_position_in_grid]],
@@ -165,7 +167,8 @@ kernel void rasterizeTiles(
     bool inside = px < u.info.x && py < u.info.y;
     float2 p = float2(float(px) + 0.5f, float(py) + 0.5f);
 
-    uint2 range = ranges[tgid.y * u.info.z + tgid.x];
+    uint tileIndex = tgid.y * u.info.z + tgid.x;
+    uint2 range = uint2(ranges[2u * tileIndex], ranges[2u * tileIndex + 1u]);
     const uint batch = uint(SPLAT_TILE * SPLAT_TILE);
 
     if (lid == 0u) {

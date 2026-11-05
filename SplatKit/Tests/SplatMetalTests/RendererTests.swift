@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import Testing
 import SplatCore
@@ -76,7 +77,9 @@ struct RendererTests {
         #expect(stats.tileIntersections == 0)
     }
 
-    @Test func benchmarkOneMillion() throws {
+    /// Real-hardware benchmark. Skipped on CI: the paravirtual GPU of hosted runners times out.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] == nil))
+    func benchmarkOneMillion() throws {
         let cloud = try makeRandomCloud(count: 1_000_000, depth: 2...8, scale: 0.01...0.1)
         let context = try makeTestContext()
         let renderer = try SplatRenderer(context: context, cloud: cloud)

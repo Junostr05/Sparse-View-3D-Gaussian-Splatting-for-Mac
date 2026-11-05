@@ -38,16 +38,16 @@ public final class SplatRenderer {
     private let opacityLogits: MTLBuffer
     private let shCoefficients: MTLBuffer
 
-    // Per-frame buffers, grow-only.
-    private var meanDepth: MTLBuffer?
-    private var conicOpacity: MTLBuffer?
-    private var colors: MTLBuffer?
-    private var tileRects: MTLBuffer?
-    private var tilesTouched: MTLBuffer?
-    private var offsets: MTLBuffer?
-    private var sortKeys: MTLBuffer?
-    private var sortValues: MTLBuffer?
-    private var tileRangeBuffer: MTLBuffer?
+    // Per-frame buffers, grow-only. Internal read access lets tests inspect the last frame.
+    private(set) var meanDepth: MTLBuffer?
+    private(set) var conicOpacity: MTLBuffer?
+    private(set) var colors: MTLBuffer?
+    private(set) var tileRects: MTLBuffer?
+    private(set) var tilesTouched: MTLBuffer?
+    private(set) var offsets: MTLBuffer?
+    private(set) var sortKeys: MTLBuffer?
+    private(set) var sortValues: MTLBuffer?
+    private(set) var tileRangeBuffer: MTLBuffer?
 
     public init(context: MetalContext, cloud: GaussianCloud) throws(MetalError) {
         self.context = context

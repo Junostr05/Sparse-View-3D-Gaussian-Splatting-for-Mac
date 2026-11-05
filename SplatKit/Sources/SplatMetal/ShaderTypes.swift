@@ -1,7 +1,7 @@
 /// Swift mirrors of the uniform structs in `Shaders/Common.metal`.
 /// Only `SIMD4<Float>` / `SIMD4<UInt32>` fields are used so the layouts match MSL exactly.
 
-/// MSL `ProjectUniforms`, 144 bytes.
+/// MSL `ProjectUniforms`, 128 bytes.
 struct ProjectUniforms {
     /// xyz: row 0 of the camera rotation, w: translation x.
     var rotRow0: SIMD4<Float>

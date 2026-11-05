@@ -78,7 +78,7 @@ struct SortTests {
     }
 
     @Test func shaderTypeLayoutsMatchMSL() {
-        #expect(MemoryLayout<ProjectUniforms>.size == 144)
+        #expect(MemoryLayout<ProjectUniforms>.size == 128)
         #expect(MemoryLayout<ProjectUniforms>.size % 16 == 0)
         #expect(MemoryLayout<DuplicateUniforms>.size == 16)
         #expect(MemoryLayout<RasterUniforms>.size == 32)

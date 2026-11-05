@@ -13,7 +13,7 @@ using namespace metal;
 #define SORT_BLOCK 2048
 #define SORT_SIMDGROUPS 8
 
-// Mirrors `ProjectUniforms` in ShaderTypes.swift (144 bytes).
+// Mirrors `ProjectUniforms` in ShaderTypes.swift (128 bytes).
 struct ProjectUniforms {
     float4 rotRow0;      // xyz: row 0 of R, w: t.x
     float4 rotRow1;      // xyz: row 1 of R, w: t.y
