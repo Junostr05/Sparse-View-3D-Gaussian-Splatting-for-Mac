@@ -31,22 +31,27 @@ A native macOS app that reconstructs a high-quality 3D Gaussian Splatting scene 
 ## Module layout (Swift package)
 
 ```
-Package.swift
-Sources/
-  SplatCore/      Math types, camera models, Gaussian parameter layout, CPU reference rasterizer (forward + backward)
-  SplatMetal/     Metal device/capabilities, buffers, .metal kernels (project, tile binning, radix sort, rasterize fwd/bwd, losses, Adam)
-  SplatIO/        COLMAP binary reader, ARKit capture import, .ply / .splat / .spz read+write, .gsproj bundle I/O
-  SplatDepth/     Core ML monocular depth (Depth Anything V2 Small), scale/shift alignment
-  SplatTraining/  Training loop, densify/prune, regularizers, pseudo-views, leave-one-out scheduler, progress AsyncStream
-Tests/
-  SplatCoreTests/      CPU reference vs. goldens, finite differences
-  SplatMetalTests/     Metal kernels vs. CPU reference and goldens (macOS only)
-  SplatIOTests/        Format round-trips
-App/                   SwiftUI app target (XcodeGen project.yml)
+project.yml            XcodeGen spec for the app (generates SparseSplat.xcodeproj, not committed)
+App/                   SwiftUI app target (@MainActor default isolation)
+SplatKit/
+  Package.swift
+  Sources/
+    SplatCore/      Math types, camera models, Gaussian parameter layout, CPU reference rasterizer (forward + backward)   [Linux + macOS]
+    SplatIO/        COLMAP binary reader, ARKit capture import, .ply / .splat / .spz read+write, .gsproj bundle I/O       [Linux + macOS]
+    SplatMetal/     Metal device/capabilities, buffers, Shaders/*.metal (project, tile binning, radix sort, rasterize fwd/bwd, losses, Adam)   [macOS]
+    SplatDepth/     Core ML monocular depth (Depth Anything V2 Small), scale/shift alignment                            [macOS]
+    SplatTraining/  Training loop, densify/prune, regularizers, pseudo-views, leave-one-out scheduler, progress AsyncStream
+  Tests/
+    SplatCoreTests/      CPU reference vs. goldens, finite differences
+    SplatIOTests/        Format parsing and round-trips
+    SplatMetalTests/     Metal kernels vs. CPU reference and goldens (macOS only)
 Tools/golden/          Python script generating golden cases with gsplat (not shipped)
 ```
 
-Note: `swift build` on the command line does not compile `.metal` files in packages. Kernel tests run through Xcode / `xcodebuild test`.
+- Library modules use default (nonisolated) isolation; only the app target uses `@MainActor` default isolation.
+- `SplatCore` and `SplatIO` use only the Swift stdlib + Foundation (stdlib `SIMD` types, no `simd` module), so they build and test on Linux — including the cloud container (`Tools/install-swift-linux.sh`).
+- Shaders ship as resources (`.copy("Shaders")`) and are compiled at runtime with `MTLCompileOptions.mathMode = .safe`. This makes `swift test` work on macOS without Xcode's `.metal` build step and keeps GPU results comparable to the CPU reference.
+- Phase 1 opens `.ply` / `.splat` directly as read-only documents; the `.gsproj` project document arrives with training in Phase 3.
 
 ## Phases
 
