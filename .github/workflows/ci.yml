@@ -21,9 +21,47 @@ jobs:
       - name: Test SplatKit (including SplatMetal)
         working-directory: SplatKit
         run: swift test
+      - name: Render viewport snapshots
+        working-directory: SplatKit
+        run: |
+          mkdir -p "$RUNNER_TEMP/snapshots"
+          SNAPSHOT_DIR="$RUNNER_TEMP/snapshots" swift test --filter SnapshotTests
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
       - name: Build SparseSplat app
         run: xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO
+      - name: Capture SparseSplat window (best effort)
+        continue-on-error: true
+        run: |
+          OUT="$RUNNER_TEMP/snapshots"
+          SAMPLE="$RUNNER_TEMP/sample.splat"
+          mkdir -p "$OUT"
+
+          PRODUCTS_DIR=$(xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -destination 'platform=macOS' -showBuildSettings CODE_SIGNING_ALLOWED=NO 2>/dev/null | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -n 1)
+          APP=""
+          if [ -n "$PRODUCTS_DIR" ] && [ -d "$PRODUCTS_DIR/SparseSplat.app" ]; then
+            APP="$PRODUCTS_DIR/SparseSplat.app"
+          fi
+          if [ -z "$APP" ]; then
+            APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name SparseSplat.app -path '*Debug*' -type d 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$APP" ]; then
+            echo "SparseSplat.app not found; skipping window capture"
+            exit 0
+          fi
+          echo "Using $APP"
+
+          python3 Tools/ci/make_sample_splat.py "$SAMPLE" 5000
+          open -a "$APP" "$SAMPLE" || echo "open failed"
+          sleep 8
+          screencapture -x "$OUT/app_window.png" || echo "screencapture failed"
+          osascript -e 'tell application "SparseSplat" to quit' 2>/dev/null || killall SparseSplat 2>/dev/null || true
+      - name: Upload viewport snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewport-snapshots
+          path: ${{ runner.temp }}/snapshots
+          retention-days: 14
