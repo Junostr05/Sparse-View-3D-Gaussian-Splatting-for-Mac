@@ -16,7 +16,7 @@
 - Gradient conventions (identical in CPU, Metal and goldens):
   - `α = min(0.999, o·exp(−σ))`: when the clamp is active (`o·exp(−σ) > 0.999`), the gradients to `o` and `σ` are 0.
   - `color = max(SH + 0.5, 0)`: per channel, gradient 0 where the clamp is active.
-  - Jacobian clamping of `x/z`, `y/z`: gradient of the clamped coordinate is 0 when clamped (the mean2D gradient still flows through `mean2D = f·x/z + c`, which is unclamped).
+  - Jacobian clamping: `tx = z·clamp(x/z, −limNeg, limPos)`. When clamped there is no gradient to `x`, but `dtx/dz = ±lim` (the true derivative, identical to torch autograd and verified by finite differences). The mean2D gradient still flows through `mean2D = f·x/z + c`, which is unclamped. The same holds for `ty`.
   - Gating decisions (culling, tile rect, `σ < 0`, `α < 1/255`, early termination) are treated as constants.
   - Gradients flow through the view direction of SH into the positions.
   - SH coefficients of bands above `min(shDegree, shDegreeLimit)` get gradient 0.
