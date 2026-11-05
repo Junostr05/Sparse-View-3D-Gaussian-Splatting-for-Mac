@@ -36,25 +36,39 @@ public enum SphericalHarmonics {
         var result = c0 * sh(0)
 
         guard degree >= 1 else { return result }
-        result += c1 * (-y * sh(1) + z * sh(2) - x * sh(3))
+        // Every band term is `scalar * coefficient`; the scalars are computed as plain
+        // Floats first so the type checker never sees long mixed SIMD/Float expressions.
+        let b1: [Float] = [-c1 * y, c1 * z, -c1 * x]
+        for i in 0..<3 { result += b1[i] * sh(1 + i) }
 
         guard degree >= 2 else { return result }
-        let xx = x * x, yy = y * y, zz = z * z
-        let xy = x * y, yz = y * z, xz = x * z
-        result += c2[0] * xy * sh(4)
-        result += c2[1] * yz * sh(5)
-        result += c2[2] * (2 * zz - xx - yy) * sh(6)
-        result += c2[3] * xz * sh(7)
-        result += c2[4] * (xx - yy) * sh(8)
+        let xx: Float = x * x, yy: Float = y * y, zz: Float = z * z
+        let xy: Float = x * y, yz: Float = y * z, xz: Float = x * z
+        let b2: [Float] = [
+            c2[0] * xy,
+            c2[1] * yz,
+            c2[2] * (2 * zz - xx - yy),
+            c2[3] * xz,
+            c2[4] * (xx - yy),
+        ]
+        for i in 0..<5 { result += b2[i] * sh(4 + i) }
 
         guard degree >= 3 else { return result }
-        result += c3[0] * y * (3 * xx - yy) * sh(9)
-        result += c3[1] * xy * z * sh(10)
-        result += c3[2] * y * (4 * zz - xx - yy) * sh(11)
-        result += c3[3] * z * (2 * zz - 3 * xx - 3 * yy) * sh(12)
-        result += c3[4] * x * (4 * zz - xx - yy) * sh(13)
-        result += c3[5] * z * (xx - yy) * sh(14)
-        result += c3[6] * x * (xx - 3 * yy) * sh(15)
+        let p9: Float = 3 * xx - yy
+        let p11: Float = 4 * zz - xx - yy
+        let p12: Float = 2 * zz - 3 * xx - 3 * yy
+        let p14: Float = xx - yy
+        let p15: Float = xx - 3 * yy
+        let b3: [Float] = [
+            c3[0] * y * p9,
+            c3[1] * xy * z,
+            c3[2] * y * p11,
+            c3[3] * z * p12,
+            c3[4] * x * p11,
+            c3[5] * z * p14,
+            c3[6] * x * p15,
+        ]
+        for i in 0..<7 { result += b3[i] * sh(9 + i) }
         return result
     }
 }
