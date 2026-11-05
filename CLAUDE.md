@@ -22,7 +22,8 @@ Guidance for Claude Code when working in this repository.
 5. **Approval & Gatekeeping:** Opus 5.5 cross-checks the code against repo standards. It will either issue precise correction guidelines back to the 5.5 workers or approve and execute the final commit.
 
 ### How this maps to Claude Code
-- Spawn workers with the `Agent` tool and set `model: "sonnet"` (builder) or `model: "haiku"` (scout/runner).
+- **Routing rule (user decision, overrides step 2 above):** code is written by **Haiku by default**. Use **Sonnet only when the orchestrator judges a task extremely complex** (e.g. GPU kernels with parallel sorting, hand-written gradients, code that cannot be compiled or tested in the cloud).
+- Spawn workers with the `Agent` tool and set `model: "haiku"` (default) or `model: "sonnet"` (extremely complex tasks only).
 - Every worker prompt must be self-contained (goal, files, constraints, expected output) and must say: *do not commit or push — return the diff/result.*
 - Only the orchestrator runs `git commit` / `git push`, after reviewing the worker output against the standards below.
 
@@ -66,9 +67,13 @@ Guidance for Claude Code when working in this repository.
 - No backward kernel is merged without these tests. A subtly wrong gradient does not crash — it silently trains worse.
 
 ## Build & verification
-- The cloud Claude Code container runs **Linux without Swift/Xcode/Metal**. Swift code cannot be compiled or run there — say so explicitly instead of claiming a build passed.
+- Swift 6.2 for Linux can be installed in the cloud container with `Tools/install-swift-linux.sh` (idempotent; it prints the `PATH` export line to use).
+- `SplatCore` and `SplatIO` build and test on Linux: `cd SplatKit && swift test`.
+- `SplatMetal` and the app are macOS-only — verified by the CI `macos` job or locally on a Mac. Shaders are compiled at runtime, so `swift test` also works on macOS without the Xcode Metal compiler.
+- App build: `xcodegen generate`, then `xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -destination 'platform=macOS' build`.
+- Library modules (`SplatCore`, `SplatIO`, `SplatMetal`) use nonisolated default isolation; only the app target uses `@MainActor` default isolation. Never set `defaultIsolation(MainActor.self)` on a library target.
+- Never claim a macOS/Metal build or test passed unless CI or a Mac actually ran it.
 - What *can* be checked in the cloud: the Liquid Glass linter (Python), Python tooling/scripts (golden generation), docs.
-- Real builds and tests happen locally on a Mac (`xcodegen generate`, then Xcode / `xcodebuild test`). `swift build` does not compile `.metal` files — kernel tests need Xcode. Concrete commands will be added once the project exists.
 
 ## Licensing (hard rules)
 - Repo is Apache-2.0.
