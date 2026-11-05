@@ -15,7 +15,7 @@ public final class MetalContext {
     public let queue: MTLCommandQueue
     public let library: MTLLibrary
 
-    static let shaderFiles = ["Common", "PrefixSum", "RadixSort", "Rasterizer"]
+    static let shaderFiles = ["Common", "PrefixSum", "RadixSort", "Rasterizer", "Backward"]
 
     init(device: MTLDevice, queue: MTLCommandQueue, library: MTLLibrary) {
         self.device = device
@@ -42,6 +42,7 @@ public final class MetalContext {
 
         let options = MTLCompileOptions()
         options.mathMode = .safe
+        options.languageVersion = .version3_0   // float atomics (atomic_fetch_add on atomic<float>) need MSL 3.0
         let library: MTLLibrary
         do {
             library = try device.makeLibrary(source: source, options: options)

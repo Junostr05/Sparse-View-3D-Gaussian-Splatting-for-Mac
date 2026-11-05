@@ -29,6 +29,8 @@ public final class SplatRenderer {
     private let duplicatePipeline: MTLComputePipelineState
     private let rangesPipeline: MTLComputePipelineState
     private let rasterPipeline: MTLComputePipelineState
+    private let rasterBackwardPipeline: MTLComputePipelineState
+    private let projectBackwardPipeline: MTLComputePipelineState
 
     private let count: Int
     private let shDegree: Int
@@ -48,6 +50,22 @@ public final class SplatRenderer {
     private(set) var sortKeys: MTLBuffer?
     private(set) var sortValues: MTLBuffer?
     private(set) var tileRangeBuffer: MTLBuffer?
+    /// Per pixel: transmittance after the last blended sample (written by `rasterizeTiles`).
+    private(set) var finalTransmittance: MTLBuffer?
+    /// Per pixel: sorted index one past the last blended sample, 0 if none.
+    private(set) var lastContributor: MTLBuffer?
+    /// Per Gaussian: 12 float accumulator slots used by `rasterizeBackward`.
+    private var gradientAccumulator: MTLBuffer?
+
+    /// What the backward pass needs from the most recent successful `render`.
+    private struct LastFrame {
+        var camera: Camera
+        var settings: RasterSettings
+        var tilesX: Int
+        var tilesY: Int
+        var total: Int
+    }
+    private var lastFrame: LastFrame?
 
     public init(context: MetalContext, cloud: GaussianCloud) throws(MetalError) {
         self.context = context
@@ -57,6 +75,8 @@ public final class SplatRenderer {
         duplicatePipeline = try context.makePipeline("duplicateKeys")
         rangesPipeline = try context.makePipeline("tileRanges")
         rasterPipeline = try context.makePipeline("rasterizeTiles", minThreads: Self.tileSize * Self.tileSize)
+        rasterBackwardPipeline = try context.makePipeline("rasterizeBackward", minThreads: Self.tileSize * Self.tileSize)
+        projectBackwardPipeline = try context.makePipeline("projectBackward")
 
         count = cloud.count
         shDegree = cloud.shDegree
@@ -79,6 +99,8 @@ public final class SplatRenderer {
 
     @discardableResult
     public func render(camera: Camera, settings: RasterSettings, to texture: MTLTexture) throws(MetalError) -> FrameStats {
+        // Cleared first so a failed or empty render never leaves a stale frame for `backward`.
+        lastFrame = nil
         let width = camera.width
         let height = camera.height
         guard width > 0, height > 0 else {
@@ -98,6 +120,8 @@ public final class SplatRenderer {
         let touchedBuffer = try context.ensureBuffer(&tilesTouched, length: n * 4)
         let offsetBuffer = try context.ensureBuffer(&offsets, length: n * 4)
         let rangeBuffer = try context.ensureBuffer(&tileRangeBuffer, length: tileCount * 8)
+        let finalTBuffer = try context.ensureBuffer(&finalTransmittance, length: width * height * 4)
+        let lastContributorBuffer = try context.ensureBuffer(&lastContributor, length: width * height * 4)
 
         var gpuSeconds = 0.0
         var total = 0
@@ -108,20 +132,7 @@ public final class SplatRenderer {
             guard let commandBufferA = context.queue.makeCommandBuffer() else {
                 throw .commandFailed("cannot create command buffer")
             }
-            let evalDegree = max(0, min(shDegree, settings.shDegreeLimit))
-            let rot = camera.rotation
-            let t = camera.translation
-            let c = camera.center
-            var uniforms = ProjectUniforms(
-                rotRow0: SIMD4(rot.c0.x, rot.c1.x, rot.c2.x, t.x),
-                rotRow1: SIMD4(rot.c0.y, rot.c1.y, rot.c2.y, t.y),
-                rotRow2: SIMD4(rot.c0.z, rot.c1.z, rot.c2.z, t.z),
-                camCenter: SIMD4(c.x, c.y, c.z, 0),
-                intrinsics: SIMD4(camera.fx, camera.fy, camera.cx, camera.cy),
-                limits: SIMD4(settings.nearPlane, settings.farPlane, settings.eps2D, 0),
-                counts: SIMD4(UInt32(n), UInt32(width), UInt32(height), UInt32(tilesX)),
-                shInfo: SIMD4(UInt32(tilesY), UInt32(evalDegree),
-                              UInt32(GaussianCloud.coefficientCount(degree: shDegree)), 0))
+            var uniforms = makeProjectUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY)
 
             let encoder = try context.makeComputeEncoder(commandBufferA)
             encoder.setComputePipelineState(projectPipeline)
@@ -199,10 +210,7 @@ public final class SplatRenderer {
         }
 
         do {
-            let bg = settings.background
-            var rasterUniforms = RasterUniforms(
-                background: SIMD4(bg.x, bg.y, bg.z, 0),
-                info: SIMD4(UInt32(width), UInt32(height), UInt32(tilesX), UInt32(tilesY)))
+            var rasterUniforms = makeRasterUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY)
             let encoder = try context.makeComputeEncoder(commandBufferB)
             encoder.setComputePipelineState(rasterPipeline)
             encoder.setBuffer(meanDepthBuffer, offset: 0, index: 0)
@@ -212,6 +220,8 @@ public final class SplatRenderer {
             encoder.setBuffer(rangeBuffer, offset: 0, index: 4)
             encoder.setBytes(&rasterUniforms, length: MemoryLayout<RasterUniforms>.size, index: 5)
             encoder.setTexture(texture, index: 0)
+            encoder.setBuffer(finalTBuffer, offset: 0, index: 6)
+            encoder.setBuffer(lastContributorBuffer, offset: 0, index: 7)
             encoder.dispatchThreadgroups(MTLSize(width: tilesX, height: tilesY, depth: 1),
                                          threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
             encoder.endEncoding()
@@ -221,6 +231,8 @@ public final class SplatRenderer {
         commandBufferB.waitUntilCompleted()
         try Self.check(commandBufferB)
         gpuSeconds += commandBufferB.gpuEndTime - commandBufferB.gpuStartTime
+
+        lastFrame = LastFrame(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY, total: total)
 
         return FrameStats(gpuTimeMilliseconds: gpuSeconds * 1000.0,
                           visibleGaussians: visible,
@@ -261,5 +273,145 @@ public final class SplatRenderer {
         if commandBuffer.status == .error {
             throw .commandFailed(commandBuffer.error?.localizedDescription ?? "unknown GPU error")
         }
+    }
+
+    private func makeProjectUniforms(camera: Camera, settings: RasterSettings,
+                                     tilesX: Int, tilesY: Int) -> ProjectUniforms {
+        let evalDegree = max(0, min(shDegree, settings.shDegreeLimit))
+        let rot = camera.rotation
+        let t = camera.translation
+        let c = camera.center
+        return ProjectUniforms(
+            rotRow0: SIMD4(rot.c0.x, rot.c1.x, rot.c2.x, t.x),
+            rotRow1: SIMD4(rot.c0.y, rot.c1.y, rot.c2.y, t.y),
+            rotRow2: SIMD4(rot.c0.z, rot.c1.z, rot.c2.z, t.z),
+            camCenter: SIMD4(c.x, c.y, c.z, 0),
+            intrinsics: SIMD4(camera.fx, camera.fy, camera.cx, camera.cy),
+            limits: SIMD4(settings.nearPlane, settings.farPlane, settings.eps2D, 0),
+            counts: SIMD4(UInt32(count), UInt32(camera.width), UInt32(camera.height), UInt32(tilesX)),
+            shInfo: SIMD4(UInt32(tilesY), UInt32(evalDegree),
+                          UInt32(GaussianCloud.coefficientCount(degree: shDegree)), 0))
+    }
+
+    private func makeRasterUniforms(camera: Camera, settings: RasterSettings,
+                                    tilesX: Int, tilesY: Int) -> RasterUniforms {
+        let bg = settings.background
+        return RasterUniforms(
+            background: SIMD4(bg.x, bg.y, bg.z, 0),
+            info: SIMD4(UInt32(camera.width), UInt32(camera.height), UInt32(tilesX), UInt32(tilesY)))
+    }
+}
+
+extension SplatRenderer {
+    /// Encodes the backward pass for the most recent `render` call (same camera and settings).
+    ///
+    /// - Parameter imageGradient: `dL/dpixel` as `width·height` RGBA floats (A ignored).
+    /// - Parameter gradients: destination buffers for this cloud's `count` Gaussians.
+    ///
+    /// The accumulator and the gradient buffers are zeroed on the GPU first. When no tile is
+    /// intersected, the gradients stay zero and no kernel is dispatched.
+    public func encodeBackward(imageGradient: MTLBuffer, into gradients: GradientBuffers,
+                               commandBuffer: MTLCommandBuffer) throws(MetalError) {
+        guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
+        guard gradients.count == count, gradients.shDegree == shDegree else {
+            throw .commandFailed("gradient buffers do not match the cloud")
+        }
+        let width = frame.camera.width
+        let height = frame.camera.height
+        guard imageGradient.length >= width * height * 4 * MemoryLayout<Float>.size else {
+            throw .commandFailed("imageGradient must hold width·height RGBA floats")
+        }
+        let accumulator = try context.ensureBuffer(
+            &gradientAccumulator, length: count * 12 * MemoryLayout<Float>.size)
+
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw .commandFailed("cannot create blit encoder")
+        }
+        blit.fill(buffer: accumulator, range: 0..<accumulator.length, value: 0)
+        for buffer in [gradients.positions, gradients.logScales, gradients.rotations,
+                       gradients.opacityLogits, gradients.sh] {
+            blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0)
+        }
+        blit.endEncoding()
+
+        guard frame.total > 0, count > 0 else { return }
+        guard let meanDepthBuffer = meanDepth, let conicBuffer = conicOpacity, let colorBuffer = colors,
+              let touchedBuffer = tilesTouched, let valueBuffer = sortValues,
+              let rangeBuffer = tileRangeBuffer, let finalTBuffer = finalTransmittance,
+              let lastBuffer = lastContributor else {
+            throw .commandFailed("forward buffers are missing")
+        }
+
+        // Pixel stage: one threadgroup per tile, same layout as the forward rasterizer.
+        var rasterUniforms = makeRasterUniforms(camera: frame.camera, settings: frame.settings,
+                                                tilesX: frame.tilesX, tilesY: frame.tilesY)
+        let rasterEncoder = try context.makeComputeEncoder(commandBuffer)
+        rasterEncoder.setComputePipelineState(rasterBackwardPipeline)
+        rasterEncoder.setBuffer(meanDepthBuffer, offset: 0, index: 0)
+        rasterEncoder.setBuffer(conicBuffer, offset: 0, index: 1)
+        rasterEncoder.setBuffer(colorBuffer, offset: 0, index: 2)
+        rasterEncoder.setBuffer(valueBuffer, offset: 0, index: 3)
+        rasterEncoder.setBuffer(rangeBuffer, offset: 0, index: 4)
+        rasterEncoder.setBytes(&rasterUniforms, length: MemoryLayout<RasterUniforms>.size, index: 5)
+        rasterEncoder.setBuffer(imageGradient, offset: 0, index: 6)
+        rasterEncoder.setBuffer(finalTBuffer, offset: 0, index: 7)
+        rasterEncoder.setBuffer(lastBuffer, offset: 0, index: 8)
+        rasterEncoder.setBuffer(accumulator, offset: 0, index: 9)
+        rasterEncoder.dispatchThreadgroups(
+            MTLSize(width: frame.tilesX, height: frame.tilesY, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
+        rasterEncoder.endEncoding()
+
+        // Gaussian stage: one thread per Gaussian, chain rule to the stored parameters.
+        var projectUniforms = makeProjectUniforms(camera: frame.camera, settings: frame.settings,
+                                                  tilesX: frame.tilesX, tilesY: frame.tilesY)
+        let projectEncoder = try context.makeComputeEncoder(commandBuffer)
+        projectEncoder.setComputePipelineState(projectBackwardPipeline)
+        projectEncoder.setBuffer(positions, offset: 0, index: 0)
+        projectEncoder.setBuffer(logScales, offset: 0, index: 1)
+        projectEncoder.setBuffer(rotations, offset: 0, index: 2)
+        projectEncoder.setBuffer(opacityLogits, offset: 0, index: 3)
+        projectEncoder.setBuffer(shCoefficients, offset: 0, index: 4)
+        projectEncoder.setBuffer(accumulator, offset: 0, index: 5)
+        projectEncoder.setBuffer(touchedBuffer, offset: 0, index: 6)
+        projectEncoder.setBuffer(gradients.positions, offset: 0, index: 7)
+        projectEncoder.setBuffer(gradients.logScales, offset: 0, index: 8)
+        projectEncoder.setBuffer(gradients.rotations, offset: 0, index: 9)
+        projectEncoder.setBuffer(gradients.opacityLogits, offset: 0, index: 10)
+        projectEncoder.setBuffer(gradients.sh, offset: 0, index: 11)
+        projectEncoder.setBytes(&projectUniforms, length: MemoryLayout<ProjectUniforms>.size, index: 12)
+        MetalContext.dispatch1D(projectEncoder, pipeline: projectBackwardPipeline, count: count)
+        projectEncoder.endEncoding()
+    }
+
+    /// Gradients of `L = Σ imageGradient · image` with respect to every Gaussian parameter, for the
+    /// most recent `render` call. Synchronous: waits for the GPU.
+    public func backward(imageGradient: [SIMD3<Float>]) throws(MetalError) -> GaussianGradients {
+        guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
+        let pixelCount = frame.camera.width * frame.camera.height
+        guard imageGradient.count == pixelCount else {
+            throw .commandFailed("imageGradient must hold \(pixelCount) pixels")
+        }
+
+        let gradientImage = try context.makeBuffer(length: pixelCount * 4 * MemoryLayout<Float>.size)
+        if pixelCount > 0 {
+            let pointer = gradientImage.contents().bindMemory(to: Float.self, capacity: pixelCount * 4)
+            for i in 0..<pixelCount {
+                pointer[4 * i] = imageGradient[i].x
+                pointer[4 * i + 1] = imageGradient[i].y
+                pointer[4 * i + 2] = imageGradient[i].z
+                pointer[4 * i + 3] = 0
+            }
+        }
+
+        let gradients = try GradientBuffers(context: context, count: count, shDegree: shDegree)
+        guard let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw .commandFailed("cannot create command buffer")
+        }
+        try encodeBackward(imageGradient: gradientImage, into: gradients, commandBuffer: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try Self.check(commandBuffer)
+        return gradients.toGaussianGradients(count: count, shDegree: shDegree)
     }
 }

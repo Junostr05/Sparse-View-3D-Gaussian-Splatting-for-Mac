@@ -153,6 +153,8 @@ kernel void rasterizeTiles(
     device const uint* ranges [[buffer(4)]],
     constant RasterUniforms& u [[buffer(5)]],
     texture2d<float, access::write> outTexture [[texture(0)]],
+    device float* outFinalT [[buffer(6)]],
+    device uint* outLastContributor [[buffer(7)]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tid [[thread_position_in_threadgroup]],
     uint lid [[thread_index_in_threadgroup]])
@@ -178,6 +180,7 @@ kernel void rasterizeTiles(
 
     float3 rgb = float3(0.0f);
     float T = 1.0f;
+    uint lastContributor = 0u;
     bool done = !inside;
     bool counted = false;
 
@@ -208,6 +211,7 @@ kernel void rasterizeTiles(
                 }
                 rgb += sColor[j].xyz * (alpha * T);
                 T = nextT;
+                lastContributor = base + j + 1u;
             }
         }
         if (done && !counted) {
@@ -223,5 +227,10 @@ kernel void rasterizeTiles(
     if (inside) {
         float3 outRGB = rgb + T * u.background.xyz;
         outTexture.write(float4(outRGB, 1.0f), uint2(px, py));
+        // Training state for the backward pass: transmittance after the last blended sample and
+        // the exclusive sorted index one past it (0 when nothing was blended).
+        uint pixel = py * u.info.x + px;
+        outFinalT[pixel] = T;
+        outLastContributor[pixel] = lastContributor;
     }
 }

@@ -13,6 +13,16 @@ public struct GaussianGradients: Sendable, Equatable {
     /// n·K·3 with K = (cloud.shDegree + 1)², layout [i][k][c].
     public var sh: [Float]
 
+    /// Gradients from explicit arrays, laid out as in `GaussianCloud`.
+    public init(positions: [Float], logScales: [Float], rotations: [Float],
+                opacityLogits: [Float], sh: [Float]) {
+        self.positions = positions
+        self.logScales = logScales
+        self.rotations = rotations
+        self.opacityLogits = opacityLogits
+        self.sh = sh
+    }
+
     /// All-zero gradients sized for `cloud`.
     public init(zeroLike cloud: GaussianCloud) {
         let n = cloud.count
