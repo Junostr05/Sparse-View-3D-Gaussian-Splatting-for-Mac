@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+
+# Python tooling
+__pycache__/
+*.pyc
+.venv/
+
+# Datasets & trained scenes (keep out of git)
+data/
+datasets/
+outputs/
+*.ply
+*.splat
+
+# Secrets
+.env
