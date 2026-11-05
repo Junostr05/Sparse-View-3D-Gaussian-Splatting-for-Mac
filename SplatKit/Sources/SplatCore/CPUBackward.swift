@@ -98,6 +98,17 @@ private struct ScreenSpaceGradient {
     var mean2D = SIMD2<Double>.zero
 }
 
+/// Result of a backward pass together with the screen-space gradients that densification
+/// statistics are built from.
+public struct ScreenSpaceBackward: Sendable {
+    /// Gradients with respect to the stored Gaussian parameters.
+    public var gradients: GaussianGradients
+    /// `dL/dmean2D` in pixels, one entry per Gaussian of the input cloud (zero where not visible).
+    public var mean2D: [SIMD2<Float>]
+    /// True for Gaussians that were projected and whose tile rectangle is non-empty.
+    public var visible: [Bool]
+}
+
 extension CPURasterizer {
     /// Gradients of `L = Σ imageGradient · image` with respect to every Gaussian parameter.
     ///
@@ -106,6 +117,16 @@ extension CPURasterizer {
                                 camera: Camera,
                                 settings: RasterSettings,
                                 imageGradient: [SIMD3<Float>]) -> GaussianGradients {
+        backwardWithScreenSpace(cloud, camera: camera, settings: settings,
+                                imageGradient: imageGradient).gradients
+    }
+
+    /// Same computation as `backward`, additionally returning `dL/dmean2D` and the visibility
+    /// of every Gaussian. `gradients` is bit-identical to `backward`.
+    public static func backwardWithScreenSpace(_ cloud: GaussianCloud,
+                                               camera: Camera,
+                                               settings: RasterSettings,
+                                               imageGradient: [SIMD3<Float>]) -> ScreenSpaceBackward {
         precondition(imageGradient.count == camera.width * camera.height,
                      "imageGradient must hold width·height pixels")
 
@@ -144,14 +165,19 @@ extension CPURasterizer {
             }
         }
 
-        // Per-Gaussian chain rule.
+        // Per-Gaussian chain rule. Screen-space gradients are also reported per cloud index;
+        // culled Gaussians are not visible and keep zero.
         var gradients = GaussianGradients(zeroLike: cloud)
+        var mean2D = [SIMD2<Float>](repeating: .zero, count: cloud.count)
+        var visible = [Bool](repeating: false, count: cloud.count)
         for (k, entry) in sorted.enumerated() {
             let chain = GaussianChain(cloud: cloud, index: entry.index, camera: camera,
                                       settings: settings)
             chain.propagate(screen[k], into: &gradients)
+            mean2D[entry.index] = SIMD2(Float(screen[k].mean2D.x), Float(screen[k].mean2D.y))
+            visible[entry.index] = true
         }
-        return gradients
+        return ScreenSpaceBackward(gradients: gradients, mean2D: mean2D, visible: visible)
     }
 }
 
