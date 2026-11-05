@@ -63,6 +63,7 @@ Guidance for Claude Code when working in this repository.
 - `@Observable` models; `@State` owns them at the root; pass down via environment or plain properties.
 - No `DispatchQueue` for new code — use structured concurrency. Long-running training/optimization runs off the main actor and reports progress via `AsyncStream`.
 - Keep heavy GPU state (buffers, pipelines) out of observed properties (`@ObservationIgnored`) to avoid view-update cascades.
+- **Type-checker timeouts:** Xcode's Swift type checker rejects expressions that the Linux toolchain accepts (seen with long mixed SIMD/Float arithmetic and with `map { SIMD3(Float(...) / 255, ...) }` closures). Write numeric code and test fixtures with explicitly typed `let` steps and loops; a green Linux `swift test` does not prove the macOS build compiles.
 - Accessibility: every icon-only control gets an accessibility label; respect Reduce Motion for viewport animations.
 
 ## Gradient correctness (non-negotiable)
