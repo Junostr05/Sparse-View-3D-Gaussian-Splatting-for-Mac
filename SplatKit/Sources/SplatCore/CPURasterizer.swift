@@ -19,21 +19,7 @@ public enum CPURasterizer {
     public static func render(_ cloud: GaussianCloud,
                               camera: Camera,
                               settings: RasterSettings) -> RGBImage {
-        // Project everything, keeping the original index for the tie-break.
-        var projected: [(index: Int, gaussian: ProjectedGaussian)] = []
-        projected.reserveCapacity(cloud.count)
-        for i in 0..<cloud.count {
-            if let g = Projection.project(cloud, index: i, camera: camera, settings: settings) {
-                projected.append((i, g))
-            }
-        }
-        // Ascending depth, ties by ascending index.
-        projected.sort { lhs, rhs in
-            if lhs.gaussian.depth != rhs.gaussian.depth {
-                return lhs.gaussian.depth < rhs.gaussian.depth
-            }
-            return lhs.index < rhs.index
-        }
+        let projected = projectedAndSorted(cloud, camera: camera, settings: settings)
 
         let width = camera.width
         let height = camera.height
@@ -73,5 +59,27 @@ public enum CPURasterizer {
         }
 
         return RGBImage(width: width, height: height, pixels: pixels)
+    }
+
+    /// Projects every Gaussian, drops culled ones and sorts by ascending depth
+    /// (ties by ascending original index).
+    static func projectedAndSorted(_ cloud: GaussianCloud,
+                                   camera: Camera,
+                                   settings: RasterSettings)
+        -> [(index: Int, gaussian: ProjectedGaussian)] {
+        var projected: [(index: Int, gaussian: ProjectedGaussian)] = []
+        projected.reserveCapacity(cloud.count)
+        for i in 0..<cloud.count {
+            if let g = Projection.project(cloud, index: i, camera: camera, settings: settings) {
+                projected.append((i, g))
+            }
+        }
+        projected.sort { lhs, rhs in
+            if lhs.gaussian.depth != rhs.gaussian.depth {
+                return lhs.gaussian.depth < rhs.gaussian.depth
+            }
+            return lhs.index < rhs.index
+        }
+        return projected
     }
 }
