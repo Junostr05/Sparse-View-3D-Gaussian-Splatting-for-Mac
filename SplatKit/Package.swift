@@ -15,6 +15,7 @@ var targets: [Target] = [
 
 #if os(macOS)
 products.append(.library(name: "SplatMetal", targets: ["SplatMetal"]))
+products.append(.library(name: "SplatTraining", targets: ["SplatTraining"]))
 targets += [
     .target(
         name: "SplatMetal",
@@ -25,6 +26,15 @@ targets += [
         name: "SplatMetalTests",
         dependencies: ["SplatMetal", "SplatCore"],
         resources: [.copy("Fixtures")]
+    ),
+    // Phase 3 Task 15. Nonisolated default isolation: never set defaultIsolation(MainActor.self) here.
+    .target(
+        name: "SplatTraining",
+        dependencies: ["SplatCore", "SplatMetal"]
+    ),
+    .testTarget(
+        name: "SplatTrainingTests",
+        dependencies: ["SplatTraining", "SplatMetal", "SplatCore"]
     ),
 ]
 #endif
