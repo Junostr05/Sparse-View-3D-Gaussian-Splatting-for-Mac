@@ -32,13 +32,15 @@ Guidance for Claude Code when working in this repository.
 
 **Sparse-View 3D Gaussian Splatting for Mac** — a native macOS app that reconstructs a 3D Gaussian Splatting scene from only a few input images and renders/inspects it interactively on Apple Silicon.
 
-> Status: repository just initialized. Architecture, training backend and data pipeline are **not decided yet** — see *Open decisions*. Do not assume a structure; resolve it with the user first (use the `grill-me` skill).
+> Status: design agreed, no code yet. **`docs/ARCHITECTURE.md` is the source of truth** for all decisions (decision log, modules, phases, defaults). Read it before any implementation work. Changing a recorded decision requires asking the user first (use the `grill-me` skill).
 
 ## Tech stack (target)
-- **Platform:** macOS 26+ on Apple Silicon.
+- **Platform:** macOS 26+ (macOS 27 APIs gated with `#available`) on Apple Silicon. Baseline M1 / 8 GB with an adaptive Gaussian budget; M3+ extras (`MTLGPUFamily.apple9`, hardware ray tracing) enabled at runtime, always with a base-tier fallback.
 - **Language:** Swift 6.2, strict concurrency, `@MainActor` default isolation. Check whether `NonisolatedNonsendingByDefault` (SE-0461) is enabled before reasoning about where `nonisolated async` code runs.
 - **UI:** SwiftUI with Apple's Liquid Glass design. AppKit (`NSViewRepresentable`, `NSWindow`) only where SwiftUI has no equivalent — e.g. hosting an `MTKView` for the 3D viewport.
-- **Rendering / compute:** Metal (splat rasterization, sorting, optimization kernels).
+- **Rendering / compute:** pure Metal compute — hand-written forward/backward kernels, GPU radix sort, Adam, losses. No autodiff framework. The viewer reuses the training forward rasterizer.
+- **App model:** document-based (`DocumentGroup`, `.gsproj` package).
+- **Layout:** local Swift package with modules `SplatCore`, `SplatMetal`, `SplatIO`, `SplatDepth`, `SplatTraining` + app target via XcodeGen (`project.yml`; never commit an `.xcodeproj`).
 - **Dependencies:** no third-party frameworks without asking. Apple's open-source Swift packages (`swift-collections`, `swift-algorithms`, `swift-async-algorithms`) are allowed.
 
 ## Skills to use
@@ -59,10 +61,19 @@ Guidance for Claude Code when working in this repository.
 - Keep heavy GPU state (buffers, pipelines) out of observed properties (`@ObservationIgnored`) to avoid view-update cascades.
 - Accessibility: every icon-only control gets an accessibility label; respect Reduce Motion for viewport animations.
 
+## Gradient correctness (non-negotiable)
+- Every backward kernel is checked three ways: against the Swift CPU reference, against gsplat goldens (`Tools/golden/`), and with finite differences.
+- No backward kernel is merged without these tests. A subtly wrong gradient does not crash — it silently trains worse.
+
 ## Build & verification
 - The cloud Claude Code container runs **Linux without Swift/Xcode/Metal**. Swift code cannot be compiled or run there — say so explicitly instead of claiming a build passed.
-- What *can* be checked in the cloud: the Liquid Glass linter (Python), Python tooling/scripts, docs.
-- Real builds and tests happen locally on a Mac (`xcodebuild` / Xcode). Build commands will be added here once the project structure exists.
+- What *can* be checked in the cloud: the Liquid Glass linter (Python), Python tooling/scripts (golden generation), docs.
+- Real builds and tests happen locally on a Mac (`xcodegen generate`, then Xcode / `xcodebuild test`). `swift build` does not compile `.metal` files — kernel tests need Xcode. Concrete commands will be added once the project exists.
+
+## Licensing (hard rules)
+- Repo is Apache-2.0.
+- **Never port code from `graphdeco-inria/gaussian-splatting`** or its rasterizer (non-commercial license). gsplat (Apache-2.0) is the allowed code reference; implement FSGS/SparseGS-style methods from the papers.
+- Only commercially usable models in the app bundle (Depth Anything V2 Small). Non-commercial models (MASt3R, larger Depth Anything) are optional user downloads, never shipped.
 
 ## Git
 - Never commit secrets, datasets, trained scenes (`*.ply`, `*.splat`) or large binaries — keep them out of git.
@@ -71,10 +82,5 @@ Guidance for Claude Code when working in this repository.
 ## Communication
 - The user writes in German — answer in German. Code, identifiers, comments and commit messages in English.
 
-## Open decisions
-- [ ] Training backend: native Metal kernels vs. MLX vs. Python/PyTorch-MPS pipeline driven by the app.
-- [ ] Camera pose estimation for sparse views (own SfM, COLMAP import, learned pose prior).
-- [ ] Sparse-view regularization approach (depth priors, monocular depth model, etc.).
-- [ ] Project layout: Xcode project vs. XcodeGen vs. Swift Package with app target.
-- [ ] Scene file formats for import/export (`.ply`, `.splat`, own format).
-- [ ] Minimum deployment target (26 only, or 27 APIs gated).
+## Phases
+Called *Phase 1…6* — never "M1…", which collides with chip names. 1 Viewer → 2 Differentiable rasterizer → 3 Training → 4 Sparse-view quality → 5 Editing & export → 6 Pose-free. Details in `docs/ARCHITECTURE.md`.
