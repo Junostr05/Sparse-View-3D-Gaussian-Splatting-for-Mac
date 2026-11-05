@@ -22,8 +22,11 @@ Guidance for Claude Code when working in this repository.
 5. **Approval & Gatekeeping:** Opus 5.5 cross-checks the code against repo standards. It will either issue precise correction guidelines back to the 5.5 workers or approve and execute the final commit.
 
 ### How this maps to Claude Code
-- **Routing rule (user decision 2026-11-05, overrides the roles above):** **Sonnet is the main model** — it orchestrates, implements, reviews and commits. **Opus is consulted only when something gets genuinely complicated**, e.g. planning data structures, GPU memory layouts, architecture or a hard design trade-off. Haiku is not used for code.
-- Spawn workers with the `Agent` tool and set `model: "sonnet"` (default for all implementation work) or `model: "opus"` (complex planning/design questions only).
+- **Routing rule (user decision 2026-11-05, overrides the roles above):**
+  - **Sonnet is the main model.** It orchestrates, reviews every worker result, runs the tests (locally on Linux, via CI for macOS/Metal), and is the only one that commits and pushes. If a result is wrong or a test fails, Sonnet sends it back to the worker with precise correction notes (or fixes small issues itself).
+  - **Haiku does the bulk of the coding.** All implementation work goes to Haiku workers by default.
+  - **Opus is consulted only for the most demanding tasks**, e.g. architecture, data structures, GPU memory layouts or a hard design trade-off — not for routine coding or review.
+- Spawn workers with the `Agent` tool and set `model: "haiku"` (default for implementation) or `model: "opus"` (architecture-level questions only).
 - Every worker prompt must be self-contained (goal, files, constraints, expected output) and must say: *do not commit or push — return the diff/result.*
 - Only the orchestrator runs `git commit` / `git push`, after reviewing the worker output against the standards below.
 
