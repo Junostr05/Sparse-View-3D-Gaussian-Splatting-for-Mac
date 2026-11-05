@@ -33,3 +33,6 @@ outputs/
 
 # Secrets
 .env
+
+# Claude Code agent worktrees
+.claude/worktrees/
