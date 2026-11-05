@@ -12,7 +12,7 @@ public final class GradientBuffers {
     public let sh: MTLBuffer
 
     /// Number of Gaussians the buffers can hold (the `count:` argument of `init`).
-    let capacity: Int
+    public let capacity: Int
     let shDegree: Int
 
     public init(context: MetalContext, count: Int, shDegree: Int) throws(MetalError) {

@@ -68,7 +68,7 @@ public final class SplatRenderer {
     /// Per pixel: sorted index one past the last blended sample, 0 if none.
     private(set) var lastContributor: MTLBuffer?
     /// Per Gaussian: 12 float accumulator slots used by `rasterizeBackward`.
-    private var gradientAccumulator: MTLBuffer?
+    private(set) var gradientAccumulator: MTLBuffer?
 
     /// What the backward pass needs from the most recent successful forward pass.
     private struct LastFrame {
@@ -343,11 +343,15 @@ extension SplatRenderer {
     ///
     /// - Parameter imageGradient: `dL/dpixel` as `width·height` RGBA floats (A ignored).
     /// - Parameter gradients: destination buffers; their capacity must be at least the store's count.
+    /// - Parameter statistics: when given, this view's screen-space gradient norms and visible counts are
+    ///   added to it (`accumulateDensifyStats`, after `rasterizeBackward`). The gradients do not change.
+    ///   Its capacity must be at least the store's count.
     ///
     /// Throws if the Gaussian count changed since the forward pass. The accumulator and the gradient
     /// buffers are zeroed on the GPU first. When no tile is intersected, the gradients stay zero and
-    /// no kernel is dispatched.
+    /// no kernel is dispatched (statistics are not touched either, since no Gaussian is visible).
     public func encodeBackward(imageGradient: MTLBuffer, into gradients: GradientBuffers,
+                               statistics: DensificationStatisticsBuffers? = nil,
                                commandBuffer: MTLCommandBuffer) throws(MetalError) {
         guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
         let store = gaussians
@@ -358,6 +362,9 @@ extension SplatRenderer {
             throw .commandFailed("gradient buffers do not match the cloud")
         }
         let n = store.count
+        if let statistics, statistics.capacity < n {
+            throw .commandFailed("statistics capacity \(statistics.capacity) is below the cloud count \(n)")
+        }
         let width = frame.camera.width
         let height = frame.camera.height
         guard imageGradient.length >= width * height * 4 * MemoryLayout<Float>.size else {
@@ -403,6 +410,12 @@ extension SplatRenderer {
             MTLSize(width: frame.tilesX, height: frame.tilesY, depth: 1),
             threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
         rasterEncoder.endEncoding()
+
+        // Statistics hook: reads the accumulator slots 7-8 that rasterizeBackward just wrote (serial encoders).
+        if let statistics {
+            try statistics.encodeAccumulate(accumulator: accumulator, tilesTouched: touchedBuffer, count: n,
+                                            width: width, height: height, commandBuffer: commandBuffer)
+        }
 
         // Gaussian stage: one thread per Gaussian, chain rule to the stored parameters.
         var projectUniforms = makeProjectUniforms(camera: frame.camera, settings: frame.settings,
