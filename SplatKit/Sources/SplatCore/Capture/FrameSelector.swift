@@ -128,3 +128,29 @@ public enum FrameSelector {
         return chosen.sorted().map { sorted[$0].index }
     }
 }
+
+/// How many of the candidate frames to use. User setting of the import pipeline.
+public enum FrameSelectionMode: Sendable, Equatable {
+    /// Pick `count` frames spread over the camera motion, preferring sharp ones (default 6).
+    case count(Int)
+    /// Use every candidate frame (honouring `minimumSpacing` if given).
+    case all
+
+    public static let defaultCount: Int = 6
+}
+
+extension FrameSelector {
+    /// Selects frames according to `mode`. `.all` returns every candidate sorted by time; with a
+    /// `minimumSpacing` it drops candidates that are too close to an already kept sharper-or-earlier one
+    /// using the same rules as `select(_:count:minimumSpacing:)`.
+    public static func select(_ candidates: [FrameCandidate],
+                              mode: FrameSelectionMode,
+                              minimumSpacing: Double = 0) -> [Int] {
+        switch mode {
+        case .count(let count):
+            return select(candidates, count: count, minimumSpacing: minimumSpacing)
+        case .all:
+            return select(candidates, count: candidates.count, minimumSpacing: minimumSpacing)
+        }
+    }
+}

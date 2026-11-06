@@ -196,3 +196,37 @@ func makeCandidates(times: [Double], sharpness: [Double]) -> [FrameCandidate] {
     let result: [Int] = FrameSelector.select(makeCandidates(times: times, sharpness: sharpness), count: 2)
     #expect(result == [0, 2])
 }
+
+// MARK: - Selection mode
+
+@Test func allModeReturnsEveryCandidateSortedByTime() {
+    var candidates: [FrameCandidate] = []
+    let times: [Double] = [3.0, 0.0, 2.0, 1.0, 4.0]
+    for (i, t) in times.enumerated() {
+        candidates.append(FrameCandidate(index: i, time: t, sharpness: Double(i)))
+    }
+    let all: [Int] = FrameSelector.select(candidates, mode: .all)
+    #expect(all == [1, 3, 2, 0, 4])
+}
+
+@Test func allModeWithSpacingDropsCloseFrames() {
+    var candidates: [FrameCandidate] = []
+    for i in 0..<10 {
+        candidates.append(FrameCandidate(index: i, time: Double(i) * 0.1, sharpness: 1.0))
+    }
+    let kept: [Int] = FrameSelector.select(candidates, mode: .all, minimumSpacing: 0.35)
+    // Spacing of 0.35 s over frames 0.1 s apart keeps every fourth frame at most.
+    #expect(kept.count <= 3)
+    #expect(kept.count >= 2)
+}
+
+@Test func countModeMatchesDirectCountCall() {
+    var candidates: [FrameCandidate] = []
+    for i in 0..<12 {
+        candidates.append(FrameCandidate(index: i, time: Double(i), sharpness: Double((i * 7) % 5)))
+    }
+    let viaMode: [Int] = FrameSelector.select(candidates, mode: .count(4))
+    let direct: [Int] = FrameSelector.select(candidates, count: 4)
+    #expect(viaMode == direct)
+    #expect(FrameSelectionMode.defaultCount == 6)
+}
