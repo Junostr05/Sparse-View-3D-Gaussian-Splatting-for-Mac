@@ -106,3 +106,26 @@ Notes for building P7:
 Measured with an ad-hoc signed test app: inside the App Sandbox a file the app writes gets `com.apple.quarantine`, and starting it fails with `EPERM` from the container and from temp; `/opt/homebrew/bin/colmap` fails the same way. Outside the sandbox an ad-hoc signed binary without quarantine runs; with quarantine it is killed (exit 137). So "download COLMAP on first launch" only works without the sandbox, which would change A4. Not tested with a Developer ID signed app.
 
 **User decision:** build P7 first and measure training quality on a held-out view against COLMAP poses. The sandbox stays, and no further COLMAP delivery work happens until then. A3 and A4 are unchanged for now and get decided again with that data. Options then: drop the sandbox and download, keep the sandbox with COLMAP folder import only, or the bundled XPC helper.
+
+## P7 result: Apple vs COLMAP poses, measured on training quality (2026-11-06)
+
+Setup: the 13 table photos as upright PNGs (EXIF stripped, as the import pipeline produces them), 450x600 after the loader's downsampling. Three views (`IMG_9014`, `IMG_9018`, `IMG_9022`) are held out of training; both pose sets come from all 13 images. 5 000 iterations, Standard preset schedule, SH 1. Metrics on the held-out views: mean PSNR and SSIM (decision A6). Seeds 0, 1, 2; numbers are means over the seeds (sd in brackets).
+
+| Poses and initial points | Held-out PSNR | Held-out SSIM | PSNR on 3 training views |
+|---|---|---|---|
+| COLMAP + its 1 418 points | **14.76** (0.07) | **0.389** | 32.60 |
+| Apple + its 543 points | 14.25 (0.31) | 0.354 | 30.22 |
+| COLMAP, random init (single run) | 12.42 | 0.377 | 32.40 |
+| Apple, random init (single run) | 12.99 | 0.350 | 30.85 |
+
+Findings:
+
+- COLMAP poses are better on this scene: +0.5 dB / +0.035 SSIM held-out and +2.4 dB on the training views. The gap exceeds the seed spread, but it is **one scene, 13 images, one phone**.
+- Apple's poses are usable, not equivalent. The training-view gap suggests small pose or intrinsics errors (Apple returns fx, fy, cx, cy but no distortion model in our import; COLMAP's SIMPLE_RADIAL fit had k1 = 0.02).
+- **The initial points matter more than the pose source:** both sources gain 1.3-2.3 dB held-out from any SfM point cloud over random initialisation, and Apple's much sparser cloud (543 points) is already enough for most of it.
+- Absolute held-out quality is low for both (about 14-15 dB): 10 training views of a glass table are the sparse-view regime that the rest of Phase 4 addresses (depth prior, dense init, regularizers). Pose errors are not the main limit.
+- Apple's pose estimation takes about 3-20 s here; COLMAP needs about 13 s on CPU (CI build: 805 s to build, 14 files, 3.8 MB closure; the licence gate passes).
+- Rotation convention: `R_c2w_colmap = R_apple_c2w · diag(1, -1, -1)` (0.27 degrees mean difference to COLMAP).
+- Not verified: the colour channel order of Apple's point cloud (`SIMD4<UInt8>`), video input, scenes with less texture, fewer views (6), and Apple without a point cloud.
+
+Consequence for A3/A4 (decision pending, not made here): the built-in Apple provider works and needs no signing, XPC or download, so the app can ship a pose stage without COLMAP. COLMAP stays worth having as the better first stage when it is available. Options: (1) Apple only plus the existing "Import COLMAP…" for users who run COLMAP themselves; (2) drop the sandbox and download our minimal build on first launch (needs the app to run unsandboxed, see the measurements above); (3) the XPC helper as in A4.
