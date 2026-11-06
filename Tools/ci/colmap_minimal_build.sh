@@ -58,9 +58,12 @@ if [ -d "$WORK_DIR/colmap" ]; then
 fi
 
 if [ $ok = 1 ]; then
+  step patch_colmap python3 "$SCRIPT_DIR/patch_colmap_no_cholmod.py" "$WORK_DIR/colmap" || ok=0
+fi
+if [ $ok = 1 ]; then
   step configure_colmap cmake -S "$WORK_DIR/colmap" -B "$WORK_DIR/colmap-build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX/colmap" \
-    -DGUI_ENABLED=OFF -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DCGAL_ENABLED=OFF -DOPENGL_ENABLED=OFF \
+    -DGUI_ENABLED=OFF -DMVS_ENABLED=OFF -DLSD_ENABLED=OFF -DDOWNLOAD_ENABLED=OFF -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DCGAL_ENABLED=OFF -DOPENGL_ENABLED=OFF \
     -DTESTS_ENABLED=OFF -DBUILD_SHARED_LIBS=ON \
     -DCMAKE_PREFIX_PATH="$PREFIX;$BREW" -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_INSTALL_RPATH='@loader_path/../lib' || ok=0
 fi
