@@ -100,3 +100,9 @@ Notes for building P7:
 - This compares camera centres only, not orientations, and says nothing about training quality yet.
 - `session.outputs` does not end after `.processingComplete`; the consumer must stop itself.
 - `.poses` returns no intrinsics. iPhone 15 Pro EXIF has `FocalLenIn35mmFilm = 35`. Against COLMAP's calibrated `fx = 1201.66` at 1200x900, the diagonal rule `f35 * diagonal_px / 43.27` gives 1213 (+1.0 %), the long-side rule `f35 * width / 36` gives 1167 (-2.9 %). **Use the diagonal rule** and store `f35` in `FrameProvenance` at import, because the import strips EXIF.
+
+## COLMAP delivery: measured, decision pending (user, 2026-11-06)
+
+Measured with an ad-hoc signed test app: inside the App Sandbox a file the app writes gets `com.apple.quarantine`, and starting it fails with `EPERM` from the container and from temp; `/opt/homebrew/bin/colmap` fails the same way. Outside the sandbox an ad-hoc signed binary without quarantine runs; with quarantine it is killed (exit 137). So "download COLMAP on first launch" only works without the sandbox, which would change A4. Not tested with a Developer ID signed app.
+
+**User decision:** build P7 first and measure training quality on a held-out view against COLMAP poses. The sandbox stays, and no further COLMAP delivery work happens until then. A3 and A4 are unchanged for now and get decided again with that data. Options then: drop the sandbox and download, keep the sandbox with COLMAP folder import only, or the bundled XPC helper.
