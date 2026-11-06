@@ -61,16 +61,181 @@ public struct DensificationPolicy: Codable, Sendable, Equatable {
     public var isEnabled: Bool { startIteration < stopIteration && interval > 0 }
 }
 
-/// Extension point for Phase 4 regularizers. Unused in Phase 3.
-public enum RegularizerKind: String, Codable, Sendable {
+/// Phase 4 features that can be switched off individually. The stored set is the source of truth.
+public enum RegularizerKind: String, Codable, Sendable, CaseIterable {
     case depthPearson
     case depthL1
     case anisotropy
     case scaleCap
     case isolationPrune
+    case pseudoViews
+}
+
+/// Strengths and gates of the depth prior (Phase 4 P4-P7).
+public struct DepthPriorSettings: Codable, Sendable, Equatable {
+    public var pearsonWeight: Float = 0.05
+    public var l1Weight: Float = 0.1
+    /// Pixels with rendered opacity below this are excluded from the depth terms.
+    public var alphaMask: Float = 0.3
+    public var minimumPixels = 64
+    public var startIteration = 0
+    public var minimumAlignmentPoints = 8
+    public var minimumInlierFraction: Float = 0.3
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = DepthPriorSettings()
+        pearsonWeight = try container.decodeIfPresent(Float.self, forKey: .pearsonWeight)
+            ?? defaults.pearsonWeight
+        l1Weight = try container.decodeIfPresent(Float.self, forKey: .l1Weight) ?? defaults.l1Weight
+        alphaMask = try container.decodeIfPresent(Float.self, forKey: .alphaMask) ?? defaults.alphaMask
+        minimumPixels = try container.decodeIfPresent(Int.self, forKey: .minimumPixels)
+            ?? defaults.minimumPixels
+        startIteration = try container.decodeIfPresent(Int.self, forKey: .startIteration)
+            ?? defaults.startIteration
+        minimumAlignmentPoints = try container.decodeIfPresent(Int.self, forKey: .minimumAlignmentPoints)
+            ?? defaults.minimumAlignmentPoints
+        minimumInlierFraction = try container.decodeIfPresent(Float.self, forKey: .minimumInlierFraction)
+            ?? defaults.minimumInlierFraction
+    }
+}
+
+/// Pseudo-view generation between neighbouring training cameras (Phase 4 P9).
+public struct PseudoViewSettings: Codable, Sendable, Equatable {
+    public var startIteration = 2_000
+    public var interval = 2
+    public var weight: Float = 0.05
+    /// Interpolated cameras per neighbouring pair (t = k / (perPair + 1)).
+    public var perPair = 3
+    public var resolutionDivisor = 2
+    public var maxAngleDegrees: Float = 60
+    public var minimumCoverage: Float = 0.3
+    public var minimumDepthFraction: Float = 0.2
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = PseudoViewSettings()
+        startIteration = try container.decodeIfPresent(Int.self, forKey: .startIteration)
+            ?? defaults.startIteration
+        interval = try container.decodeIfPresent(Int.self, forKey: .interval) ?? defaults.interval
+        weight = try container.decodeIfPresent(Float.self, forKey: .weight) ?? defaults.weight
+        perPair = try container.decodeIfPresent(Int.self, forKey: .perPair) ?? defaults.perPair
+        resolutionDivisor = try container.decodeIfPresent(Int.self, forKey: .resolutionDivisor)
+            ?? defaults.resolutionDivisor
+        maxAngleDegrees = try container.decodeIfPresent(Float.self, forKey: .maxAngleDegrees)
+            ?? defaults.maxAngleDegrees
+        minimumCoverage = try container.decodeIfPresent(Float.self, forKey: .minimumCoverage)
+            ?? defaults.minimumCoverage
+        minimumDepthFraction = try container.decodeIfPresent(Float.self, forKey: .minimumDepthFraction)
+            ?? defaults.minimumDepthFraction
+    }
+}
+
+/// Geometry regularizers: anisotropy, scale cap and isolation pruning (Phase 4 P10).
+public struct ArtifactRegularizerSettings: Codable, Sendable, Equatable {
+    public var anisotropyWeight: Float = 0.1
+    public var maxAxisRatio: Float = 10
+    /// × max(scene radius, distance to the extent centre).
+    public var scaleCapFraction: Float = 0.05
+    public var isolationNeighbors = 4
+    public var isolationFactor: Float = 8
+    public var isolationStartIteration = 1_000
+    public var isolationInterval = 500
+    public var isolationMaxFraction: Float = 0.05
+    public var isolationSampleCount = 2_048
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = ArtifactRegularizerSettings()
+        anisotropyWeight = try container.decodeIfPresent(Float.self, forKey: .anisotropyWeight)
+            ?? defaults.anisotropyWeight
+        maxAxisRatio = try container.decodeIfPresent(Float.self, forKey: .maxAxisRatio)
+            ?? defaults.maxAxisRatio
+        scaleCapFraction = try container.decodeIfPresent(Float.self, forKey: .scaleCapFraction)
+            ?? defaults.scaleCapFraction
+        isolationNeighbors = try container.decodeIfPresent(Int.self, forKey: .isolationNeighbors)
+            ?? defaults.isolationNeighbors
+        isolationFactor = try container.decodeIfPresent(Float.self, forKey: .isolationFactor)
+            ?? defaults.isolationFactor
+        isolationStartIteration = try container.decodeIfPresent(Int.self, forKey: .isolationStartIteration)
+            ?? defaults.isolationStartIteration
+        isolationInterval = try container.decodeIfPresent(Int.self, forKey: .isolationInterval)
+            ?? defaults.isolationInterval
+        isolationMaxFraction = try container.decodeIfPresent(Float.self, forKey: .isolationMaxFraction)
+            ?? defaults.isolationMaxFraction
+        isolationSampleCount = try container.decodeIfPresent(Int.self, forKey: .isolationSampleCount)
+            ?? defaults.isolationSampleCount
+    }
+}
+
+/// Dense depth-based point initialization (Phase 4 P8).
+public struct DenseInitSettings: Codable, Sendable, Equatable {
+    public var isEnabled = true
+    public var maxPoints = 150_000
+    public var edgeRatio: Float = 1.05
+    public var consistencyTolerance: Float = 0.05
+    public var includeSfMPoints = true
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = DenseInitSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        maxPoints = try container.decodeIfPresent(Int.self, forKey: .maxPoints) ?? defaults.maxPoints
+        edgeRatio = try container.decodeIfPresent(Float.self, forKey: .edgeRatio) ?? defaults.edgeRatio
+        consistencyTolerance = try container.decodeIfPresent(Float.self, forKey: .consistencyTolerance)
+            ?? defaults.consistencyTolerance
+        includeSfMPoints = try container.decodeIfPresent(Bool.self, forKey: .includeSfMPoints)
+            ?? defaults.includeSfMPoints
+    }
+}
+
+/// Leave-one-out early stopping (Phase 4 P11).
+public struct EarlyStoppingPolicy: Codable, Sendable, Equatable {
+    public var isEnabled = true
+    /// Below this many views the held-out view is not taken and no early stop runs.
+    public var minimumViews = 4
+    public var evalInterval = 250
+    public var patience = 4
+    public var minDelta: Double = 0.002
+    public var minimumIterations = 1_500
+    public var emaWeight: Double = 0.5
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = EarlyStoppingPolicy()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        minimumViews = try container.decodeIfPresent(Int.self, forKey: .minimumViews)
+            ?? defaults.minimumViews
+        evalInterval = try container.decodeIfPresent(Int.self, forKey: .evalInterval) ?? defaults.evalInterval
+        patience = try container.decodeIfPresent(Int.self, forKey: .patience) ?? defaults.patience
+        minDelta = try container.decodeIfPresent(Double.self, forKey: .minDelta) ?? defaults.minDelta
+        minimumIterations = try container.decodeIfPresent(Int.self, forKey: .minimumIterations)
+            ?? defaults.minimumIterations
+        emaWeight = try container.decodeIfPresent(Double.self, forKey: .emaWeight) ?? defaults.emaWeight
+    }
 }
 
 public struct TrainingConfiguration: Codable, Sendable, Equatable {
+    /// Revision 1 is Phase 3 (no revision key). Revision 2 is Phase 4 (P14): a manifest
+    /// without the key gets the new default regularizer set.
+    public static let currentRevision = 2
+
+    public var configurationRevision = TrainingConfiguration.currentRevision
     public var iterations = 10_000
     public var shDegree = 1
     public var shDegreeInterval = 1_000
@@ -87,12 +252,22 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var logInterval = 10
     public var evalInterval = 500
     public var previewInterval = 200
-    /// Phase 4 extension point.
-    public var regularizers: Set<RegularizerKind> = []
-    /// Phase 4 extension point (leave-one-out).
+    /// Phase 4 features switched on. Defaults to all of them (decision 14).
+    public var regularizers: Set<RegularizerKind> = Set(RegularizerKind.allCases)
+    /// Leave-one-out: names of views excluded from training and used for evaluation.
     public var heldOutViews: [String] = []
+    public var depthPrior = DepthPriorSettings()
+    public var pseudoViews = PseudoViewSettings()
+    public var artifacts = ArtifactRegularizerSettings()
+    public var denseInit = DenseInitSettings()
+    public var earlyStopping = EarlyStoppingPolicy()
 
     public init() {}
+
+    /// Whether a Phase 4 feature is switched on.
+    public func isEnabled(_ kind: RegularizerKind) -> Bool {
+        regularizers.contains(kind)
+    }
 
     /// Every key is optional; missing keys fall back to the defaults above.
     public init(from decoder: Decoder) throws {
@@ -127,10 +302,29 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
             ?? defaults.evalInterval
         previewInterval = try container.decodeIfPresent(Int.self, forKey: .previewInterval)
             ?? defaults.previewInterval
-        regularizers = try container.decodeIfPresent(Set<RegularizerKind>.self, forKey: .regularizers)
-            ?? defaults.regularizers
+        // Migration (P14): a manifest without the revision key was written by Phase 3, which
+        // always stored an empty regularizer set. Its stored value is ignored in favour of the
+        // Phase 4 default set, and the decoded revision becomes the current one.
+        if let storedRevision = try container.decodeIfPresent(Int.self, forKey: .configurationRevision) {
+            configurationRevision = storedRevision
+            regularizers = try container.decodeIfPresent(Set<RegularizerKind>.self, forKey: .regularizers)
+                ?? defaults.regularizers
+        } else {
+            configurationRevision = TrainingConfiguration.currentRevision
+            regularizers = defaults.regularizers
+        }
         heldOutViews = try container.decodeIfPresent([String].self, forKey: .heldOutViews)
             ?? defaults.heldOutViews
+        depthPrior = try container.decodeIfPresent(DepthPriorSettings.self, forKey: .depthPrior)
+            ?? defaults.depthPrior
+        pseudoViews = try container.decodeIfPresent(PseudoViewSettings.self, forKey: .pseudoViews)
+            ?? defaults.pseudoViews
+        artifacts = try container.decodeIfPresent(ArtifactRegularizerSettings.self, forKey: .artifacts)
+            ?? defaults.artifacts
+        denseInit = try container.decodeIfPresent(DenseInitSettings.self, forKey: .denseInit)
+            ?? defaults.denseInit
+        earlyStopping = try container.decodeIfPresent(EarlyStoppingPolicy.self, forKey: .earlyStopping)
+            ?? defaults.earlyStopping
     }
 
     /// SH degree in use at `iteration`: grows by one every `shDegreeInterval` iterations.

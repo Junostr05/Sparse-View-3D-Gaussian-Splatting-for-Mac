@@ -17,10 +17,10 @@ public struct TrainingView: Sendable {
     public var name: String
     public var camera: Camera
     public var image: RGBImage
-    /// Phase 4 extension point. Always `nil` in Phase 3.
-    public var depth: [Float]?
+    /// Depth prior for this view. `nil` when no depth is available or it was rejected.
+    public var depth: DepthPrior?
 
-    public init(name: String, camera: Camera, image: RGBImage, depth: [Float]? = nil) {
+    public init(name: String, camera: Camera, image: RGBImage, depth: DepthPrior? = nil) {
         self.name = name
         self.camera = camera
         self.image = image

@@ -12,7 +12,7 @@ import SplatCore
         #expect(config.densification.opacityResetInterval == 0)
         #expect(config.lambdaDSSIM == 0.2)
         #expect(config.iterations == 10_000)
-        #expect(config.regularizers.isEmpty)
+        #expect(config.regularizers == Set(RegularizerKind.allCases))
         #expect(config.heldOutViews.isEmpty)
     }
 
