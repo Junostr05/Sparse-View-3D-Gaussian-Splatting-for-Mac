@@ -129,3 +129,9 @@ Findings:
 - Not verified: the colour channel order of Apple's point cloud (`SIMD4<UInt8>`), video input, scenes with less texture, fewer views (6), and Apple without a point cloud.
 
 Consequence for A3/A4 (decision pending, not made here): the built-in Apple provider works and needs no signing, XPC or download, so the app can ship a pose stage without COLMAP. COLMAP stays worth having as the better first stage when it is available. Options: (1) Apple only plus the existing "Import COLMAP…" for users who run COLMAP themselves; (2) drop the sandbox and download our minimal build on first launch (needs the app to run unsandboxed, see the measurements above); (3) the XPC helper as in A4.
+
+## Decisions of 2026-11-06 (user, Mac session)
+
+1. **COLMAP delivery (A3/A4 changed):** Apple Photogrammetry is the built-in pose stage; COLMAP is only used through the existing "Import COLMAP…". No bundling, no download, no XPC, no signing work; P6 is dropped. The sandbox stays.
+2. **Depth alignment lives in `SplatDepth`** (as `docs/ARCHITECTURE.md` says), not in `SplatCore` as main-plan decision P13 proposed. Consequence: alignment, depth providers and depth preparation are macOS-only code with macOS tests; `SplatCore` keeps the depth types, the loss, dense init, pseudo-views and the trainer integration, which take already prepared `DepthPrior`s.
+3. **Isolation pruning runs on the CPU** at a wait point, as in main-plan P10.
