@@ -90,6 +90,41 @@ private func maxMagnitude(_ g: GaussianGradients) -> Double {
     return largest
 }
 
+/// Element-wise `factor * g`.
+private func scaleGradients(_ g: GaussianGradients, by factor: Float) -> GaussianGradients {
+    func scale(_ x: [Float]) -> [Float] {
+        x.map { $0 * factor }
+    }
+    return GaussianGradients(positions: scale(g.positions),
+                             logScales: scale(g.logScales),
+                             rotations: scale(g.rotations),
+                             opacityLogits: scale(g.opacityLogits),
+                             sh: scale(g.sh))
+}
+
+/// Names of the parameter arrays whose largest absolute difference from `reference` is more than `factor` times the
+/// comparison tolerance of that array: 1e-3 of the array's scale, floored at 1e-3 of the largest reference magnitude.
+private func arraysBeyondTolerance(_ actual: GaussianGradients, _ reference: GaussianGradients,
+                                   factor: Double) -> [String] {
+    let globalScale: Double = maxMagnitude(reference)
+    let pairs: [(String, [Float], [Float])] = [
+        ("positions", actual.positions, reference.positions),
+        ("logScales", actual.logScales, reference.logScales),
+        ("rotations", actual.rotations, reference.rotations),
+        ("opacityLogits", actual.opacityLogits, reference.opacityLogits),
+        ("sh", actual.sh, reference.sh),
+    ]
+    var names: [String] = []
+    for (name, a, r) in pairs {
+        let comparison = compareArrays(a, r)
+        let tolerance: Double = 1e-3 * max(comparison.scale, 1e-3 * globalScale)
+        if comparison.difference > factor * tolerance {
+            names.append(name)
+        }
+    }
+    return names
+}
+
 // MARK: - Tests
 
 @Suite(.serialized, .enabled(if: TrainingTestEnvironment.hasMetal))
@@ -129,7 +164,8 @@ struct GPUTrainerPseudoViewTests {
     }
 
     /// One step at iteration 0 (a pseudo step): the gradient read back from the GPU equals the CPU training-only
-    /// gradient plus the CPU pseudo-only gradient, relative 1e-3. The pseudo part must be a real contribution.
+    /// gradient plus the CPU pseudo-only gradient, relative 1e-3. The pseudo part must be a real contribution: at
+    /// least 1e-2 of the training gradient, and large enough that dropping it or counting it twice fails the check.
     @Test
     func pseudoIterationAccumulatesGradient() throws {
         let context = try MetalContext.makeDefault()
@@ -198,7 +234,83 @@ struct GPUTrainerPseudoViewTests {
         // The pseudo part must change the gradient, otherwise the agreement above proves nothing.
         let pseudoMagnitude = maxMagnitude(pseudoOnly)
         let trainingMagnitude = maxMagnitude(trainingOnly)
-        #expect(pseudoMagnitude > 1e-4 * trainingMagnitude, "pseudo gradient is negligible: \(pseudoMagnitude)")
+        let ratio = pseudoMagnitude / trainingMagnitude
+        #expect(ratio >= 1e-2, "pseudo gradient is negligible: \(pseudoMagnitude) against \(trainingMagnitude)")
+
+        // A dropped pseudo gradient must fail: the GPU result has to differ from the training-only reference by more
+        // than 10x the comparison tolerance in at least one array.
+        let droppedDifferences = arraysBeyondTolerance(readout.gradients, trainingOnly, factor: 10)
+        #expect(!droppedDifferences.isEmpty, "GPU gradient equals the training-only gradient: pseudo part dropped")
+
+        // A double-counted pseudo gradient must fail the same way against training + 2 x pseudo.
+        let doubled = sumGradients(trainingOnly, scaleGradients(pseudoOnly, by: 2))
+        let doubledDifferences = arraysBeyondTolerance(readout.gradients, doubled, factor: 10)
+        #expect(!doubledDifferences.isEmpty, "GPU gradient equals training + 2 x pseudo: pseudo part double-counted")
+    }
+
+    /// Six steps with pseudo-views every second iteration, a log boundary every second step and a densification
+    /// boundary at completed iteration 3, which is the pseudo iteration with index 2. A step reports the pseudo depth
+    /// loss only when it synchronizes; the value is then non-nil exactly on the pseudo iterations. No step may throw,
+    /// and every loss must be finite.
+    @Test
+    func pseudoStepsAcrossLogAndDensifyBoundaries() throws {
+        let context = try MetalContext.makeDefault()
+        let scene = SyntheticScene.make(viewCount: 4, novelCount: 0, width: 32, height: 24,
+                                        gaussians: 160, sparsePoints: 80, seed: 5)
+        let dataset = pseudoDataset(scene)
+        var configuration = pseudoConfiguration(iterations: 6, regularizers: [.depthPearson, .depthL1, .pseudoViews])
+        configuration.logInterval = 2
+        configuration.pseudoViews.startIteration = 0
+        configuration.pseudoViews.interval = 2
+        configuration.densification.startIteration = 1
+        configuration.densification.stopIteration = 100
+        configuration.densification.interval = 3
+        let initial = GaussianInitializer.initialize(dataset, configuration: configuration, maxCount: 400)
+        let trainer = try GPUTrainer(context: context, dataset: dataset, initialCloud: initial,
+                                     configuration: configuration)
+        #expect(trainer.pseudoViewCount > 0)
+
+        let schedule = configuration.pseudoViews
+        var reportedPseudoSteps = 0
+        var unreportedPseudoSteps = 0
+        for index in 0..<configuration.iterations {
+            let report = try trainer.step()
+            let completed: Int = index + 1
+            let isPseudo: Bool = index >= schedule.startIteration && (index - schedule.startIteration) % schedule.interval == 0
+            let isLogStep: Bool = completed % configuration.logInterval == 0
+            let isLastStep: Bool = completed >= configuration.iterations
+            let isDensifyStep: Bool = completed >= 1 && completed < 100 && completed % 3 == 0
+            let synchronizes: Bool = isLogStep || isLastStep || isDensifyStep
+
+            #expect(report.iteration == completed)
+            #expect((report.densify != nil) == isDensifyStep, "step \(index): densify summary mismatch")
+            if synchronizes {
+                #expect(report.loss != nil, "step \(index) synchronized but reported no image loss")
+                #expect((report.pseudoDepthLoss != nil) == isPseudo,
+                        "step \(index): pseudo depth loss reported \(report.pseudoDepthLoss != nil), expected \(isPseudo)")
+                if isPseudo {
+                    reportedPseudoSteps += 1
+                }
+            } else {
+                #expect(report.loss == nil && report.pseudoDepthLoss == nil,
+                        "step \(index) did not synchronize but reported a loss")
+                if isPseudo {
+                    unreportedPseudoSteps += 1
+                }
+            }
+            if let loss = report.loss {
+                #expect(loss.loss.isFinite, "step \(index): image loss \(loss.loss)")
+            }
+            if let depth = report.depthLoss {
+                #expect(depth.loss.isFinite, "step \(index): depth loss \(depth.loss)")
+            }
+            if let pseudo = report.pseudoDepthLoss {
+                #expect(pseudo.loss.isFinite, "step \(index): pseudo depth loss \(pseudo.loss)")
+            }
+        }
+        // Both halves of the rule must be exercised: pseudo steps that report, and pseudo steps that do not.
+        #expect(reportedPseudoSteps > 0)
+        #expect(unreportedPseudoSteps > 0)
     }
 
     /// The pseudo step must not change the densification statistics: a step with pseudo-views leaves the

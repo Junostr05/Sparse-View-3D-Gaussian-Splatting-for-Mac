@@ -489,7 +489,7 @@ public final class GPUTrainer {
     private func rebuildTermCache() {
         let all: [any AuxiliaryLoss] = phase4Terms + auxiliaryLosses
         var cache: [AuxiliaryStage: [any AuxiliaryLoss]] = [:]
-        for stage in [AuxiliaryStage.pixelGradient, .parameterGradient, .postOptimizer] {
+        for stage in AuxiliaryStage.allCases {
             cache[stage] = all.filter { $0.stage == stage }
         }
         termsByStage = cache
@@ -777,6 +777,9 @@ extension GPUTrainer {
                                              commandBuffer: commandBuffer)
         }
 
+        // Context of steps 5–7 on a pseudo iteration. `isPseudoView` is true, `viewIndex` is the TRAINING view (the
+        // statistics and Gaussians are not view-specific), and `camera`, `renderedDepth`, `depthGradient` and
+        // `commandBuffer` are the pseudo-view's. Only `.parameterGradient` and `.postOptimizer` terms read this context.
         let auxiliary = AuxiliaryContext(
             viewIndex: viewIndex,
             iteration: iteration,
@@ -811,6 +814,8 @@ extension GPUTrainer {
     }
 
     /// Grow-only, zero-filled `float4` per pixel. Zeroed once when created; the GPU only reads it.
+    /// Not part of `TrainingMemoryBudget`: it is about one quarter of the reserved image-gradient buffer, because
+    /// pseudo-views render at `resolutionDivisor` (2) per side.
     func zeroImageGradientBuffer(pixelCount: Int) throws(TrainingError) -> MTLBuffer {
         let bytes = pixelCount * 4 * MemoryLayout<Float>.size
         if let existing = zeroImageGradient, existing.length >= bytes {
@@ -834,8 +839,9 @@ struct GPUTrainerTestReadout {
     var visibleCounts: [UInt32]
 }
 
+// Test hook: not part of the training API.
 extension GPUTrainer {
-    /// Test hook: waits for the GPU, validates the most recent step and copies the gradients and statistics to the CPU.
+    /// Waits for the GPU, validates the most recent step and copies the gradients and statistics to the CPU.
     func testingReadout() throws(TrainingError) -> GPUTrainerTestReadout {
         try guarded { () throws(TrainingError) -> GPUTrainerTestReadout in
             _ = try self.synchronize()

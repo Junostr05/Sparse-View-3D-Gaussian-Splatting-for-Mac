@@ -8,7 +8,7 @@ import SplatMetal
 // the trainer at its wait points.
 
 /// Where an auxiliary term is encoded inside one training step (P12).
-public enum AuxiliaryStage: Sendable {
+public enum AuxiliaryStage: Sendable, CaseIterable {
     /// After the photometric loss and before the backward pass. The term may write the depth gradient.
     case pixelGradient
     /// After the backward pass and before Adam. The term adds into the parameter gradients.
@@ -22,7 +22,12 @@ public enum AuxiliaryStage: Sendable {
 public struct AuxiliaryContext {
     public let viewIndex: Int
     public let iteration: Int
-    /// False for every step in Task 17. Pseudo-view steps (Task 18) set it.
+    /// True on an iteration that includes a pseudo-view (Task 18). It is set only in the context of the
+    /// `.parameterGradient` and `.postOptimizer` stages (anisotropy, scale cap) of such an iteration. In that context
+    /// `viewIndex` is the TRAINING view, `camera`, `renderedDepth`, `depthGradient` and `commandBuffer` belong to the
+    /// PSEUDO-view. `.pixelGradient` terms never run for a pseudo-view: the pseudo depth loss is a fixed step of the
+    /// trainer, not a term. So `isPseudoView` means "this iteration included a pseudo-view", not "this term runs on
+    /// a pseudo-view". A term must not skip its update because of it.
     public let isPseudoView: Bool
     public let camera: Camera
     /// `float2 (Draw, A)` per pixel of this view's depth forward pass. Nil when the view is rendered without depth.
