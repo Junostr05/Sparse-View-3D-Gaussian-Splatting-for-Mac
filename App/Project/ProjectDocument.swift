@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import SplatCore
 import SplatIO
 
 extension UTType {
@@ -20,7 +21,10 @@ nonisolated struct ProjectDocument: FileDocument {
 
     /// An empty project with the default manifest.
     init() {
-        contents = ProjectContents(manifest: ProjectManifest(), files: [:])
+        // New projects start on the default training preset (decision A7), not on the bare defaults.
+        var manifest = ProjectManifest()
+        manifest.training = TrainingPreset.default.configuration()
+        contents = ProjectContents(manifest: manifest, files: [:])
     }
 
     init(configuration: ReadConfiguration) throws {
