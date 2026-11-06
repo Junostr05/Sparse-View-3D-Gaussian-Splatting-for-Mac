@@ -9,21 +9,12 @@ enum CaptureImageSupport {
     /// Converts `image` to an sRGB `RGBImage` (components in `0...1`), scaled down so the longer side
     /// is at most `maxSide` (never upscaled).
     static func rgbImage(_ image: CGImage, maxSide: Int, sourceName: String) throws -> RGBImage {
-        let sourceWidth: Int = image.width
-        let sourceHeight: Int = image.height
-        let longSide: Int = max(sourceWidth, sourceHeight)
-        var width: Int = sourceWidth
-        var height: Int = sourceHeight
-        if longSide > maxSide && longSide > 0 {
-            let scale: Double = Double(maxSide) / Double(longSide)
-            let scaledWidth: Double = (Double(sourceWidth) * scale).rounded()
-            let scaledHeight: Double = (Double(sourceHeight) * scale).rounded()
-            width = max(1, Int(scaledWidth))
-            height = max(1, Int(scaledHeight))
-        }
-        guard width > 0, height > 0 else {
-            throw FrameExtractionError.processingFailed(sourceName)
-        }
+        let size: (width: Int, height: Int) = try fittedSize(width: image.width,
+                                                             height: image.height,
+                                                             maxSide: maxSide,
+                                                             sourceName: sourceName)
+        let width: Int = size.width
+        let height: Int = size.height
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
             throw FrameExtractionError.processingFailed(sourceName)
         }
@@ -62,6 +53,55 @@ enum CaptureImageSupport {
             pixels.append(SIMD3<Float>(red, green, blue))
         }
         return RGBImage(width: width, height: height, pixels: pixels)
+    }
+
+    /// Encodes a PNG preview of `image` whose longer side is at most `maxSide` (never upscaled).
+    static func thumbnailPNG(_ image: CGImage, maxSide: Int, sourceName: String) throws -> Data {
+        let size: (width: Int, height: Int) = try fittedSize(width: image.width,
+                                                             height: image.height,
+                                                             maxSide: maxSide,
+                                                             sourceName: sourceName)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            throw FrameExtractionError.processingFailed(sourceName)
+        }
+        let bitmapInfo: UInt32 = CGImageAlphaInfo.noneSkipLast.rawValue
+        guard let context = CGContext(data: nil,
+                                      width: size.width,
+                                      height: size.height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: colorSpace,
+                                      bitmapInfo: bitmapInfo) else {
+            throw FrameExtractionError.processingFailed(sourceName)
+        }
+        context.interpolationQuality = .high
+        let target: CGRect = CGRect(x: 0, y: 0, width: CGFloat(size.width), height: CGFloat(size.height))
+        context.draw(image, in: target)
+        guard let scaled: CGImage = context.makeImage() else {
+            throw FrameExtractionError.processingFailed(sourceName)
+        }
+        return try pngData(scaled, sourceName: sourceName)
+    }
+
+    /// Size scaled down so the longer side is at most `maxSide`; unchanged when it already fits.
+    private static func fittedSize(width sourceWidth: Int,
+                                   height sourceHeight: Int,
+                                   maxSide: Int,
+                                   sourceName: String) throws -> (width: Int, height: Int) {
+        let longSide: Int = max(sourceWidth, sourceHeight)
+        var width: Int = sourceWidth
+        var height: Int = sourceHeight
+        if longSide > maxSide && longSide > 0 {
+            let scale: Double = Double(maxSide) / Double(longSide)
+            let scaledWidth: Double = (Double(sourceWidth) * scale).rounded()
+            let scaledHeight: Double = (Double(sourceHeight) * scale).rounded()
+            width = max(1, Int(scaledWidth))
+            height = max(1, Int(scaledHeight))
+        }
+        guard width > 0, height > 0 else {
+            throw FrameExtractionError.processingFailed(sourceName)
+        }
+        return (width, height)
     }
 
     /// Encodes `image` as PNG. The output carries no metadata beyond what the CGImage holds, so

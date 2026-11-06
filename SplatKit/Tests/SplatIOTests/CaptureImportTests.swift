@@ -302,4 +302,123 @@ private func writePhotoWithFocalLength(to url: URL, focalLength: Any?) throws {
         }
     }
 }
+
+@Suite struct VideoCandidateTests {
+    @Test func scoreCandidatesReturnsOrderedScoredCandidatesWithThumbnails() async throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url: URL = directory.appendingPathComponent("clip.mp4")
+        try await writeTestVideo(to: url)
+
+        let candidates: [VideoCandidate] = try await VideoFrameExtractor.scoreCandidates(from: url,
+                                                                                         sampleInterval: 0.25)
+        // A 3 s clip sampled every 0.25 s gives 12 candidate times, and all of them decode.
+        #expect(candidates.count == 12)
+        #expect(candidates.map { $0.index } == Array(0..<candidates.count))
+
+        let times: [Double] = candidates.map { $0.time }
+        #expect(times == times.sorted())
+        let requested: [Double] = candidates.map { $0.requestedTime }
+        #expect(requested == requested.sorted())
+
+        for candidate in candidates {
+            #expect(candidate.sharpness.isFinite)
+            #expect(isPNG(candidate.thumbnail))
+            guard let source = CGImageSourceCreateWithData(candidate.thumbnail as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                Issue.record("thumbnail is not decodable at index \(candidate.index)")
+                continue
+            }
+            let longSide: Int = max(image.width, image.height)
+            #expect(longSide > 0)
+            #expect(longSide <= 320)
+        }
+    }
+
+    @Test func selectedCandidatesDecodeAtTheirTimesAndMatchExtract() async throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url: URL = directory.appendingPathComponent("clip.mp4")
+        try await writeTestVideo(to: url)
+
+        let candidates: [VideoCandidate] = try await VideoFrameExtractor.scoreCandidates(from: url)
+        let scored: [FrameCandidate] = candidates.map { candidate in
+            FrameCandidate(index: candidate.index, time: candidate.time, sharpness: candidate.sharpness)
+        }
+        let chosen: [Int] = FrameSelector.select(scored, mode: .count(3))
+        #expect(chosen.count == 3)
+        let chosenTimes: [Double] = chosen.map { candidates[$0].time }
+        let chosenRequested: [Double] = chosen.map { candidates[$0].requestedTime }
+
+        let frames: [CapturedFrame] = try await VideoFrameExtractor.frames(from: url,
+                                                                           atRequestedTimes: chosenRequested)
+        #expect(frames.map { $0.name } == ["frame_0001.png", "frame_0002.png", "frame_0003.png"])
+        for frame in frames {
+            #expect(isPNG(frame.data))
+            #expect(frame.sourceName == "clip.mp4")
+        }
+        let frameTimes: [Double] = frames.compactMap { $0.timestamp }
+        #expect(frameTimes.count == 3)
+        for (actual, expected) in zip(frameTimes, chosenTimes) {
+            #expect(abs(actual - expected) < 1e-6)
+        }
+
+        let extracted: [CapturedFrame] = try await VideoFrameExtractor.extract(from: url, mode: .count(3))
+        let extractedTimes: [Double] = extracted.compactMap { $0.timestamp }
+        #expect(extractedTimes.count == extracted.count)
+        #expect(extractedTimes.count == frameTimes.count)
+        for (fromExtract, fromFrames) in zip(extractedTimes, frameTimes) {
+            #expect(abs(fromExtract - fromFrames) < 1e-6)
+        }
+    }
+
+    @Test func framesWithNoTimesReturnsEmpty() async throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url: URL = directory.appendingPathComponent("clip.mp4")
+        try await writeTestVideo(to: url)
+
+        let frames: [CapturedFrame] = try await VideoFrameExtractor.frames(from: url, atRequestedTimes: [])
+        #expect(frames.isEmpty)
+    }
+
+    @Test func unreadableVideoThrowsTheSameErrorAsExtract() async throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url: URL = directory.appendingPathComponent("missing.mp4")
+        let expected: FrameExtractionError = FrameExtractionError.unreadableVideo("missing.mp4")
+
+        let extractError: FrameExtractionError? = await captureExtractionError {
+            _ = try await VideoFrameExtractor.extract(from: url, mode: .count(3))
+        }
+        #expect(extractError == expected)
+
+        let framesError: FrameExtractionError? = await captureExtractionError {
+            _ = try await VideoFrameExtractor.frames(from: url, atRequestedTimes: [0.5])
+        }
+        #expect(framesError == expected)
+
+        let emptyFramesError: FrameExtractionError? = await captureExtractionError {
+            _ = try await VideoFrameExtractor.frames(from: url, atRequestedTimes: [])
+        }
+        #expect(emptyFramesError == expected)
+
+        let scoreError: FrameExtractionError? = await captureExtractionError {
+            _ = try await VideoFrameExtractor.scoreCandidates(from: url)
+        }
+        #expect(scoreError == expected)
+    }
+}
+
+/// Runs `body` and returns the `FrameExtractionError` it throws, or nil.
+private func captureExtractionError(_ body: () async throws -> Void) async -> FrameExtractionError? {
+    do {
+        try await body()
+        return nil
+    } catch let error as FrameExtractionError {
+        return error
+    } catch {
+        return nil
+    }
+}
 #endif
