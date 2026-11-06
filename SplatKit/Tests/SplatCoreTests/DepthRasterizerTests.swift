@@ -277,24 +277,22 @@ func depthBackwardMatchesGoldens(name: String) throws {
 }
 
 @Test func nilDepthGradientIsBitIdenticalToPhase3() throws {
-    // Fingerprints recorded from the Phase 3 code (before Task 4) on the depth_occluded golden
-    // scene: the forward image and the backward gradients for the golden image gradient.
-    let phase3ImageHash: UInt64 = 6_367_145_117_700_868_717
-    let phase3GradientHash: UInt64 = 3_997_033_113_602_015_524
-
+    // Depth mode must not change the Phase 3 path. The property is checked within one process: the image of
+    // `renderWithDepth` equals `render` bit for bit, and the backward pass with a nil depth gradient equals the
+    // Phase 3 overload. (An earlier version compared hashes recorded on one platform; libm differences make
+    // such constants fail on other platforms, and the Phase 3 numerics are covered by the golden tests.)
     let golden = try GoldenCase.load("depth_occluded")
     let cloud = try golden.cloud()
     let camera = golden.camera()
     let settings = golden.settings()
 
     let (image, _) = CPURasterizer.renderWithDepth(cloud, camera: camera, settings: settings)
-    #expect(fnv1a(bitPatterns(image)) == phase3ImageHash)
+    let plain = CPURasterizer.render(cloud, camera: camera, settings: settings)
+    #expect(bitPatterns(image) == bitPatterns(plain))
 
     let nilGradients = CPURasterizer.backwardWithScreenSpace(
         cloud, camera: camera, settings: settings,
         imageGradient: golden.imageGradientPixels, depthGradient: nil).gradients
-    #expect(fnv1a(gradientBits(nilGradients)) == phase3GradientHash)
-
     let phase3Gradients = CPURasterizer.backward(
         cloud, camera: camera, settings: settings, imageGradient: golden.imageGradientPixels)
     #expect(phase3Gradients == nilGradients)

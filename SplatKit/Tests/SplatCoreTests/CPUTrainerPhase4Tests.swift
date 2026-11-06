@@ -172,11 +172,9 @@ private func novelDepthCorrelation(_ scene: SyntheticScene, cloud: GaussianCloud
 
 // MARK: - Phase 3 order
 
-/// Cloud fingerprint after 20 steps of the Phase 3 trainer on the scenario below, recorded from the
-/// unmodified Phase 3 `CPUTrainer` (macOS, Swift 6.4) before the Phase 4 terms were added.
-private let phase3Fingerprint: UInt64 = 0x5b40_c065_4feb_dfae
-private let phase3CloudCount = 400
-
+/// With `regularizers == []` the Phase 4 settings must be inert. Checked within one process (a fingerprint recorded
+/// on one platform fails on others because of libm differences): two runs that differ only in Phase 4 settings give
+/// the same cloud bit for bit, and a repeated run is deterministic.
 @Test func cpuTrainerWithoutDepthMatchesPhase3Order() throws {
     // Depth priors are attached, but no Phase 4 feature is enabled, so they must be ignored.
     let scene = SyntheticScene.make(viewCount: 4, novelCount: 2, width: 32, height: 24,
@@ -193,20 +191,38 @@ private let phase3CloudCount = 400
     configuration.densification.gradientThreshold = 0
     configuration.maxGaussians = 400
 
-    let initial = GaussianInitializer.initialize(dataset, configuration: configuration,
-                                                 maxCount: configuration.maxGaussians)
-    var trainer = try CPUTrainer(dataset: dataset, initialCloud: initial, configuration: configuration)
-    for _ in 0..<20 {
-        let result = try trainer.step()
-        #expect(result.depth.training == nil)
-        #expect(result.depth.pseudo == nil)
-        #expect(result.depth.isolationPruned == 0)
+    func run(_ configuration: TrainingConfiguration) throws -> (cloud: GaussianCloud, pseudoViews: Int) {
+        let initial = GaussianInitializer.initialize(dataset, configuration: configuration,
+                                                     maxCount: configuration.maxGaussians)
+        var trainer = try CPUTrainer(dataset: dataset, initialCloud: initial, configuration: configuration)
+        for _ in 0..<20 {
+            let result = try trainer.step()
+            #expect(result.depth.training == nil)
+            #expect(result.depth.pseudo == nil)
+            #expect(result.depth.isolationPruned == 0)
+        }
+        #expect(trainer.iteration == 20)
+        return (trainer.cloud, trainer.pseudoViews.count)
     }
-    #expect(trainer.iteration == 20)
-    #expect(trainer.pseudoViews.isEmpty)
-    let hash = fnv1a(cloudBits(trainer.cloud))
-    #expect(trainer.cloud.count == phase3CloudCount)
-    #expect(hash == phase3Fingerprint, "fingerprint 0x\(String(hash, radix: 16))")
+
+    let reference = try run(configuration)
+    #expect(reference.pseudoViews == 0)
+    let repeated = try run(configuration)
+    #expect(cloudBits(reference.cloud) == cloudBits(repeated.cloud), "the run must be deterministic")
+
+    var inert = configuration
+    inert.depthPrior.pearsonWeight = 5
+    inert.depthPrior.l1Weight = 5
+    inert.pseudoViews.weight = 3
+    inert.pseudoViews.startIteration = 0
+    inert.artifacts.anisotropyWeight = 9
+    inert.artifacts.scaleCapFraction = 0.001
+    inert.artifacts.isolationStartIteration = 1
+    inert.artifacts.isolationInterval = 1
+    inert.denseInit.maxPoints = 5
+    let changed = try run(inert)
+    #expect(cloudBits(reference.cloud) == cloudBits(changed.cloud),
+            "Phase 4 settings must not matter while no Phase 4 feature is enabled")
 }
 
 // MARK: - Depth prior
