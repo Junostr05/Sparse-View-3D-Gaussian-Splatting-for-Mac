@@ -58,6 +58,16 @@ jobs:
           sleep 8
           screencapture -x "$OUT/app_window.png" || echo "screencapture failed"
           osascript -e 'tell application "SparseSplat" to quit' 2>/dev/null || killall SparseSplat 2>/dev/null || true
+          sleep 3
+
+          # Fresh launch WITHOUT a document: shows what a user sees when starting the app.
+          open -n -a "$APP" || echo "open failed"
+          sleep 8
+          screencapture -x "$OUT/app_launch_no_document.png" || echo "screencapture failed"
+          # Best effort: Cmd+N (needs accessibility permission; may do nothing on the runner).
+          osascript -e 'tell application "System Events" to keystroke "n" using command down' 2>/dev/null && sleep 5 \
+            && screencapture -x "$OUT/app_after_cmd_n.png" || echo "keystroke not permitted"
+          osascript -e 'tell application "SparseSplat" to quit' 2>/dev/null || killall SparseSplat 2>/dev/null || true
       - name: Upload viewport snapshots
         if: always()
         uses: actions/upload-artifact@v4
