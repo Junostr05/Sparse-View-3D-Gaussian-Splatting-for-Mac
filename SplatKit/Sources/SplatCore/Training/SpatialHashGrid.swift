@@ -137,7 +137,12 @@ public struct SpatialHashGrid: Sendable {
                 // can only hold at a larger ring; the search would reach it at this ring index.
                 guard squared.count >= k else { return .infinity }
                 let kth: Float = Self.kthSmallest(squared, k).squareRoot()
-                var needed: Int = max(Int((kth / cellSize).rounded(.up)), ring + 1)
+                // A non-finite distance (NaN coordinates, or a squared distance that overflowed Float)
+                // has no ring; converting it to Int would trap.
+                guard kth.isFinite else { return .infinity }
+                let ratio: Double = (Double(kth) / Double(cellSize)).rounded(.up)
+                guard ratio <= Double(maxRings) else { return .infinity }
+                var needed: Int = max(Int(ratio), ring + 1)
                 while Float(needed) * cellSize < kth {
                     needed += 1
                 }

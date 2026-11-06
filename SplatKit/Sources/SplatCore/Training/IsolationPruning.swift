@@ -25,6 +25,39 @@ public enum IsolationPruning {
         var mask = [Bool](repeating: false, count: n)
         guard k > 0, n > k, factor > 0, factor.isFinite else { return mask }
 
+        // A Gaussian with a NaN or infinite coordinate has diverged: it can never be isolated "by
+        // distance", and it would poison the grid and the median. Judge the finite ones on their own and
+        // prune the others unconditionally, unless that would empty the model.
+        var finiteIndices: [Int] = []
+        finiteIndices.reserveCapacity(n)
+        for index in 0..<n {
+            let position = positions[index]
+            if position.x.isFinite && position.y.isFinite && position.z.isFinite {
+                finiteIndices.append(index)
+            }
+        }
+        if finiteIndices.count != n {
+            guard !finiteIndices.isEmpty else { return mask }
+            var finitePositions: [SIMD3<Float>] = []
+            finitePositions.reserveCapacity(finiteIndices.count)
+            for index in finiteIndices {
+                finitePositions.append(positions[index])
+            }
+            let finiteMask = pruneMask(positions: finitePositions,
+                                       neighbors: k,
+                                       factor: factor,
+                                       maxFraction: maxFraction,
+                                       sampleCount: sampleCount,
+                                       seed: seed)
+            for index in 0..<n {
+                mask[index] = true
+            }
+            for (position, index) in finiteIndices.enumerated() {
+                mask[index] = finiteMask[position]
+            }
+            return mask
+        }
+
         guard let initialCellSize = initialCellSize(positions) else { return mask }
         let coarseGrid = SpatialHashGrid(points: positions, cellSize: initialCellSize)
 
