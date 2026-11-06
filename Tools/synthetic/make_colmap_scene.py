@@ -8,6 +8,12 @@ Pure Python 3 standard library. Writes:
     OUTDIR/sparse/0/images.bin     one world->camera pose per view
     OUTDIR/sparse/0/points3D.bin   scene points (coloured sphere + grey ground)
 
+Optional outputs:
+
+    OUTDIR/depth/view_NN.png.sdpt  per-view depth in the app's .sdpt format (--depth, --relative-depth)
+    OUTDIR/novel/images/novel_NN.png
+    OUTDIR/novel/sparse/0/...      ground-truth novel views, loadable by the COLMAP loader (--novel-views)
+
 Conventions match the app's renderer: OpenCV camera (x right, y down, z forward),
 p_cam = R * p_world + t, u = fx * x / z + cx, v = fy * y / z + cy. Pixel (i, j) has its
 centre at (i + 0.5, j + 0.5). World up is +Y and the object is centred on the origin.
@@ -15,6 +21,7 @@ centre at (i + 0.5, j + 0.5). World up is +Y and the object is centred on the or
 Usage:
     python3 Tools/synthetic/make_colmap_scene.py OUTDIR [--views 4] [--size 160x120]
                                                  [--points 400] [--seed 1] [--ppm]
+                                                 [--depth | --relative-depth] [--novel-views N]
     python3 Tools/synthetic/make_colmap_scene.py OUTDIR --verify
 """
 
@@ -26,6 +33,7 @@ import random
 import struct
 import sys
 import zlib
+from array import array
 
 OBJECT_RADIUS = 1.0
 GROUND_Y = -1.05
@@ -43,6 +51,24 @@ INSIDE_MIN_FRACTION = 0.8
 CENTROID_TOLERANCE_PX = 2.0
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+# Depth maps (.sdpt, Phase 4 P2). Header: "SDPT", u16 version, u8 kind, u8 flags, u32 width,
+# u32 height, 8 reserved bytes; then width*height little-endian float32 values (<= 0 = invalid).
+SDPT_HEADER = struct.Struct("<4sHBBII8x")
+SDPT_VERSION = 1
+KIND_METRIC = 0
+KIND_RELATIVE = 1
+KIND_RELATIVE_INVERSE = 2
+SDPT_CONFIDENCE_FLAG = 1 << 0
+COVERAGE_THRESHOLD = 0.5     # a pixel's depth is the front-most disc with coverage >= this
+SPHERE_CENTRE_DEPTH = CAMERA_DISTANCE - OBJECT_RADIUS   # 2.5: front of the sphere at the centre pixel
+# The splat z-buffer only counts discs with coverage >= COVERAGE_THRESHOLD. With a few hundred
+# surface points the front cap can leave a hole over the centre pixel, and the back crossing at
+# 4.5 is then the front-most covered disc. Both are true crossings of the sphere on that ray.
+SPHERE_BACK_CENTRE_DEPTH = CAMERA_DISTANCE + OBJECT_RADIUS             # 4.5
+CENTRE_DEPTH_TOLERANCE = 0.1
+RELATIVE_SCALE_RANGE = (0.5, 2.0)    # a in  value = a / z + b  (relative inverse depth)
+RELATIVE_OFFSET_RANGE = (0.0, 0.5)   # b
 
 
 # MARK: - Vector helpers
@@ -91,20 +117,37 @@ def look_at(centre):
     return Pose(rotation, translation, centre)
 
 
+def training_azimuths(count):
+    """Azimuths of `count` training cameras spread over ARC_SPAN (radians)."""
+    if count == 1:
+        return [0.0]
+    return [-ARC_SPAN / 2.0 + i * ARC_SPAN / (count - 1) for i in range(count)]
+
+
+def camera_pose(azimuth):
+    """Pose of a camera on the elevated arc at `azimuth`, looking at the origin."""
+    horizontal = CAMERA_DISTANCE * math.cos(CAMERA_ELEVATION)
+    centre = (horizontal * math.sin(azimuth),
+              CAMERA_DISTANCE * math.sin(CAMERA_ELEVATION),
+              horizontal * math.cos(azimuth))
+    return look_at(centre)
+
+
 def camera_poses(count):
     """`count` cameras on an elevated arc around the origin, spanning ARC_SPAN."""
-    if count == 1:
-        azimuths = [0.0]
-    else:
-        azimuths = [-ARC_SPAN / 2.0 + i * ARC_SPAN / (count - 1) for i in range(count)]
-    poses = []
-    for azimuth in azimuths:
-        horizontal = CAMERA_DISTANCE * math.cos(CAMERA_ELEVATION)
-        centre = (horizontal * math.sin(azimuth),
-                  CAMERA_DISTANCE * math.sin(CAMERA_ELEVATION),
-                  horizontal * math.cos(azimuth))
-        poses.append(look_at(centre))
-    return poses
+    return [camera_pose(azimuth) for azimuth in training_azimuths(count)]
+
+
+def novel_azimuths(views, count):
+    """Azimuths of `count` novel views for a `views`-camera arc. The first candidates are the
+    midpoints between consecutive training cameras; after those come the quarter points
+    (1/4 and 3/4 of each gap). The candidate list repeats when `count` exceeds it."""
+    training = training_azimuths(views)
+    gaps = list(zip(training, training[1:]))
+    candidates = [(a + b) / 2.0 for a, b in gaps]
+    candidates += [a + (b - a) / 4.0 for a, b in gaps]
+    candidates += [a + 3.0 * (b - a) / 4.0 for a, b in gaps]
+    return [candidates[index % len(candidates)] for index in range(count)]
 
 
 def to_camera(pose, p):
@@ -206,7 +249,9 @@ def ground_points(rng, count):
 
 def render(scene, pose, intrinsics, width, height):
     """Splats every point as an isotropic disc, back to front, over BACKGROUND.
-    Returns the RGB raster as bytes (row-major, 3 bytes per pixel)."""
+    Returns (rgb, depth): the RGB raster as bytes (row-major, 3 bytes per pixel), and one
+    metric depth per pixel taken from the front-most disc with coverage >= COVERAGE_THRESHOLD
+    (0.0 where no such disc exists, which is the invalid value in .sdpt)."""
     fx, fy, cx, cy = intrinsics
     splats = []
     for (px, py, pz, r, g, b) in scene:
@@ -222,7 +267,8 @@ def render(scene, pose, intrinsics, width, height):
     splats.sort(key=lambda s: -s[0])
 
     canvas = list(BACKGROUND) * (width * height)
-    for _, u, v, radius, r, g, b in splats:
+    depth = [0.0] * (width * height)
+    for zc, u, v, radius, r, g, b in splats:
         x0 = max(0, int(math.floor(u - radius - 0.5)))
         x1 = min(width - 1, int(math.ceil(u + radius + 0.5)))
         y0 = max(0, int(math.floor(v - radius - 0.5)))
@@ -235,11 +281,51 @@ def render(scene, pose, intrinsics, width, height):
                 if coverage <= 0.0:
                     continue
                 a = min(1.0, coverage)
-                k = 3 * (j * width + i)
+                pixel = j * width + i
+                k = 3 * pixel
                 canvas[k] = canvas[k] * (1.0 - a) + r * a
                 canvas[k + 1] = canvas[k + 1] * (1.0 - a) + g * a
                 canvas[k + 2] = canvas[k + 2] * (1.0 - a) + b * a
-    return bytes(min(255, max(0, int(c + 0.5))) for c in canvas)
+                if a >= COVERAGE_THRESHOLD and (depth[pixel] == 0.0 or zc < depth[pixel]):
+                    depth[pixel] = zc
+    rgb = bytes(min(255, max(0, int(c + 0.5))) for c in canvas)
+    return rgb, depth
+
+
+def sdpt_bytes(width, height, kind, values):
+    """Serialises a depth map in the .sdpt format read by the app's DepthMapCodec."""
+    if len(values) != width * height:
+        raise ValueError("depth value count does not match %dx%d" % (width, height))
+    body = array("f", values)
+    if sys.byteorder != "little":
+        body.byteswap()
+    return SDPT_HEADER.pack(b"SDPT", SDPT_VERSION, kind, 0, width, height) + body.tobytes()
+
+
+def read_sdpt(path):
+    """Parses a .sdpt file written by sdpt_bytes (or the app). Checks the exact file length."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < SDPT_HEADER.size:
+        raise ValueError("truncated SDPT header: " + path)
+    magic, version, kind, flags, width, height = SDPT_HEADER.unpack_from(data, 0)
+    if magic != b"SDPT":
+        raise ValueError("bad SDPT magic: " + path)
+    if version != SDPT_VERSION:
+        raise ValueError("unsupported SDPT version %d: %s" % (version, path))
+    if kind not in (KIND_METRIC, KIND_RELATIVE, KIND_RELATIVE_INVERSE):
+        raise ValueError("unknown SDPT kind %d: %s" % (kind, path))
+    count = width * height
+    has_confidence = bool(flags & SDPT_CONFIDENCE_FLAG)
+    expected = SDPT_HEADER.size + 4 * count + (count if has_confidence else 0)
+    if len(data) != expected:
+        raise ValueError("SDPT length %d, expected %d: %s" % (len(data), expected, path))
+    values = array("f")
+    values.frombytes(data[SDPT_HEADER.size:SDPT_HEADER.size + 4 * count])
+    if sys.byteorder != "little":
+        values.byteswap()
+    return {"kind": kind, "flags": flags, "width": width, "height": height,
+            "values": values}
 
 
 def png_bytes(width, height, rgb):
@@ -471,37 +557,169 @@ def verify(outdir, out=sys.stdout):
         print("%s: points_inside=%.2f object_px=%d centroid=%s centre=(%.2f,%.2f) err=%.2fpx %s"
               % (image["name"], inside_fraction, object_count, centroid_text,
                  centre_u, centre_v, error_px, "OK" if ok else "FAIL"), file=out)
+
+    if not verify_depth(outdir, colmap, out):
+        all_ok = False
+    novel_dir = os.path.join(outdir, "novel")
+    if os.path.isdir(novel_dir) and not verify_novel(novel_dir, out):
+        all_ok = False
+    return all_ok
+
+
+def verify_depth(outdir, colmap, out):
+    """If depth/ exists, every view must have a .sdpt of its image's size. Metric maps must put
+    the sphere-centre pixel on a sphere crossing: SPHERE_CENTRE_DEPTH or SPHERE_BACK_CENTRE_DEPTH
+    within CENTRE_DEPTH_TOLERANCE. Returns True when there is no depth/ directory."""
+    depth_dir = os.path.join(outdir, "depth")
+    if not os.path.isdir(depth_dir):
+        return True
+
+    all_ok = True
+    for image in colmap["images"]:
+        camera = colmap["cameras"][image["camera_id"]]
+        width, height = camera["width"], camera["height"]
+        path = os.path.join(depth_dir, image["name"] + ".sdpt")
+        try:
+            depth = read_sdpt(path)
+        except (OSError, ValueError, struct.error) as error:
+            print("FAIL: depth %s: %s" % (image["name"], error), file=out)
+            all_ok = False
+            continue
+        if (depth["width"], depth["height"]) != (width, height):
+            print("FAIL: depth %s is %dx%d but image is %dx%d" % (
+                image["name"], depth["width"], depth["height"], width, height), file=out)
+            all_ok = False
+            continue
+
+        values = depth["values"]
+        valid = sum(1 for v in values if math.isfinite(v) and v > 0.0)
+        ok = valid > 0
+        centre_text = "n/a"
+        if depth["kind"] == KIND_METRIC:
+            pose = Pose(quaternion_to_rotation(image["qvec"]), image["tvec"])
+            centre_u, centre_v, _ = project(pose, camera["intrinsics"], (0.0, 0.0, 0.0))
+            pixel = int(math.floor(centre_v)) * width + int(math.floor(centre_u))
+            centre_depth = values[pixel]
+            centre_ok = any(abs(centre_depth - crossing) <= CENTRE_DEPTH_TOLERANCE
+                            for crossing in (SPHERE_CENTRE_DEPTH, SPHERE_BACK_CENTRE_DEPTH))
+            ok = ok and centre_ok
+            centre_text = "%.3f" % centre_depth
+        all_ok = all_ok and ok
+        print("depth/%s: kind=%d valid=%d/%d centre=%s %s" % (
+            image["name"] + ".sdpt", depth["kind"], valid, len(values), centre_text,
+            "OK" if ok else "FAIL"), file=out)
+    return all_ok
+
+
+def verify_novel(novel_dir, out):
+    """Re-reads the novel dataset: COLMAP files parse exactly, points3D is empty, and every
+    novel image exists with its camera's size."""
+    sparse_dir = os.path.join(novel_dir, "sparse", "0")
+    images_dir = os.path.join(novel_dir, "images")
+    try:
+        colmap = read_colmap(sparse_dir)
+    except (OSError, ValueError, struct.error) as error:
+        print("FAIL: novel cannot read COLMAP files: %s" % error, file=out)
+        return False
+    if not colmap["images"]:
+        print("FAIL: novel dataset has no views", file=out)
+        return False
+    if colmap["points"]:
+        print("FAIL: novel points3D.bin should be empty", file=out)
+        return False
+
+    all_ok = True
+    for image in colmap["images"]:
+        camera = colmap["cameras"].get(image["camera_id"])
+        try:
+            width, height, _ = read_png(os.path.join(images_dir, image["name"]))
+        except (OSError, ValueError, zlib.error, struct.error) as error:
+            print("FAIL: novel %s: %s" % (image["name"], error), file=out)
+            all_ok = False
+            continue
+        ok = camera is not None and (width, height) == (camera["width"], camera["height"])
+        all_ok = all_ok and ok
+        print("novel/%s: %dx%d %s" % (image["name"], width, height, "OK" if ok else "FAIL"),
+              file=out)
     return all_ok
 
 
 # MARK: - Generation
 
-def generate(outdir, views, width, height, points, seed, write_ppm):
+def generate(outdir, views, width, height, points, seed, write_ppm,
+             depth_mode=None, novel_views=0):
+    """Writes the training dataset and, optionally, depth maps and novel views.
+    `depth_mode` is None, "metric" (kind 0) or "relative" (kind 2, value = a / z + b).
+    All randomness is seeded: the scene uses `seed`, relative coefficients use `seed + 1`."""
     rng = random.Random(seed)
     object_points = sphere_points(rng, points)
     ground = ground_points(rng, max(12, points // 8))
     scene = object_points + ground
 
     intrinsics = (FOCAL_SCALE * width, FOCAL_SCALE * width, width / 2.0, height / 2.0)
-    poses = camera_poses(views)
+    azimuths = training_azimuths(views)
+    poses = [camera_pose(azimuth) for azimuth in azimuths]
     images_dir = os.path.join(outdir, "images")
     os.makedirs(images_dir, exist_ok=True)
+    depth_dir = os.path.join(outdir, "depth")
+    if depth_mode is not None:
+        os.makedirs(depth_dir, exist_ok=True)
+    relative_rng = random.Random(seed + 1)
 
     names = []
     for index, pose in enumerate(poses):
         name = "view_%02d.png" % index
-        rgb = render(scene, pose, intrinsics, width, height)
+        rgb, depth = render(scene, pose, intrinsics, width, height)
         with open(os.path.join(images_dir, name), "wb") as f:
             f.write(png_bytes(width, height, rgb))
         if write_ppm:
             stem = os.path.splitext(name)[0]
             with open(os.path.join(images_dir, stem + ".ppm"), "wb") as f:
                 f.write(ppm_bytes(width, height, rgb))
+        if depth_mode == "metric":
+            payload = sdpt_bytes(width, height, KIND_METRIC, depth)
+            print("depth/%s.sdpt: metric, %d valid pixels" % (
+                name, sum(1 for z in depth if z > 0.0)))
+        elif depth_mode == "relative":
+            a = relative_rng.uniform(*RELATIVE_SCALE_RANGE)
+            b = relative_rng.uniform(*RELATIVE_OFFSET_RANGE)
+            values = [a / z + b if z > 0.0 else 0.0 for z in depth]
+            payload = sdpt_bytes(width, height, KIND_RELATIVE_INVERSE, values)
+            print("depth/%s.sdpt: relative inverse depth, value = %.4f / z + %.4f" % (name, a, b))
+        else:
+            payload = None
+        if payload is not None:
+            with open(os.path.join(depth_dir, name + ".sdpt"), "wb") as f:
+                f.write(payload)
         names.append(name)
 
     write_colmap(os.path.join(outdir, "sparse", "0"), poses, names,
                  width, height, intrinsics, scene)
+
+    if novel_views > 0:
+        generate_novel(os.path.join(outdir, "novel"), views, novel_views,
+                       width, height, intrinsics, scene)
     return len(object_points), len(ground)
+
+
+def generate_novel(novel_dir, views, count, width, height, intrinsics, scene):
+    """Ground-truth views between the training cameras, with an empty points3D.bin."""
+    images_dir = os.path.join(novel_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    names = []
+    poses = []
+    for index, azimuth in enumerate(novel_azimuths(views, count)):
+        name = "novel_%02d.png" % index
+        pose = camera_pose(azimuth)
+        rgb, _ = render(scene, pose, intrinsics, width, height)
+        with open(os.path.join(images_dir, name), "wb") as f:
+            f.write(png_bytes(width, height, rgb))
+        names.append(name)
+        poses.append(pose)
+    write_colmap(os.path.join(novel_dir, "sparse", "0"), poses, names,
+                 width, height, intrinsics, [])
+    print("novel: %d views at azimuths %s" % (
+        count, ", ".join("%.1f" % math.degrees(a) for a in novel_azimuths(views, count))))
 
 
 def parse_size(text):
@@ -524,6 +742,14 @@ def main(argv=None):
                         help="object surface points (default 400)")
     parser.add_argument("--seed", type=int, default=1, help="random seed (default 1)")
     parser.add_argument("--ppm", action="store_true", help="also write images/view_NN.ppm")
+    depth_group = parser.add_mutually_exclusive_group()
+    depth_group.add_argument("--depth", action="store_true",
+                             help="write depth/view_NN.png.sdpt: metric z-buffer depth (kind 0)")
+    depth_group.add_argument("--relative-depth", action="store_true",
+                             help="write depth/view_NN.png.sdpt as relative inverse depth "
+                                  "(kind 2, a / z + b with seeded a, b; printed per view)")
+    parser.add_argument("--novel-views", type=int, default=0, metavar="N",
+                        help="also write N ground-truth novel views to novel/ (default 0)")
     parser.add_argument("--verify", action="store_true",
                         help="only verify an existing OUTDIR, do not generate")
     args = parser.parse_args(argv)
@@ -535,10 +761,22 @@ def main(argv=None):
         parser.error("--views must be at least 1")
     if args.points < 10:
         parser.error("--points must be at least 10")
+    if args.novel_views < 0:
+        parser.error("--novel-views must be at least 0")
+    if args.novel_views > 0 and args.views < 2:
+        parser.error("--novel-views needs at least 2 training views")
+
+    depth_mode = None
+    if args.depth:
+        depth_mode = "metric"
+    elif args.relative_depth:
+        depth_mode = "relative"
 
     width, height = args.size
     object_count, ground_count = generate(args.outdir, args.views, width, height,
-                                          args.points, args.seed, args.ppm)
+                                          args.points, args.seed, args.ppm,
+                                          depth_mode=depth_mode,
+                                          novel_views=args.novel_views)
     print("wrote %d views at %dx%d to %s: %d object + %d ground points"
           % (args.views, width, height, args.outdir, object_count, ground_count))
     return 0 if verify(args.outdir) else 1

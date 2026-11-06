@@ -10,7 +10,7 @@ var targets: [Target] = [
     .target(name: "SplatCore"),
     .target(name: "SplatIO", dependencies: ["SplatCore"]),
     .testTarget(name: "SplatCoreTests", dependencies: ["SplatCore"], resources: [.copy("Fixtures")]),
-    .testTarget(name: "SplatIOTests", dependencies: ["SplatIO"]),
+    .testTarget(name: "SplatIOTests", dependencies: ["SplatIO"], resources: [.copy("Fixtures")]),
 ]
 
 #if os(macOS)
