@@ -68,7 +68,7 @@ Named *Phase* (not "M1…") to avoid confusion with chip names.
 
 1. **Viewer** — document app shell, Metal viewport, import and smooth rendering of `.ply` / `.splat`.
 2. **Differentiable rasterizer** — forward/backward kernels, CPU reference, gsplat goldens, finite-difference checks.
-3. **Training** — COLMAP/ARKit import, Adam, densification/pruning, training from SfM points. *(Phase 3 core verified on CI; app integration in progress.)*
+3. **Training** — COLMAP/ARKit import, Adam, densification/pruning, training from SfM points. *(Done: verified on CI incl. GPU trainer overfit tests; manual check of the app flow with a real COLMAP dataset pending.)*
 4. **Sparse-view quality** — depth prior (Pearson + optional L1), dense depth init, pseudo-views, artifact regularizers, leave-one-out scheduling.
 5. **Editing & export** — brush tool for floaters in the viewport, `.ply` / `.splat` / `.spz` export.
 6. *(later)* **Pose-free** — MASt3R-style initialization via Core ML for uncalibrated images.
