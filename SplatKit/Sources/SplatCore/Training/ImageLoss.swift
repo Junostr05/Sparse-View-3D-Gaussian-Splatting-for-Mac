@@ -192,4 +192,58 @@ public enum ImageMetrics {
         }
         return 10 * log10(1 / error)
     }
+
+    /// Mean SSIM over W·H·3 values with the same window and constants as `ImageLoss`.
+    /// Equal to `ImageLoss.evaluate(rendered: a, target: b, lambda: _).ssim`, without the gradient.
+    public static func ssim(_ a: RGBImage, _ b: RGBImage) -> Double {
+        precondition(a.width == b.width && a.height == b.height,
+                     "images must have the same size")
+        let width: Int = a.width
+        let height: Int = a.height
+        let count: Int = width * height
+        let n: Double = Double(count * 3)
+        let c1d: Double = Double(ImageLoss.c1)
+        let c2d: Double = Double(ImageLoss.c2)
+        let taps: [Double] = ImageLoss.window.map { Double($0) }
+
+        var ssimSum: Double = 0
+        for c in 0..<3 {
+            var xs = [Double](repeating: 0, count: count)
+            var ys = [Double](repeating: 0, count: count)
+            var xx = [Double](repeating: 0, count: count)
+            var yy = [Double](repeating: 0, count: count)
+            var xy = [Double](repeating: 0, count: count)
+            for i in 0..<count {
+                let xv: Double = Double(a.pixels[i][c])
+                let yv: Double = Double(b.pixels[i][c])
+                xs[i] = xv
+                ys[i] = yv
+                xx[i] = xv * xv
+                yy[i] = yv * yv
+                xy[i] = xv * yv
+            }
+
+            let muX = ImageLoss.blur(xs, width: width, height: height, taps: taps)
+            let muY = ImageLoss.blur(ys, width: width, height: height, taps: taps)
+            let eXX = ImageLoss.blur(xx, width: width, height: height, taps: taps)
+            let eYY = ImageLoss.blur(yy, width: width, height: height, taps: taps)
+            let eXY = ImageLoss.blur(xy, width: width, height: height, taps: taps)
+
+            for i in 0..<count {
+                let mx: Double = muX[i]
+                let my: Double = muY[i]
+                let sxx: Double = eXX[i] - mx * mx
+                let syy: Double = eYY[i] - my * my
+                let sxy: Double = eXY[i] - mx * my
+                let a1: Double = 2 * mx * my + c1d
+                let a2: Double = 2 * sxy + c2d
+                let b1: Double = mx * mx + my * my + c1d
+                let b2: Double = sxx + syy + c2d
+                let numerator: Double = a1 * a2
+                let denominator: Double = b1 * b2
+                ssimSum += numerator / denominator
+            }
+        }
+        return ssimSum / n
+    }
 }
