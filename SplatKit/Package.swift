@@ -35,7 +35,7 @@ targets += [
     ),
     .testTarget(
         name: "SplatTrainingTests",
-        dependencies: ["SplatTraining", "SplatMetal", "SplatCore"]
+        dependencies: ["SplatTraining", "SplatMetal", "SplatCore", "SplatDepth"]
     ),
     // Phase 4 Task 5: depth alignment, providers and preparation. Phase 4 Task 20: the Core ML
     // depth estimator, which loads its model through SplatIO's ModelStore. Nonisolated default isolation.
