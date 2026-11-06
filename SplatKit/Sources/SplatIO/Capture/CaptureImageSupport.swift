@@ -1,6 +1,7 @@
 #if canImport(AVFoundation) && canImport(ImageIO) && canImport(CoreGraphics)
 import CoreGraphics
 import Foundation
+import ImageIO
 import SplatCore
 
 /// Image helpers shared by the video and photo frame sources. macOS only.
