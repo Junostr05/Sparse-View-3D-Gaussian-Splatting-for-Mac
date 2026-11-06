@@ -8,17 +8,32 @@ public enum PoseSource: String, Codable, Sendable {
 }
 
 /// One saved checkpoint of a training run.
+///
+/// The held-out fields are Phase 4 additions. They are optional, so checkpoints written before
+/// them still decode.
 public struct CheckpointRecord: Codable, Sendable, Equatable {
     public var iteration: Int
     public var gaussianCount: Int
     public var psnr: Double?
     public var date: Date
+    /// Name of the view held out from training for evaluation, if any.
+    public var heldOutView: String?
+    public var heldOutPSNR: Double?
+    public var heldOutSSIM: Double?
+    /// Iteration with the best held-out score, when early stopping was used.
+    public var bestIteration: Int?
 
-    public init(iteration: Int, gaussianCount: Int, psnr: Double?, date: Date) {
+    public init(iteration: Int, gaussianCount: Int, psnr: Double?, date: Date,
+                heldOutView: String? = nil, heldOutPSNR: Double? = nil,
+                heldOutSSIM: Double? = nil, bestIteration: Int? = nil) {
         self.iteration = iteration
         self.gaussianCount = gaussianCount
         self.psnr = psnr
         self.date = date
+        self.heldOutView = heldOutView
+        self.heldOutPSNR = heldOutPSNR
+        self.heldOutSSIM = heldOutSSIM
+        self.bestIteration = bestIteration
     }
 }
 
@@ -108,6 +123,12 @@ public enum ProjectLayout {
     public static let colmapDirectory = "poses/colmap"
     public static let arkitCapture = "poses/arkit.json"
     public static let latestCheckpoint = "checkpoints/latest.ply"
+    public static let depthDirectory = "depth"
+
+    /// `depth/<name>.sdpt` for the image stored as `name`.
+    public static func depthPath(forImage name: String) -> String {
+        depthDirectory + "/" + name + "." + DepthMapCodec.fileExtension
+    }
 }
 
 /// The package contents as plain data: the manifest plus every other file by relative path.
@@ -216,12 +237,24 @@ public enum ProjectBundle {
     public static func importARKit(capture: Data,
                                    imageFiles: [String: Data],
                                    into contents: ProjectContents) -> ProjectContents {
+        importARKit(capture: capture, imageFiles: imageFiles, depthFiles: [:], into: contents)
+    }
+
+    /// Replaces the images, poses, depth and checkpoints of `contents` with an ARKit JSON capture.
+    /// `depthFiles` is keyed by image name and holds the stored `.sdpt` bytes of each image's depth.
+    public static func importARKit(capture: Data,
+                                   imageFiles: [String: Data],
+                                   depthFiles: [String: Data],
+                                   into contents: ProjectContents) -> ProjectContents {
         var result = clearedForImport(contents,
                                       source: .arkit,
                                       inputKind: .arkit,
                                       imageFiles: imageFiles,
                                       frameProvenance: [])
         result.files[ProjectLayout.arkitCapture] = capture
+        for (name, data) in depthFiles {
+            result.files[ProjectLayout.depthPath(forImage: name)] = data
+        }
         return result
     }
 
@@ -261,6 +294,41 @@ public enum ProjectBundle {
             imported.files[directory + "/points3D.bin"] = COLMAPWriter.points3D(result.points)
         }
         return imported
+    }
+
+    // MARK: - Depth maps
+
+    /// Stores each map as `depth/<name>.sdpt`, keyed by image name. Entries for other images are
+    /// left as they are.
+    public static func withDepthMaps(_ contents: ProjectContents,
+                                     _ maps: [String: DepthMap]) -> ProjectContents {
+        var result = contents
+        for (name, map) in maps {
+            result.files[ProjectLayout.depthPath(forImage: name)] = DepthMapCodec.encode(map)
+        }
+        return result
+    }
+
+    /// Decodes every `depth/<name>.sdpt` file, keyed by image name. A file that does not decode is
+    /// reported in `failures` under its name, and the other maps still load.
+    public static func depthMaps(_ contents: ProjectContents)
+        -> (maps: [String: DepthMap], failures: [String: DepthMapError]) {
+        var maps: [String: DepthMap] = [:]
+        var failures: [String: DepthMapError] = [:]
+        let prefix = ProjectLayout.depthDirectory + "/"
+        let suffix = "." + DepthMapCodec.fileExtension
+        for (path, data) in contents.files where path.hasPrefix(prefix) && path.hasSuffix(suffix) {
+            let name = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+            guard !name.isEmpty else {
+                continue
+            }
+            do {
+                maps[name] = try DepthMapCodec.decode(data)
+            } catch {
+                failures[name] = error
+            }
+        }
+        return (maps, failures)
     }
 
     // MARK: - Dataset and checkpoints
@@ -350,6 +418,7 @@ public enum ProjectBundle {
                                          frameProvenance: [FrameProvenance]) -> ProjectContents {
         let managedPrefixes = [
             ProjectLayout.imagesDirectory + "/",
+            ProjectLayout.depthDirectory + "/",
             "poses/",
             "checkpoints/",
         ]
