@@ -197,8 +197,8 @@ struct GPUTrainerTests {
         configuration.previewInterval = 0
         configuration.seed = 1
         noDensification(&configuration)
-        // Phase 3 parity: the GPU trainer runs no Phase 4 terms yet (Task 17 mirrors them).
-        configuration.regularizers = []
+        // Default regularizers (all Phase 4 switches on). No depth prior exists in this scenario, so the
+        // only active terms are anisotropy and the scale cap, which both trainers apply in the same order.
 
         var cpu = try CPUTrainer(dataset: dataset, initialCloud: initial, configuration: configuration)
         for _ in 0..<5 {
@@ -247,6 +247,10 @@ struct GPUTrainerTests {
         configuration.evalInterval = 0
         configuration.previewInterval = 0
         noDensification(&configuration)
+        // The anisotropy gradient does not depend on visibility, so with the Phase 4 defaults a first Adam step
+        // would move the log-scales of this invisible cloud (as on the CPU). This test checks the Phase 3
+        // visibility path, so the regularizers are off.
+        configuration.regularizers = []
 
         let trainer = try GPUTrainer(context: context, dataset: dataset, initialCloud: cloud,
                                      configuration: configuration)
