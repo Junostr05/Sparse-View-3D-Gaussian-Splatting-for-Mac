@@ -46,3 +46,26 @@ has fewer than three Jacobian-clamped Gaussians.
 
 Both fixture directories receive identical files. Each file must stay under 400 KB; the
 generator enforces this.
+
+### Phase 4 cases
+
+`--only phase4` writes only the new cases: `golden_depth_single.json` and
+`golden_depth_occluded.json` (rendered depth `RGB+D` on the Phase 2 scenes, with `renderedDepth`,
+`renderedAlpha` and `depthGradient`), `golden_pearson.json` (Pearson and L1 depth loss in the
+`depth` and `inverseDepth` domains) and `golden_anisotropy.json` (anisotropy hinge). The default
+(`--only phase2`) still writes the four Phase 2 cases; `--only all` writes everything.
+
+```sh
+python Tools/golden/generate.py --only phase4 \
+    --out SplatKit/Tests/SplatCoreTests/Fixtures SplatKit/Tests/SplatMetalTests/Fixtures
+```
+
+The depth cross-check uses gsplat's pure-PyTorch compositing (`gsplat.cuda._torch_impl.accumulate`)
+with its geometry from gsplat. `gsplat.rendering.rasterization(render_mode="RGB+D")` needs the CUDA
+extension, which this machine does not have. Because gsplat's compositing imports two nerfacc
+primitives that are not installed (and must not be added), the generator installs in-process
+equivalents with nerfacc's semantics when that import fails.
+
+The Phase 2 fixtures (`golden_single/multi/rotated/occluded.json`) were generated with an older
+torch. Regenerating them with the current torch is not expected to be byte-identical (float noise,
+about 3e-6 relative), so they are kept as committed.

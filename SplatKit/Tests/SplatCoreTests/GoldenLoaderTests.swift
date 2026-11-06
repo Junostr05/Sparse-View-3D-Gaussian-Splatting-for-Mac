@@ -33,6 +33,39 @@ import SplatCore
         }
     }
 
+    @Test func phase4GoldensDecode() throws {
+        for name in ["depth_single", "depth_occluded"] {
+            let golden = try GoldenCase.load(name)
+            let n = try golden.cloud().count
+            #expect(golden.gradients.positions.count == 3 * n)
+
+            let pixelCount = golden.width * golden.height
+            let depth = try #require(golden.renderedDepth)
+            let alpha = try #require(golden.renderedAlpha)
+            let depthGradient = try #require(golden.depthGradient)
+            #expect(depth.count == pixelCount, "renderedDepth for \(name)")
+            #expect(alpha.count == pixelCount, "renderedAlpha for \(name)")
+            #expect(depthGradient.count == 2 * pixelCount, "depthGradient for \(name)")
+        }
+
+        let pearson = try PearsonGolden.load("pearson")
+        let pixelCount = pearson.width * pearson.height
+        #expect(pearson.draw.count == pixelCount)
+        #expect(pearson.alpha.count == pixelCount)
+        #expect(pearson.metricDepth.count == pixelCount)
+        #expect(pearson.cases.map(\.domain) == ["depth", "inverseDepth"])
+        for pearsonCase in pearson.cases {
+            #expect(pearsonCase.target.count == pixelCount)
+            #expect(pearsonCase.gradDraw.count == pixelCount)
+            #expect(pearsonCase.gradA.count == pixelCount)
+        }
+
+        let anisotropy = try AnisotropyGolden.load("anisotropy")
+        #expect(anisotropy.count == 16)
+        #expect(anisotropy.logScales.count == 3 * anisotropy.count)
+        #expect(anisotropy.gradLogScales.count == 3 * anisotropy.count)
+    }
+
     @Test(arguments: names) func forwardMatchesGolden(name: String) throws {
         let golden = try GoldenCase.load(name)
         let cloud = try golden.cloud()

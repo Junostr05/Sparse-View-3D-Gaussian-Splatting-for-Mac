@@ -39,6 +39,12 @@ struct GoldenCase: Decodable, Sendable {
     let image: [Float]
     let imageGradient: [Float]
     let gradients: Gradients
+    /// Phase 4 depth cases only: row-major W·H, `Draw = Σ αᵢ Tᵢ zᵢ` (gsplat RGB+D, un-normalised).
+    let renderedDepth: [Float]?
+    /// Phase 4 depth cases only: row-major W·H, `A = 1 − T_final`.
+    let renderedAlpha: [Float]?
+    /// Phase 4 depth cases only: row-major W·H·2, `(∂L/∂Draw, ∂L/∂A)` per pixel.
+    let depthGradient: [Float]?
 
     enum LoadError: Error, Equatable {
         case missingResource(String)
@@ -99,5 +105,75 @@ struct GoldenCase: Decodable, Sendable {
         stride(from: 0, to: flat.count, by: 3).map { i in
             SIMD3(flat[i], flat[i + 1], flat[i + 2])
         }
+    }
+}
+
+/// Phase 4 Pearson/L1 depth loss references (plan Task 6), written by
+/// `Tools/golden/generate.py --only phase4`. Shared inputs are row-major W·H. Each case holds
+/// the prior in its own domain and the reference outputs; gradients are with respect to
+/// `draw` and `alpha`. The Metal test target keeps an identical copy of this file.
+struct PearsonGolden: Decodable, Sendable {
+    struct Case: Decodable, Sendable {
+        /// "depth" or "inverseDepth".
+        let domain: String
+        /// Prior in `domain`; values ≤ 0 are invalid.
+        let target: [Float]
+        let loss: Double
+        /// ρ, 0 when degenerate.
+        let pearson: Double
+        let l1: Double
+        let validPixels: Int
+        let degenerate: Bool
+        let gradDraw: [Float]
+        let gradA: [Float]
+    }
+
+    let width: Int
+    let height: Int
+    let lambdaPearson: Float
+    let lambdaL1: Float
+    let alphaMask: Float
+    let nearPlane: Float
+    let minimumPixels: Int
+    let isMeasuredMetric: Bool
+    let l1Normalizer: Float
+    let draw: [Float]
+    let alpha: [Float]
+    /// Measured camera-z depth for the L1 term; values ≤ 0 are invalid.
+    let metricDepth: [Float]
+    let cases: [Case]
+
+    static func load(_ name: String) throws -> Self {
+        guard let url = Bundle.module.url(forResource: "golden_\(name)",
+                                          withExtension: "json",
+                                          subdirectory: "Fixtures") else {
+            throw GoldenCase.LoadError.missingResource(name)
+        }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(Self.self, from: data)
+    }
+}
+
+/// Phase 4 anisotropy hinge references (plan Task 7): `λ/n · Σ max(0, s_max/s_min − maxRatio)`.
+/// Written by `Tools/golden/generate.py --only phase4`. The Metal test target keeps an identical
+/// copy of this file.
+struct AnisotropyGolden: Decodable, Sendable {
+    let count: Int
+    let weight: Float
+    let maxRatio: Float
+    /// Row-major count × 3 log-scales.
+    let logScales: [Float]
+    let loss: Double
+    /// Row-major count × 3.
+    let gradLogScales: [Float]
+
+    static func load(_ name: String) throws -> Self {
+        guard let url = Bundle.module.url(forResource: "golden_\(name)",
+                                          withExtension: "json",
+                                          subdirectory: "Fixtures") else {
+            throw GoldenCase.LoadError.missingResource(name)
+        }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(Self.self, from: data)
     }
 }

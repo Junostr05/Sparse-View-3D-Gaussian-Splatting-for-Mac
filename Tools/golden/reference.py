@@ -255,8 +255,17 @@ def _cull(g: Dict[str, torch.Tensor], cam: Camera) -> Tuple[torch.Tensor, torch.
     return alive, tile_min, tile_max
 
 
-def forward_with_stats(p: Params, cam: Camera, settings: Settings):
-    """Forward pass. Returns (image [H, W, 3], stats dict). Differentiable w.r.t. Params."""
+def forward_detail(p: Params, cam: Camera, settings: Settings) -> dict:
+    """Forward pass with depth and the composited pairs. Differentiable w.r.t. Params.
+
+    Returns a dict with:
+      image       [H, W, 3]   colour, as in Phase 2
+      depth_raw   [H, W]      Σ αᵢ Tᵢ zᵢ, zᵢ = camera-space z of the mean (Phase 4 rendered depth)
+      alpha       [H, W]      1 − T_final (accumulated opacity)
+      stats       dict        gating counters, as in Phase 2
+      alive_index [G]         global Gaussian index of every alive Gaussian, in composite order
+      use         [P, G]      bool, the (pixel, alive Gaussian) pairs that are composited
+    """
     H, W = cam.height, cam.width
     bg = settings.background.to(F32)
 
@@ -277,7 +286,14 @@ def forward_with_stats(p: Params, cam: Camera, settings: Settings):
 
     if alive_idx.numel() == 0:
         image = bg.expand(H, W, 3).clone()
-        return image, stats
+        return {
+            "image": image,
+            "depth_raw": torch.zeros(H, W, dtype=F32),
+            "alpha": torch.zeros(H, W, dtype=F32),
+            "stats": stats,
+            "alive_index": alive_idx,
+            "use": torch.zeros(H * W, 0, dtype=torch.bool),
+        }
 
     # Pass 2: differentiable geometry of the surviving Gaussians.
     g = _geometry(p.select(alive_idx), cam, settings)
@@ -290,6 +306,7 @@ def forward_with_stats(p: Params, cam: Camera, settings: Settings):
     conic = g["conic"][order]
     color = g["color"][order]
     opacity = g["opacity"][order]
+    depth_z = g["z"][order]
     tile_min = tile_min[order]
     tile_max = tile_max[order]
 
@@ -347,15 +364,112 @@ def forward_with_stats(p: Params, cam: Camera, settings: Settings):
     rgb = weights @ color  # [pixels, 3]
     t_final = cp[:, -1]
     image = (rgb + t_final.unsqueeze(1) * bg.unsqueeze(0)).reshape(H, W, 3)
-    return image, stats
+    # Rendered depth as an extra composited channel (gsplat "RGB+D" convention, un-normalised):
+    # Draw = Σ αᵢ Tᵢ zᵢ and A = Σ αᵢ Tᵢ = 1 − T_final. The expected depth is Draw / A.
+    depth_raw = (weights @ depth_z).reshape(H, W)
+    alpha_map = (1 - t_final).reshape(H, W)
+    return {
+        "image": image,
+        "depth_raw": depth_raw,
+        "alpha": alpha_map,
+        "stats": stats,
+        "alive_index": alive_idx[order],
+        "use": use,
+    }
 
 
-def forward(p: Params, cam: Camera, settings: Settings) -> torch.Tensor:
-    image, _ = forward_with_stats(p, cam, settings)
-    return image
+def forward_with_stats(p: Params, cam: Camera, settings: Settings):
+    """Forward pass. Returns (image [H, W, 3], stats dict). Differentiable w.r.t. Params."""
+    out = forward_detail(p, cam, settings)
+    return out["image"], out["stats"]
+
+
+def forward(p: Params, cam: Camera, settings: Settings, with_depth: bool = False):
+    """Returns the image, or (image, depth_raw [H, W], alpha [H, W]) when with_depth is set."""
+    out = forward_detail(p, cam, settings)
+    if with_depth:
+        return out["image"], out["depth_raw"], out["alpha"]
+    return out["image"]
 
 
 def geometry_for_check(p: Params, cam: Camera, settings: Settings) -> Dict[str, torch.Tensor]:
     """Per-Gaussian geometry for every Gaussian (no culling), for cross-checks."""
     with torch.no_grad():
         return _geometry(p, cam, settings)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 depth loss and regularizer references (plan Tasks 6 and 7, written in PyTorch).
+# Autograd provides the gradients; the Swift CPU code implements the closed forms.
+# ---------------------------------------------------------------------------
+
+def median_positive(values: torch.Tensor) -> float:
+    """Median of the finite, positive entries (average of the two middle values for even n)."""
+    vals = values[torch.isfinite(values) & (values > 0)].sort().values
+    n = vals.numel()
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 1:
+        return float(vals[mid])
+    return float(0.5 * (vals[mid - 1] + vals[mid]))
+
+
+def pearson_depth_loss(draw, alpha, target, domain, metric, is_measured, lam_p, lam_l1,
+                       alpha_mask, near, minimum_pixels, l1_normalizer):
+    """Task 6 depth loss. All tensors are float64 and flat (row-major pixels).
+
+    draw, alpha: rendered Draw and A.  target: prior in its own domain (invalid when ≤ 0 or
+    non-finite).  metric: measured camera-z depth for the L1 term (invalid when ≤ 0), used only
+    when is_measured.  Returns (loss, pearson, l1, valid_count, degenerate); gradients come
+    from autograd on the returned loss with respect to draw and alpha.
+    """
+    valid = (alpha > alpha_mask) & torch.isfinite(target) & (target > 0)
+    idx = torch.nonzero(valid).squeeze(1)
+    n = int(idx.numel())
+
+    d_m = draw[idx] / alpha[idx]
+    t_m = target[idx]
+    if domain == "depth":
+        x = d_m
+    elif domain == "inverseDepth":
+        x = 1.0 / torch.clamp(d_m, min=near)
+    else:
+        raise ValueError(domain)
+
+    zero = torch.zeros((), dtype=torch.float64)
+    degenerate = True
+    pearson_term = zero
+    rho = 0.0
+    if n >= minimum_pixels:
+        mx = x.mean()
+        my = t_m.mean()
+        sx = torch.sqrt(((x - mx) ** 2).mean())
+        sy = torch.sqrt(((t_m - my) ** 2).mean())
+        if bool(sx > 1e-6 * (mx.abs() + 1e-6)) and bool(sy > 1e-6 * (my.abs() + 1e-6)):
+            cov = ((x - mx) * (t_m - my)).mean()
+            rho_t = cov / (sx * sy)
+            pearson_term = lam_p * (1.0 - rho_t)
+            rho = float(rho_t.detach())
+            degenerate = False
+
+    loss = pearson_term
+    l1_value = 0.0
+    if is_measured and lam_l1 > 0 and l1_normalizer > 0:
+        m_all = metric[idx]
+        keep = m_all > 0
+        n1 = int(keep.sum())
+        if n1 > 0:
+            diff = (d_m[keep] - m_all[keep]).abs()
+            l1_t = diff.mean() / l1_normalizer
+            loss = loss + lam_l1 * l1_t
+            l1_value = float(l1_t.detach())
+
+    return loss, rho, l1_value, n, degenerate
+
+
+def anisotropy_loss(log_scales: torch.Tensor, lam: float, max_ratio: float) -> torch.Tensor:
+    """Task 7 anisotropy hinge: λ/n · Σ relu(s_max / s_min − max_ratio), s = exp(logScale)."""
+    n = log_scales.shape[0]
+    ratio = torch.exp(log_scales.max(dim=1).values - log_scales.min(dim=1).values)
+    return lam / n * torch.clamp(ratio - max_ratio, min=0.0).sum()

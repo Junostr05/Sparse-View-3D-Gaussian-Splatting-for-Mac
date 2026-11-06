@@ -18,12 +18,14 @@ import json
 import math
 import os
 import sys
+import types
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from gsplat.cuda._torch_impl import (
+    accumulate,
     _eval_sh_bases_fast,
     _persp_proj,
     _quat_scale_to_covar_preci,
@@ -34,6 +36,10 @@ import reference as ref
 from reference import Camera, Params, Settings
 
 CASES = ("single", "multi", "rotated", "occluded")
+# Phase 4 cases (`--only phase4`): depth cases reuse the Phase 2 scenes, the other two are
+# loss-only references. Output names are golden_<name>.json.
+DEPTH_CASES = {"depth_single": "single", "depth_occluded": "occluded"}
+PHASE4_NAMES = ("depth_single", "depth_occluded", "pearson", "anisotropy")
 CROSS_CHECK_TOL = 1e-5
 MAX_FILE_BYTES = 400_000
 F32 = torch.float32
@@ -344,15 +350,285 @@ def golden_dict(name, cam, params, settings, image, image_grad, grads):
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 cases: rendered depth (RGB+D), Pearson/L1 depth loss, anisotropy hinge.
+# ---------------------------------------------------------------------------
+
+def install_nerfacc_shim() -> None:
+    """Supplies nerfacc's two primitives used by gsplat's pure-PyTorch compositing.
+
+    gsplat.cuda._torch_impl.accumulate imports `accumulate_along_rays` and
+    `render_weight_from_alpha` from nerfacc, which is not installed in the golden environment
+    and must not be added. Only when that import fails, this installs in-process equivalents
+    with nerfacc's semantics (samples sorted by ray, then by depth):
+      render_weight_from_alpha: w_i = α_i · Π_{j<i} (1 − α_j) per ray, segmented log-cumsums
+      accumulate_along_rays:    Σ_i w_i · v_i per ray (values None: Σ_i w_i)
+    """
+    try:
+        import nerfacc  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    def render_weight_from_alpha(alphas, ray_indices, n_rays):
+        a = alphas.to(torch.float64)
+        log_keep = torch.log1p(-a)
+        inclusive = torch.cumsum(log_keep, 0)
+        exclusive = inclusive - log_keep
+        new_segment = torch.ones_like(ray_indices, dtype=torch.bool)
+        new_segment[1:] = ray_indices[1:] != ray_indices[:-1]
+        segment_id = torch.cumsum(new_segment.long(), 0) - 1
+        base = exclusive[new_segment][segment_id]
+        weights = (a * torch.exp(exclusive - base)).to(alphas.dtype)
+        trans = torch.exp(inclusive - base).to(alphas.dtype)
+        return weights, trans
+
+    def accumulate_along_rays(weights, values=None, ray_indices=None, n_rays=None):
+        w = weights.to(torch.float64)
+        if values is None:
+            out = torch.zeros(n_rays, dtype=torch.float64).index_add_(0, ray_indices, w)
+        else:
+            v = values.to(torch.float64)
+            out = torch.zeros(n_rays, v.shape[-1], dtype=torch.float64)
+            out = out.index_add_(0, ray_indices, w[:, None] * v)
+        return out.to(weights.dtype)
+
+    shim = types.ModuleType("nerfacc")
+    shim.render_weight_from_alpha = render_weight_from_alpha
+    shim.accumulate_along_rays = accumulate_along_rays
+    sys.modules["nerfacc"] = shim
+
+
+def gsplat_depth_check(p: Params, cam: Camera, detail: dict) -> dict:
+    """Composites the pairs chosen by reference.forward_detail with gsplat's own compositing.
+
+    gsplat's rasterization(render_mode="RGB+D") needs the CUDA extension, which this machine
+    does not have, so the cross-check uses gsplat's pure-PyTorch `accumulate` instead. Geometry
+    comes from gsplat (world -> camera, 2D mean and covariance, camera-space z); opacity and the
+    composited pair set come from the reference, whose colour gating is checked by the Phase 2
+    images. Returns max |diff| for the accumulated depth (RGB+D channel 2) and alpha.
+    """
+    install_nerfacc_shim()
+    H, W = cam.height, cam.width
+    with torch.no_grad():
+        scales = torch.exp(p.log_scales)
+        covars_w, _ = _quat_scale_to_covar_preci(
+            p.rotations, scales, compute_covar=True, compute_preci=False)
+        viewmat = torch.eye(4, dtype=F32)
+        viewmat[:3, :3] = cam.rotation
+        viewmat[:3, 3] = cam.translation
+        means_c, covars_c = _world_to_cam(p.positions, covars_w, viewmat[None])
+        Ks = torch.tensor([[[cam.fx, 0.0, cam.cx], [0.0, cam.fy, cam.cy], [0.0, 0.0, 1.0]]],
+                          dtype=F32)
+        means2d, cov2d = _persp_proj(means_c, covars_c, Ks, W, H)
+        means2d = means2d[0]
+        cov2d = cov2d[0]
+        z = means_c[0, :, 2]
+
+        eps = ref.EPS_2D
+        a = cov2d[:, 0, 0] + eps
+        b = cov2d[:, 0, 1]
+        c = cov2d[:, 1, 1] + eps
+        det = a * c - b * b
+        conic = torch.stack([c / det, -b / det, a / det], -1)
+        opacity = torch.sigmoid(p.opacity_logits)
+
+        idx = detail["alive_index"]
+        use = detail["use"]
+        rows, cols = torch.nonzero(use, as_tuple=True)  # row-major: pixel, then depth order
+        image_ids = torch.zeros_like(rows)
+        renders, alphas = accumulate(
+            means2d[idx][None],
+            conic[idx][None],
+            opacity[idx][None],
+            z[idx][None, :, None],
+            cols,
+            rows,
+            image_ids,
+            W,
+            H,
+        )
+        depth_gs = renders[0, :, :, 0]
+        alpha_gs = alphas[0, :, :, 0]
+        d_depth = (depth_gs - detail["depth_raw"].detach()).abs().max().item()
+        d_alpha = (alpha_gs - detail["alpha"].detach()).abs().max().item()
+    return {"depth": d_depth, "alpha": d_alpha}
+
+
+def depth_golden_dict(name, cam, params, settings, out, image_grad, depth_grad, grads):
+    golden = golden_dict(name, cam, params, settings, out["image"], image_grad, grads)
+    golden["renderedDepth"] = flat(out["depth_raw"])
+    golden["renderedAlpha"] = flat(out["alpha"])
+    golden["depthGradient"] = flat(depth_grad)  # (H, W, 2) row-major: (dL/dDraw, dL/dA)
+    return golden
+
+
+def run_depth_case(name: str, base: str):
+    """Rendered depth on a Phase 2 scene. Loss = Σ g·image + Σ gD·Draw + Σ gA·A (seeded)."""
+    _, cam, params, settings, gen = BUILDERS[base]()
+    H, W = cam.height, cam.width
+    image_grad = (torch.rand((H, W, 3), generator=gen, dtype=torch.float64) * 2 - 1).to(F32)
+    depth_grad = (torch.rand((H, W, 2), generator=gen, dtype=torch.float64) * 2 - 1).to(F32)
+
+    leaves = [t.detach().clone().requires_grad_(True) for t in params.tensors()]
+    leaf_params = Params(
+        positions=leaves[0], log_scales=leaves[1], rotations=leaves[2],
+        opacity_logits=leaves[3], sh=leaves[4], sh_degree=params.sh_degree,
+    )
+    out = ref.forward_detail(leaf_params, cam, settings)
+    loss = ((out["image"] * image_grad).sum()
+            + (out["depth_raw"] * depth_grad[..., 0]).sum()
+            + (out["alpha"] * depth_grad[..., 1]).sum())
+    grads = torch.autograd.grad(loss, leaves, allow_unused=True)
+    grads = [torch.zeros_like(l) if g is None else g for l, g in zip(leaves, grads)]
+    for gname, gt in zip(GROUPS, grads):
+        if not torch.isfinite(gt).all():
+            raise RuntimeError(f"[{name}] non-finite gradient in {gname}")
+    for key in ("image", "depth_raw", "alpha"):
+        if not torch.isfinite(out[key]).all():
+            raise RuntimeError(f"[{name}] non-finite {key}")
+
+    cross = gsplat_depth_check(params, cam, out)
+    golden = depth_golden_dict(name, cam, params, settings, out, image_grad, depth_grad, grads)
+    return golden, cross, out
+
+
+def pearson_golden(failures: list) -> dict:
+    """Task 6 depth loss references (two domains, same prior and mask, measured metric for L1)."""
+    W, H = 12, 9
+    lam_p, lam_l1, alpha_mask, near, minimum_pixels = 0.05, 0.1, 0.3, 0.01, 64
+    gen = torch.Generator().manual_seed(5)
+    n = W * H
+
+    depth_true = uniform(gen, (n,), 1.2, 4.0)
+    alpha_v = uniform(gen, (n,), 0.05, 1.0)            # about a third below the 0.3 mask
+    draw_v = depth_true * alpha_v
+    invalid = np.zeros(n, dtype=bool)
+    invalid[uniform(gen, (10,), 0, n).astype(int)] = True
+    noise_d = normal(gen, (n,)) * 0.1
+    noise_i = normal(gen, (n,)) * 0.02
+    metric_v = depth_true * 1.02 + normal(gen, (n,)) * 0.02
+    metric_v[uniform(gen, (6,), 0, n).astype(int)] = 0.0  # invalid metric samples
+
+    draw = to_tensor(draw_v, (n,)).to(torch.float64)
+    alpha = to_tensor(alpha_v, (n,)).to(torch.float64)
+    metric = to_tensor(metric_v, (n,)).to(torch.float64)
+    target_depth = to_tensor(np.where(invalid, -1.0, 2.0 * depth_true + 0.5 + noise_d),
+                             (n,)).to(torch.float64)
+    target_inverse = to_tensor(np.where(invalid, 0.0, 1.5 / depth_true + noise_i),
+                               (n,)).to(torch.float64)
+    normalizer = ref.median_positive(metric)
+
+    cases = []
+    for domain, target in (("depth", target_depth), ("inverseDepth", target_inverse)):
+        leaf_draw = draw.clone().requires_grad_(True)
+        leaf_alpha = alpha.clone().requires_grad_(True)
+        loss, rho, l1, count, degenerate = ref.pearson_depth_loss(
+            leaf_draw, leaf_alpha, target, domain, metric, True,
+            lam_p, lam_l1, alpha_mask, near, minimum_pixels, normalizer)
+        if degenerate:
+            failures.append(f"[pearson/{domain}] degenerate case; the golden must be non-degenerate")
+            cases.append(None)
+            continue
+        g_draw, g_alpha = torch.autograd.grad(loss, [leaf_draw, leaf_alpha], allow_unused=True)
+        g_draw = torch.zeros_like(draw) if g_draw is None else g_draw
+        g_alpha = torch.zeros_like(alpha) if g_alpha is None else g_alpha
+        print(f"[pearson/{domain}] valid pixels {count}/{n}, loss {float(loss.detach()):.6g}, "
+              f"pearson {rho:.6g}, l1 {l1:.6g}, max |gradDraw| {g_draw.abs().max().item():.6g}, "
+              f"max |gradA| {g_alpha.abs().max().item():.6g}")
+        cases.append({
+            "domain": domain,
+            "target": flat(target),
+            "loss": float(loss.detach()),
+            "pearson": rho,
+            "l1": l1,
+            "validPixels": count,
+            "degenerate": degenerate,
+            "gradDraw": flat(g_draw),
+            "gradA": flat(g_alpha),
+        })
+
+    return {
+        "width": W,
+        "height": H,
+        "lambdaPearson": lam_p,
+        "lambdaL1": lam_l1,
+        "alphaMask": alpha_mask,
+        "nearPlane": near,
+        "minimumPixels": minimum_pixels,
+        "isMeasuredMetric": True,
+        "l1Normalizer": normalizer,
+        "draw": flat(draw),
+        "alpha": flat(alpha),
+        "metricDepth": flat(metric),
+        "cases": [c for c in cases if c is not None],
+    }
+
+
+def anisotropy_golden(failures: list) -> dict:
+    """Task 7 anisotropy references: 16 Gaussians, the first 8 with ratio above 10."""
+    gen = torch.Generator().manual_seed(6)
+    n, lam, max_ratio = 16, 0.1, 10.0
+    base = uniform(gen, (n, 3), -2.0, -0.5)
+    raise_axis = np.argmax(uniform(gen, (n, 3), 0.0, 1.0), axis=1)
+    spread = uniform(gen, (n,), 2.6, 3.4)
+    # Above-ratio rows: one axis is lifted to (smallest other axis + spread), so it is the
+    # maximum and s_max / s_min = exp(spread) > e^2.6 > 10. Other rows span at most 1.5.
+    for i in range(n // 2):
+        r = raise_axis[i]
+        others = np.delete(base[i], r)
+        base[i, r] = others.min() + spread[i]
+    log_scales = to_tensor(base, (n, 3)).to(torch.float64).requires_grad_(True)
+
+    loss = ref.anisotropy_loss(log_scales, lam, max_ratio)
+    grad, = torch.autograd.grad(loss, [log_scales])
+    ratio = torch.exp(log_scales.detach().max(dim=1).values - log_scales.detach().min(dim=1).values)
+    above_count = int((ratio > max_ratio).sum())
+    if above_count != n // 2:
+        failures.append(f"[anisotropy] {above_count} Gaussians above the ratio, expected {n // 2}")
+    print(f"[anisotropy] {n} Gaussians, {above_count} above ratio {max_ratio:g}, "
+          f"loss {float(loss.detach()):.6g}, max |grad| {grad.abs().max().item():.6g}")
+    return {
+        "count": n,
+        "weight": lam,
+        "maxRatio": max_ratio,
+        "logScales": flat(log_scales),
+        "loss": float(loss.detach()),
+        "gradLogScales": flat(grad),
+    }
+
+
+def phase4_outputs(failures: list) -> dict:
+    outputs = {}
+    for name, base in DEPTH_CASES.items():
+        golden, cross, out = run_depth_case(name, base)
+        stats = out["stats"]
+        print(f"[{name}] {len(golden['positions']) // 3} Gaussians, "
+              f"{golden['width']}x{golden['height']}, alive {stats['alive']}, "
+              f"terminated pixels {stats['terminated_pixels']}")
+        print("  gsplat depth cross-check max |diff|: " + ", ".join(
+            f"{k}={v:.3g}" for k, v in cross.items()))
+        for k, v in cross.items():
+            if not v <= CROSS_CHECK_TOL:
+                failures.append(f"[{name}] gsplat depth cross-check {k} diff {v:.3g} > {CROSS_CHECK_TOL}")
+        outputs[name] = golden
+    outputs["pearson"] = pearson_golden(failures)
+    outputs["anisotropy"] = anisotropy_golden(failures)
+    return outputs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", nargs="+", required=True, metavar="DIR",
                         help="one or more directories to write golden_<name>.json into")
+    parser.add_argument("--only", choices=("phase2", "phase4", "all"), default="phase2",
+                        help="phase2: the four Phase 2 cases (default, unchanged); "
+                             "phase4: only the new Phase 4 cases; all: both")
     args = parser.parse_args()
 
     failures = []
     outputs = {}
-    for name in CASES:
+    for name in (CASES if args.only in ("phase2", "all") else ()):
         _, cam, params, settings, gen = BUILDERS[name]()
         image, image_grad, grads, stats, cross = run_case(name, cam, params, settings, gen)
 
@@ -379,6 +655,9 @@ def main() -> int:
             failures.append(f"[rotated] only {stats['jacobian_clamped']} Jacobian-clamped Gaussians (need >= 3)")
 
         outputs[name] = golden_dict(name, cam, params, settings, image, image_grad, grads)
+
+    if args.only in ("phase4", "all"):
+        outputs.update(phase4_outputs(failures))
 
     if failures:
         for msg in failures:
