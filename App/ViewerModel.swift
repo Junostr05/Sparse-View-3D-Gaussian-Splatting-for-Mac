@@ -1,8 +1,11 @@
 import Foundation
 import Observation
+import OSLog
 import SplatCore
 import SplatIO
 import SplatMetal
+
+private let logger = Logger(subsystem: "io.github.junostr05.SparseSplat", category: "Viewer")
 
 /// Metal objects for one window. Deliberately not observable.
 final class MetalSession {
@@ -45,7 +48,11 @@ final class ViewerModel {
         case unavailable
     }
 
-    let scene: LoadedScene
+    /// The scene shown by the viewport. Replaced during training by `replaceCloud(_:)`.
+    private(set) var scene: LoadedScene
+
+    /// Incremented on every `replaceCloud(_:)`. `ViewportView` reads it so SwiftUI re-renders the view.
+    private(set) var cloudRevision = 0
 
     var orbit: OrbitCamera
     var shDegreeLimit: Int
@@ -83,6 +90,21 @@ final class ViewerModel {
         } catch {
             renderState = .unavailable
         }
+    }
+
+    /// Replaces the displayed Gaussians, for example with a training preview. The orbit camera keeps
+    /// its framing. Before the renderer exists the new cloud is used when it is created.
+    func replaceCloud(_ cloud: GaussianCloud) {
+        scene = LoadedScene(cloud: cloud, removedNonFinite: 0)
+        shDegreeLimit = min(shDegreeLimit, cloud.shDegree)
+        if case .ready(let session) = renderState {
+            do throws(MetalError) {
+                try session.renderer.setCloud(cloud)
+            } catch {
+                logger.error("Replacing the cloud failed: \(String(describing: error))")
+            }
+        }
+        cloudRevision += 1
     }
 
     func resetView() {

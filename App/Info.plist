@@ -26,6 +26,20 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
+			<string>Sparse Splat Project</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSTypeIsPackage</key>
+			<true/>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.junostr05.SparseSplat.gsproj</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
 			<string>Gaussian Splat PLY</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
@@ -47,6 +61,26 @@
 			<array>
 				<string>io.github.junostr05.SparseSplat.splat</string>
 			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.junostr05.SparseSplat.gsproj</string>
+			<key>UTTypeDescription</key>
+			<string>Sparse Splat Project</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>com.apple.package</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>gsproj</string>
+				</array>
+			</dict>
 		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>

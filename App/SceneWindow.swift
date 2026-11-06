@@ -10,8 +10,7 @@ struct SceneWindow: View {
     }
 
     var body: some View {
-        viewport
-            .task { model.prepareRenderer() }
+        ViewerContent(model: model)
             .toolbar {
                 ToolbarItem {
                     Button {
@@ -43,22 +42,5 @@ struct SceneWindow: View {
                 SceneInspector(model: model)
                     .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
             }
-    }
-
-    @ViewBuilder
-    private var viewport: some View {
-        switch model.renderState {
-        case .preparing:
-            Color.clear
-        case .ready(let session):
-            ViewportView(model: model, session: session)
-                .accessibilityLabel("3D viewport")
-        case .unavailable:
-            ContentUnavailableView(
-                "Metal Not Available",
-                systemImage: "exclamationmark.triangle",
-                description: Text("This Mac cannot render the scene because no Metal device could be set up.")
-            )
-        }
     }
 }

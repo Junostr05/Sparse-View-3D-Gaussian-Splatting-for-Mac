@@ -21,6 +21,7 @@ struct ViewportView: NSViewRepresentable {
         _ = model.orbit
         _ = model.shDegreeLimit
         _ = model.background
+        _ = model.cloudRevision
         nsView.needsDisplay = true
     }
 }
