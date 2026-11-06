@@ -61,3 +61,42 @@ Add decision-log rows for A1-A8 (inputs, frame selection, pose provider chain, C
 - **Headless run: inconclusive.** The synthetic 4-view scene gave only ~200 SIFT features per image and no matches, so the mapper stopped with "No images with matches" and the converters aborted on the empty model (exit 134). This is a test-data problem, not a COLMAP problem — the same COLMAP version registered all 13 real photos with pycolmap.
 
 **Consequence:** bundling is only viable with our own **minimal source build**: `GUI_ENABLED=OFF`, `CUDA_ENABLED=OFF`, no ONNX/learned features, no CGAL, no ffmpeg; Ceres built with Eigen/Accelerate sparse instead of SuiteSparse; static or app-private dylibs with `@rpath`. Next step is a second CI spike that builds this and runs it on a **real-looking** scene (sample photos, not the synthetic sphere), then re-evaluates size and licenses. If that fails, fall back to the pose-provider chain without COLMAP first (Apple Photogrammetry, foundation model) and offer COLMAP only as an optional user-installed tool. The user decision A4 (keep the sandbox, bundle COLMAP) is unchanged.
+
+## COLMAP licence findings from reading the source (2026-11-06, Mac session)
+
+Spike 2 stopped at configure, so these had not surfaced in a build:
+
+- **CHOLMOD is required** by COLMAP 4.2.1 (`find_package(CHOLMOD REQUIRED)`), for one solver class that already falls back to Eigen's `SimplicialLDLT`. Removed by `Tools/ci/patch_colmap_no_cholmod.py`.
+- **LSD is AGPL** (`src/thirdparty/LSD`), enabled by default. `LSD_ENABLED=OFF` is mandatory.
+- **SiftGPU is non-commercial** (`src/thirdparty/SiftGPU`: "educational, research and non-profit purposes"). It is only built with `GPU_ENABLED`, so `OPENGL_ENABLED=OFF` and `CUDA_ENABLED=OFF` are mandatory.
+- **Homebrew's `openimageio` pulls ffmpeg, x264/x265, libheif and libraw**, so OpenImageIO must also come from a minimal source build.
+
+`Tools/ci/colmap_minimal_build.sh` now covers all of these and has a licence gate in its report.
+
+## P8 result: depth model (2026-11-06, verified on a Mac)
+
+- **Source:** Hugging Face `apple/coreml-depth-anything-v2-small`, commit `cfef6f6f`, licence Apache-2.0 (model card, tag and the model's own metadata). Pinned variant `DepthAnythingV2SmallF16.mlpackage`, 49.8 MB.
+- **It is a directory of 3 files, not one file and no zip**, so `ModelDescriptor`/`ModelStore` became multi-file. Checksums were computed from the downloaded files; the two LFS files also match Hugging Face's SHA-256.
+- **I/O:** input `image` RGB, output `depth` `Grayscale16Half` (`L16Half`), both **fixed at 518x392** (`hasSizeFlexibility: 0`, although the model card suggests flexible sizes).
+- **Output semantics:** bright = near, so the values behave like relative inverse depth, normalised (observed 0.10-1.0 on one photo). This matches main plan decision P4; Task 20's rotation for portrait views still applies.
+- **Glass:** on the coffee table the glass top reads as a vague surface and the floor below it disappears from the prior. Expect the depth prior to be wrong on glass.
+- **Real download** through `URLSessionModelDownloader` works (status `ready`, Core ML compiles and loads it). The first version reported no byte progress, because the async `download(from:delegate:)` does not call `didWriteData`; it now uses a callback download task. Not yet run inside the sandboxed app, since no UI triggers it before P9.
+
+## P7 probe: Apple Photogrammetry on real photos (2026-11-06, one scene only)
+
+`PhotogrammetrySession` `.poses` on the table photos, compared with COLMAP's 13-view camera centres by pairwise distances (invariant to the similarity transform):
+
+| Input | Registered | Time | Correlation | Mean / max rel. error |
+|---|---|---|---|---|
+| 13 JPEG with EXIF | 13/13 | not recorded | 1.0000 | 0.3 % / 1.0 % |
+| 13 PNG, EXIF stripped, oriented | 13/13 | 3.5 s | 1.0000 | 0.2 % / 0.8 % |
+| 6 JPEG with EXIF | 6/6 | 2.3 s | 0.9999 | 0.4 % / 1.3 % |
+| 6 PNG, EXIF stripped, oriented | 6/6 | 2.2 s | 0.9999 | 0.3 % / 1.0 % |
+
+COLMAP 4.2.1 (CPU) on the same 6 JPEGs registered **5/6** with 175 points, reprojection error 0.46 px.
+
+Notes for building P7:
+
+- This compares camera centres only, not orientations, and says nothing about training quality yet.
+- `session.outputs` does not end after `.processingComplete`; the consumer must stop itself.
+- `.poses` returns no intrinsics. iPhone 15 Pro EXIF has `FocalLenIn35mmFilm = 35`. Against COLMAP's calibrated `fx = 1201.66` at 1200x900, the diagonal rule `f35 * diagonal_px / 43.27` gives 1213 (+1.0 %), the long-side rule `f35 * width / 36` gives 1167 (-2.9 %). **Use the diagonal rule** and store `f35` in `FrameProvenance` at import, because the import strips EXIF.

@@ -39,8 +39,8 @@ public enum ModelDownloadError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Downloads the model with `URLSession` into a temporary file, then installs it through `ModelStore`,
-/// which verifies the SHA-256 checksum.
+/// Downloads every file of a model package with `URLSession` into a staging directory, then installs that
+/// directory through `ModelStore`, which verifies each SHA-256 checksum.
 public struct URLSessionModelDownloader: ModelDownloading {
     private let session: URLSession
 
@@ -53,51 +53,93 @@ public struct URLSessionModelDownloader: ModelDownloading {
         to store: ModelStore,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
-        guard descriptor.isConfigured, let sourceURL = descriptor.sourceURL else {
+        guard descriptor.isConfigured, let baseURL = descriptor.baseURL else {
             throw ModelDownloadError.notConfigured
         }
 
-        let temporaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("model-download-\(UUID().uuidString).part", isDirectory: false)
+        let fileManager = FileManager.default
+        let staging = fileManager.temporaryDirectory
+            .appendingPathComponent("model-download-\(UUID().uuidString)", isDirectory: true)
+        let total: Int64 = descriptor.totalSizeBytes
         do {
-            try await fetch(from: sourceURL, to: temporaryURL, expectedSize: descriptor.sizeBytes, progress: progress)
-            // On success the install moves the file into the store. On failure it may already be deleted.
-            try store.install(downloadedFile: temporaryURL, for: descriptor)
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+            var finishedBytes: Int64 = 0
+            for file in descriptor.files {
+                try Task.checkCancellation()
+                let source = baseURL
+                    .appendingComponents(of: descriptor.packageName)
+                    .appendingComponents(of: file.relativePath)
+                let destination = staging.appendingComponents(of: file.relativePath)
+                try fileManager.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                let bytesBefore: Int64 = finishedBytes
+                let declaredSize: Int64 = file.sizeBytes
+                try await fetch(from: source, to: destination) { writtenInFile in
+                    guard total > 0 else {
+                        return
+                    }
+                    // Clamp to the declared size, so a file that is larger than declared cannot push its
+                    // fraction past the start of the next file and make the progress jump backwards.
+                    let writtenBytes: Int64 = min(writtenInFile, declaredSize)
+                    let doneBytes: Int64 = bytesBefore + writtenBytes
+                    let fraction: Double = min(1.0, max(0.0, Double(doneBytes) / Double(total)))
+                    progress(fraction)
+                }
+                finishedBytes += declaredSize
+            }
+            try store.install(stagingDirectory: staging, for: descriptor)
             progress(1.0)
         } catch {
-            try? FileManager.default.removeItem(at: temporaryURL)
+            try? fileManager.removeItem(at: staging)
             throw ModelStoreDownloadMapping.map(error)
         }
     }
 
+    /// Downloads `url` to `fileURL`. `progress` receives the bytes written so far for this file.
+    /// Uses a callback download task with a task delegate, because the async `download(from:delegate:)`
+    /// API does not deliver per-chunk progress callbacks to the delegate.
     private func fetch(
         from url: URL,
         to fileURL: URL,
-        expectedSize: Int64?,
-        progress: @escaping @Sendable (Double) -> Void
+        progress: @escaping @Sendable (Int64) -> Void
     ) async throws {
-        let delegate = DownloadProgressDelegate(expectedSize: expectedSize, progress: progress)
-        let (location, response) = try await session.download(from: url, delegate: delegate)
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            try? FileManager.default.removeItem(at: location)
-            throw ModelDownloadError.httpStatus(http.statusCode)
-        }
-        do {
-            try FileManager.default.moveItem(at: location, to: fileURL)
-        } catch {
-            throw ModelStoreError.io("could not move the downloaded file: \(error.localizedDescription)")
+        let delegate = DownloadTaskDelegate(destination: fileURL, progress: progress)
+        let task = session.downloadTask(with: url)
+        task.delegate = delegate
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                delegate.start(continuation)
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
         }
     }
 }
 
-/// Forwards `URLSession` download progress as a fraction in 0...1.
-private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let expectedSize: Int64?
-    private let progress: @Sendable (Double) -> Void
+/// Delegate of one `URLSessionDownloadTask`. It moves the finished file into place, reports bytes written, and
+/// resumes the waiting continuation exactly once, from `didCompleteWithError`.
+private final class DownloadTaskDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let destination: URL
+    private let progress: @Sendable (Int64) -> Void
+    // Guarded by `lock`.
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var pendingError: Error?
+    private var finishedFile: Bool = false
 
-    init(expectedSize: Int64?, progress: @escaping @Sendable (Double) -> Void) {
-        self.expectedSize = expectedSize
+    init(destination: URL, progress: @escaping @Sendable (Int64) -> Void) {
+        self.destination = destination
         self.progress = progress
+    }
+
+    /// Stores the continuation that `didCompleteWithError` will resume.
+    func start(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.continuation = continuation
     }
 
     func urlSession(_ session: URLSession,
@@ -105,19 +147,52 @@ private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelega
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
-        let announced: Int64 = totalBytesExpectedToWrite
-        let total: Int64 = announced > 0 ? announced : (expectedSize ?? 0)
-        guard total > 0 else {
-            return
-        }
-        let fraction: Double = min(1.0, Double(totalBytesWritten) / Double(total))
-        progress(fraction)
+        progress(totalBytesWritten)
     }
 
     func urlSession(_ session: URLSession,
                     downloadTask: URLSessionDownloadTask,
                     didFinishDownloadingTo location: URL) {
-        // The async download API returns the file; nothing to do here.
+        // `location` is deleted when this method returns, so the file is moved here or the error is kept.
+        var failure: Error?
+        if let http = downloadTask.response as? HTTPURLResponse, http.statusCode != 200 {
+            failure = ModelDownloadError.httpStatus(http.statusCode)
+        } else {
+            do {
+                try FileManager.default.moveItem(at: location, to: destination)
+            } catch {
+                failure = ModelStoreError.io("could not move the downloaded file: \(error.localizedDescription)")
+            }
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let failure {
+            pendingError = failure
+        } else {
+            finishedFile = true
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let pending: CheckedContinuation<Void, Error>? = continuation
+        continuation = nil
+        let stored: Error? = pendingError
+        let moved: Bool = finishedFile
+        lock.unlock()
+
+        guard let pending else {
+            return
+        }
+        if let stored {
+            pending.resume(throwing: stored)
+        } else if let error {
+            pending.resume(throwing: ModelStoreDownloadMapping.map(error))
+        } else if moved {
+            pending.resume()
+        } else {
+            pending.resume(throwing: ModelDownloadError.transport("the download finished without a file"))
+        }
     }
 }
 

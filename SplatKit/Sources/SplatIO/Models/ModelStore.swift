@@ -2,13 +2,13 @@ import Foundation
 
 /// The state of a model in the local store.
 public enum ModelStatus: Equatable, Sendable {
-    /// The descriptor has no source URL or no valid checksum yet.
+    /// The descriptor has no base URL, no files or an invalid checksum or path.
     case notConfigured
-    /// Nothing is stored for this descriptor.
+    /// The package directory or one of its files is not stored.
     case missing
     /// A file is stored, but its checksum does not match. An empty `actual` means the file could not be read.
     case corrupt(expected: String, actual: String)
-    /// The file is stored and its checksum matches.
+    /// Every file is stored and its checksum matches. The payload is the package directory.
     case ready(URL)
 }
 
@@ -30,7 +30,7 @@ public enum ModelStoreError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Stores downloaded models under `rootDirectory/<id>/<version>/<fileName>`.
+/// Stores model packages under `rootDirectory/<id>/<version>/<packageName>/<relativePath>`.
 public struct ModelStore: Sendable {
     /// Read chunk size used when hashing stored files.
     static let hashChunkSize: Int = 1 << 20
@@ -41,64 +41,91 @@ public struct ModelStore: Sendable {
         self.rootDirectory = rootDirectory
     }
 
+    /// The version directory of the descriptor.
     public func directory(for descriptor: ModelDescriptor) -> URL {
         rootDirectory
             .appendingPathComponent(descriptor.id, isDirectory: true)
             .appendingPathComponent(descriptor.version, isDirectory: true)
     }
 
-    public func fileURL(for descriptor: ModelDescriptor) -> URL {
-        directory(for: descriptor).appendingPathComponent(descriptor.fileName, isDirectory: false)
+    /// The installed package directory, `<version directory>/<packageName>`.
+    public func packageURL(for descriptor: ModelDescriptor) -> URL {
+        directory(for: descriptor).appendingComponents(of: descriptor.packageName)
     }
 
     public func status(for descriptor: ModelDescriptor) -> ModelStatus {
-        guard descriptor.isConfigured, let expected = descriptor.sha256 else {
+        guard descriptor.isConfigured else {
             return .notConfigured
         }
-        let url = fileURL(for: descriptor)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        let fileManager = FileManager.default
+        let package = packageURL(for: descriptor)
+        guard fileManager.fileExists(atPath: package.path) else {
             return .missing
         }
-        do {
-            let actual = try ModelStore.hashFile(at: url)
-            if actual == expected {
-                return .ready(url)
+        // Check presence of every file before hashing any, so a missing file is reported as missing.
+        for file in descriptor.files {
+            let url = package.appendingComponents(of: file.relativePath)
+            if !fileManager.fileExists(atPath: url.path) {
+                return .missing
             }
-            return .corrupt(expected: expected, actual: actual)
-        } catch {
-            return .corrupt(expected: expected, actual: "")
         }
+        for file in descriptor.files {
+            let url = package.appendingComponents(of: file.relativePath)
+            do {
+                let actual = try ModelStore.hashFile(at: url)
+                if actual != file.sha256 {
+                    return .corrupt(expected: file.sha256, actual: actual)
+                }
+            } catch {
+                return .corrupt(expected: file.sha256, actual: "")
+            }
+        }
+        return .ready(package)
     }
 
-    /// Verifies `downloadedFile` against the descriptor's checksum and moves it into the store.
-    /// On a checksum mismatch the downloaded file is deleted and nothing is installed.
-    /// On success `downloadedFile` no longer exists at its old location.
-    public func install(downloadedFile: URL, for descriptor: ModelDescriptor) throws {
-        guard descriptor.isConfigured, let expected = descriptor.sha256 else {
+    /// Verifies every file in `stagingDirectory` (stored at its relative path) and moves the directory into place
+    /// as the package directory, replacing any previously installed package.
+    /// If a file is missing or fails its checksum, the staging directory is deleted, nothing is installed and any
+    /// existing package is left untouched. On success `stagingDirectory` no longer exists.
+    public func install(stagingDirectory: URL, for descriptor: ModelDescriptor) throws {
+        guard descriptor.isConfigured else {
             throw ModelStoreError.notConfigured
         }
-
-        let actual: String
-        do {
-            actual = try ModelStore.hashFile(at: downloadedFile)
-        } catch {
-            throw ModelStoreError.io("could not read the downloaded file: \(error.localizedDescription)")
-        }
-        guard actual == expected else {
-            try? FileManager.default.removeItem(at: downloadedFile)
-            throw ModelStoreError.checksumMismatch(expected: expected, actual: actual)
-        }
-
         let fileManager = FileManager.default
-        let versionDirectory = directory(for: descriptor)
-        let destination = fileURL(for: descriptor)
-        let temporary = versionDirectory.appendingPathComponent(".\(descriptor.fileName).partial-\(UUID().uuidString)")
 
         do {
-            try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
-            // Move into the destination directory under a temporary name first, so the final
-            // step is a rename within one directory.
-            try fileManager.moveItem(at: downloadedFile, to: temporary)
+            for file in descriptor.files {
+                let staged = stagingDirectory.appendingComponents(of: file.relativePath)
+                guard fileManager.fileExists(atPath: staged.path) else {
+                    throw ModelStoreError.checksumMismatch(expected: file.sha256, actual: "")
+                }
+                let actual: String
+                do {
+                    actual = try ModelStore.hashFile(at: staged)
+                } catch {
+                    throw ModelStoreError.io("could not read \(file.relativePath): \(error.localizedDescription)")
+                }
+                guard actual == file.sha256 else {
+                    throw ModelStoreError.checksumMismatch(expected: file.sha256, actual: actual)
+                }
+            }
+        } catch {
+            try? fileManager.removeItem(at: stagingDirectory)
+            throw error
+        }
+
+        let destination = packageURL(for: descriptor)
+        let parent = destination.deletingLastPathComponent()
+        // Move into the destination directory under a temporary sibling name first, so the final
+        // step is a rename within one directory.
+        let temporary = parent.appendingPathComponent(
+            ".\(destination.lastPathComponent).partial-\(UUID().uuidString)",
+            isDirectory: true
+        )
+
+        do {
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            try fileManager.moveItem(at: stagingDirectory, to: temporary)
             do {
                 if fileManager.fileExists(atPath: destination.path) {
                     #if canImport(Darwin)
@@ -117,6 +144,7 @@ public struct ModelStore: Sendable {
                 throw error
             }
         } catch {
+            try? fileManager.removeItem(at: stagingDirectory)
             throw ModelStoreError.io("could not move the model into place: \(error.localizedDescription)")
         }
     }
