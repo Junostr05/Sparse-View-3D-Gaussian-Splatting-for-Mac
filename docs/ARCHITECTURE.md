@@ -35,6 +35,14 @@ A native macOS app that reconstructs a high-quality 3D Gaussian Splatting scene 
 | 23 | Import | COLMAP binaries (SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, OPENCV with CPU undistortion; other models rejected with a clear error); ARKit JSON schema v1; intrinsics rescaled when the image size differs (same aspect within 1 %); all missing images are reported in one error (D10). |
 | 24 | Training concurrency | `TrainingSession` actor around a synchronous `GPUTrainer`; one command buffer per iteration, waiting only at log, densify, preview and final steps; progress as `AsyncStream`; previews are `GaussianCloud` snapshots, never shared GPU buffers (D4, D12). |
 | 25 | Memory budget formula | `16·P + 12·K + 340` bytes per Gaussian with `P = 11 + 3K` (756 B at SH 1), cap `0.6 × recommendedMaxWorkingSetSize`, configured maximum 1.5 M (D13). |
+| 26 | Inputs (A1) | Video files **and** folders of photos (single iPhone photos, HEIC included) next to the COLMAP and ARKit imports. Per-frame depth comes from the depth model; ground-truth/LiDAR depth stays optional. |
+| 27 | Frame selection (A2) | Automatic proposal with manual correction. N frames, user setting, default 6, spread over the camera motion preferring sharp frames (`FrameSelector`); "use all frames" (`FrameSelectionMode.all`) is allowed; video sampling interval default 0.25 s; photo folders default to all photos. The UI warns around ~100 views. |
+| 28 | Pose providers (A3) | A `PoseProvider` chain: bundled/installed COLMAP, Apple `PhotogrammetrySession`, later a foundation model (DUSt3R/MASt3R, optional non-commercial download). Posed inputs (COLMAP folder, ARKit) skip the stage. Each stage reports success or the reason it failed and the chain falls through. *(Apple provider: poses plus a point cloud; no intrinsics, so the 35 mm-equivalent focal length is read from EXIF at import. Order and delivery under review, see 29.)* |
+| 29 | COLMAP delivery (A4) | Recorded: keep the App Sandbox, ship COLMAP as a helper through an XPC service. **Under review (2026-11-06):** the Homebrew build is a licence no-go; a minimal source build passes a licence gate in CI (closure 3.8 MB), but starting any downloaded binary from inside the sandbox fails with `EPERM`. The user put this on hold until the Apple provider's training quality is measured; see the addendum. |
+| 30 | Depth model (A5) | Depth Anything V2 Small, Apple's Core ML conversion (Float16 `.mlpackage`, Apache-2.0), **downloaded on first use** into the app container, pinned to a Hugging Face commit with a SHA-256 per file; needs `com.apple.security.network.client`. Offline or failed download: depth features stay off with a notice, training still works. Fixed input 518×392. |
+| 31 | Quality metric (A6) | SSIM + PSNR on the held-out view; LPIPS is a later option. |
+| 32 | Presets (A7) | Fast / Standard / Quality set image size, iterations and the schedules derived from them together (640 px / 3 000, 1 000 px / 10 000, 1 600 px / 15 000 iterations); individual values stay editable. |
+| 33 | Frames-only projects (A8) | A video is not copied into the project: only the selected frames (PNG, EXIF stripped) plus provenance (`inputKind`, source file name, timestamp, 35 mm focal length per frame). |
 
 ## Module layout (Swift package)
 
@@ -124,6 +132,8 @@ Scene.gsproj/
   checkpoints/
     latest.ply       standard 3DGS PLY, no optimizer state (resume restarts Adam)
 ```
+
+The manifest also records `inputKind` (`video`, `photos`, `colmap`, `arkit`) and, for projects built from frames, `frameProvenance`: per image its source file name, the video timestamp and the 35 mm-equivalent focal length. All three are optional, so Phase 3 projects still load.
 
 Newer `formatVersion`s are rejected. `depth/` and `exports/` are added by Phases 4 and 5.
 
