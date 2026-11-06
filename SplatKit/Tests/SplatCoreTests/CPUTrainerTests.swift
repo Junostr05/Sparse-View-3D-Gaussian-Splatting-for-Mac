@@ -71,6 +71,7 @@ private func sameCloud(_ a: GaussianCloud, _ b: GaussianCloud) -> Bool {
     configuration.shDegree = 0
     configuration.densification.startIteration = 0
     configuration.densification.stopIteration = 0   // densification disabled
+    configuration.regularizers = []                 // Phase 3 contract; Phase 4 terms are tested in CPUTrainerPhase4Tests
 
     var trainer = try CPUTrainer(dataset: dataset, initialCloud: shiftedGrayStart(),
                                  configuration: configuration)

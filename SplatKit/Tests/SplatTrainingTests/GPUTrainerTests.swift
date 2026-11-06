@@ -197,6 +197,8 @@ struct GPUTrainerTests {
         configuration.previewInterval = 0
         configuration.seed = 1
         noDensification(&configuration)
+        // Phase 3 parity: the GPU trainer runs no Phase 4 terms yet (Task 17 mirrors them).
+        configuration.regularizers = []
 
         var cpu = try CPUTrainer(dataset: dataset, initialCloud: initial, configuration: configuration)
         for _ in 0..<5 {
