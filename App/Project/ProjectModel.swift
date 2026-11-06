@@ -163,7 +163,7 @@ final class ProjectModel {
     }
 
     /// Replaces the package contents after an import. Any viewer of the old model is dropped.
-    private func adopt(_ contents: ProjectContents, into document: Binding<ProjectDocument>) {
+    func adopt(_ contents: ProjectContents, into document: Binding<ProjectDocument>) {
         document.wrappedValue.contents = contents
         viewer = nil
         progress = nil

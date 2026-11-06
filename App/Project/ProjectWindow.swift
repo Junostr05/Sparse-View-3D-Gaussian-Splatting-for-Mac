@@ -6,6 +6,7 @@ import SplatIO
 struct ProjectWindow: View {
     let document: Binding<ProjectDocument>
     @State private var model = ProjectModel()
+    @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
 
     var body: some View {
@@ -26,27 +27,33 @@ struct ProjectWindow: View {
             }
         }
         .inspector(isPresented: $isInspectorPresented) {
-            ProjectInspector(document: document, model: model)
+            ProjectInspector(document: document, model: model, pipeline: pipeline)
                 .inspectorColumnWidth(min: 240, ideal: 300, max: 380)
         }
         .task {
             await model.restoreCheckpoint(contents)
         }
+        .onDisappear {
+            pipeline.close()
+        }
     }
 
-    /// The viewport is content (no glass). Before a model exists, an empty state explains what to do.
+    /// The viewport is content (no glass). Before a model exists, the frame strip shows pending frames,
+    /// and an empty state explains what to do.
     @ViewBuilder
     private func detail(for contents: ProjectContents) -> some View {
         if let viewer = model.viewer {
             ViewerContent(model: viewer)
+        } else if contents.manifest.imageFiles.isEmpty && pipeline.hasCandidates {
+            FrameStripView(pipeline: pipeline)
         } else if contents.manifest.imageFiles.isEmpty {
             ContentUnavailableView(
-                "Import a COLMAP or ARKit capture",
+                "Add a photo folder, a video or a pose capture",
                 systemImage: "square.and.arrow.down",
                 description: Text("""
+                    Photos: a folder of images. Video: a movie file, sampled into frames.
                     COLMAP: a folder with sparse/0 (cameras.bin, images.bin, optional points3D.bin) and an images folder.
                     ARKit: a folder with capture.json and the images it names.
-                    To open a single .ply or .splat scene, use File > Open.
                     """)
             )
         } else {
