@@ -15,7 +15,8 @@ struct ProjectUniforms {
     var limits: SIMD4<Float>
     /// gaussian count, width, height, tilesX.
     var counts: SIMD4<UInt32>
-    /// tilesY, evaluated SH degree, stored SH coefficients per gaussian, unused.
+    /// tilesY, evaluated SH degree, stored SH coefficients per gaussian, w: 1 = accumulate parameter
+    /// gradients instead of overwriting them (Phase 4). Layout unchanged.
     var shInfo: SIMD4<UInt32>
 }
 
@@ -27,7 +28,7 @@ struct DuplicateUniforms {
 
 /// MSL `RasterUniforms`, 32 bytes.
 struct RasterUniforms {
-    /// rgb background, w unused.
+    /// rgb background; w: 1 = depth mode (Phase 4 rendered depth), 0 otherwise. Layout unchanged.
     var background: SIMD4<Float>
     /// width, height, tilesX, tilesY.
     var info: SIMD4<UInt32>

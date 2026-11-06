@@ -155,14 +155,20 @@ kernel void rasterizeTiles(
     texture2d<float, access::write> outTexture [[texture(0)]],
     device float* outFinalT [[buffer(6)]],
     device uint* outLastContributor [[buffer(7)]],
+    device float2* outDepth [[buffer(8)]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tid [[thread_position_in_threadgroup]],
     uint lid [[thread_index_in_threadgroup]])
 {
     threadgroup float2 sMean[SPLAT_TILE * SPLAT_TILE];
     threadgroup float4 sConic[SPLAT_TILE * SPLAT_TILE];
+    // xyz: colour; w: camera-space depth z of the Gaussian (meanDepth.z). Only xyz feeds the colour
+    // integral; the w channel is read by the depth accumulation alone.
     threadgroup float4 sColor[SPLAT_TILE * SPLAT_TILE];
     threadgroup atomic_uint doneCount;
+
+    // Depth mode (Phase 4): RasterUniforms.background.w = 1 writes outDepth. Uniform for the whole grid.
+    const bool depthMode = u.background.w > 0.5f;
 
     uint px = tgid.x * uint(SPLAT_TILE) + tid.x;
     uint py = tgid.y * uint(SPLAT_TILE) + tid.y;
@@ -179,6 +185,8 @@ kernel void rasterizeTiles(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float3 rgb = float3(0.0f);
+    // Σ αᵢ Tᵢ zᵢ over the blended samples (rendered depth, depth mode only).
+    float depthAcc = 0.0f;
     float T = 1.0f;
     uint lastContributor = 0u;
     bool done = !inside;
@@ -191,7 +199,7 @@ kernel void rasterizeTiles(
             uint g = values[idx];
             sMean[lid] = meanDepth[g].xy;
             sConic[lid] = conicOpacity[g];
-            sColor[lid] = colors[g];
+            sColor[lid] = float4(colors[g].xyz, meanDepth[g].z);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -210,6 +218,9 @@ kernel void rasterizeTiles(
                     break;
                 }
                 rgb += sColor[j].xyz * (alpha * T);
+                if (depthMode) {
+                    depthAcc += sColor[j].w * (alpha * T);
+                }
                 T = nextT;
                 lastContributor = base + j + 1u;
             }
@@ -232,5 +243,9 @@ kernel void rasterizeTiles(
         uint pixel = py * u.info.x + px;
         outFinalT[pixel] = T;
         outLastContributor[pixel] = lastContributor;
+        // Rendered depth (gsplat RGB+ED convention): Draw = Σ αᵢ Tᵢ zᵢ and A = 1 − T_final.
+        if (depthMode) {
+            outDepth[pixel] = float2(depthAcc, 1.0f - T);
+        }
     }
 }

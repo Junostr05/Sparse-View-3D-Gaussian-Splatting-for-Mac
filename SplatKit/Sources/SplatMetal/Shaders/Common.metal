@@ -22,7 +22,8 @@ struct ProjectUniforms {
     float4 intrinsics;   // fx, fy, cx, cy
     float4 limits;       // near, far, eps2D, unused
     uint4 counts;        // gaussian count, width, height, tilesX
-    uint4 shInfo;        // tilesY, evaluated SH degree, stored coefficients per gaussian K, unused
+    uint4 shInfo;        // tilesY, evaluated SH degree, stored coefficients per gaussian K,
+                         // w: 1 = accumulate parameter gradients (add) instead of overwriting them (Phase 4)
 };
 
 // Mirrors `DuplicateUniforms` in ShaderTypes.swift (16 bytes).
@@ -32,7 +33,7 @@ struct DuplicateUniforms {
 
 // Mirrors `RasterUniforms` in ShaderTypes.swift (32 bytes).
 struct RasterUniforms {
-    float4 background;   // rgb, unused
+    float4 background;   // rgb; w: 1 = depth mode (Phase 4: write / read the rendered depth channel), else 0
     uint4 info;          // width, height, tilesX, tilesY
 };
 

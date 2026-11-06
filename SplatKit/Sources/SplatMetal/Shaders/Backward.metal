@@ -7,7 +7,8 @@
 // Concatenated after Rasterizer.metal, so Common.metal's structs and SPLAT_TILE are available.
 
 // Accumulator layout per Gaussian (12 floats): 0..2 colour, 3 opacity, 4..6 conic (A, B, C),
-// 7..8 mean2D, 9..11 unused.
+// 7..8 mean2D, 9 depth (∂L/∂z_cam, Phase 4 rendered depth), 10..11 unused.
+// Parameter gradients are overwritten, or added to when `ProjectUniforms.shInfo.w == 1` (accumulate).
 
 inline void addGradient(device atomic<float>* slot, float value)
 {
@@ -25,6 +26,7 @@ kernel void rasterizeBackward(
     device const float* finalT [[buffer(7)]],
     device const uint* lastContributor [[buffer(8)]],
     device atomic<float>* accum [[buffer(9)]],
+    device const float2* depthGradient [[buffer(10)]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tid [[thread_position_in_threadgroup]],
     uint lid [[thread_index_in_threadgroup]],
@@ -32,11 +34,14 @@ kernel void rasterizeBackward(
 {
     threadgroup float2 sMean[SPLAT_TILE * SPLAT_TILE];
     threadgroup float4 sConic[SPLAT_TILE * SPLAT_TILE];
+    // xyz: colour; w: camera-space depth z (same layout as the forward kernel).
     threadgroup float4 sColor[SPLAT_TILE * SPLAT_TILE];
 
     const uint batch = uint(SPLAT_TILE * SPLAT_TILE);
     const uint width = u.info.x;
     const uint height = u.info.y;
+    // Depth mode: RasterUniforms.background.w = 1 when the caller supplies a depth gradient.
+    const bool depthMode = u.background.w > 0.5f;
 
     uint px = tgid.x * uint(SPLAT_TILE) + tid.x;
     uint py = tgid.y * uint(SPLAT_TILE) + tid.y;
@@ -49,16 +54,28 @@ kernel void rasterizeBackward(
     uint rangeStart = ranges[2u * tileIndex];
     uint rangeEnd = ranges[2u * tileIndex + 1u];
 
-    // Per-pixel reverse state: transmittance after the last blended sample, the colour integral
-    // of everything behind the current sample (S), the pixel's image gradient and its cut-off.
+    // Per-pixel reverse state: transmittance after the last blended sample (T_final, kept constant
+    // and walked back as T), the colour integral of everything behind the current sample (S), the
+    // depth integral behindZ = Σ_{j>i} z_j α_j T_j (the depth counterpart of S), the pixel's image
+    // gradient, its depth gradient (∂L/∂Draw, ∂L/∂A) and its cut-off.
     float T = 0.0f;
+    float Tfinal = 0.0f;
     float3 behind = float3(0.0f);
+    float behindZ = 0.0f;
     float3 gradPixel = float3(0.0f);
+    float gD = 0.0f;
+    float gA = 0.0f;
     uint lastSorted = 0u;
     if (inside) {
         T = finalT[pixel];
+        Tfinal = T;
         behind = T * u.background.xyz;
         gradPixel = imageGradient[pixel].xyz;
+        if (depthMode) {
+            float2 gDepth = depthGradient[pixel];
+            gD = gDepth.x;
+            gA = gDepth.y;
+        }
         lastSorted = lastContributor[pixel];
     }
 
@@ -73,7 +90,7 @@ kernel void rasterizeBackward(
             uint gi = values[batchStart + lid];
             sMean[lid] = meanDepth[gi].xy;
             sConic[lid] = conicOpacity[gi];
-            sColor[lid] = colors[gi];
+            sColor[lid] = float4(colors[gi].xyz, meanDepth[gi].z);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -88,6 +105,7 @@ kernel void rasterizeBackward(
             float r3 = 0.0f;                         // dL/dopacity
             float r4 = 0.0f, r5 = 0.0f, r6 = 0.0f;   // dL/dconic
             float r7 = 0.0f, r8 = 0.0f;              // dL/dmean2D
+            float r9 = 0.0f;                         // dL/dz (camera depth), depth mode only
 
             // Only samples that were blended in the forward pass (sorted index below the pixel's
             // cut-off) and pass the same gating as the forward pass contribute.
@@ -104,10 +122,22 @@ kernel void rasterizeBackward(
                         float Ti = T / oneMinusAlpha;          // transmittance before this sample
                         float weight = alpha * Ti;
                         float3 color = sColor[j].xyz;
+                        float z = sColor[j].w;
                         float3 mixed = color * Ti - behind / oneMinusAlpha;
                         float dAlpha = dot(mixed, gradPixel);
+                        // Rendered depth: Draw = Σ αᵢ Tᵢ zᵢ, A = 1 − T_final.
+                        //   ∂Draw/∂αᵢ = zᵢ Tᵢ − behindZ / (1 − αᵢ),   ∂A/∂αᵢ = T_final / (1 − αᵢ),
+                        // with behindZ = Σ_{j>i} z_j α_j T_j taken before this sample is added.
+                        // (The clamp at 0.999 is handled below, as for the colour term.)
+                        if (depthMode) {
+                            dAlpha += (z * Ti - behindZ / oneMinusAlpha) * gD
+                                    + (Tfinal / oneMinusAlpha) * gA;
+                            // ∂Draw/∂zᵢ = αᵢ Tᵢ. Taken before the clamp guard: z is not gated by α's clamp.
+                            r9 = weight * gD;
+                        }
                         float3 dColor = gradPixel * weight;
                         behind += color * weight;
+                        behindZ += z * weight;
                         T = Ti;
 
                         r0 = dColor.x;
@@ -138,6 +168,7 @@ kernel void rasterizeBackward(
             float s6 = simd_sum(r6);
             float s7 = simd_sum(r7);
             float s8 = simd_sum(r8);
+            float s9 = simd_sum(r9);
             if (lane == 0u) {
                 device atomic<float>* slot = accum + 12u * gaussian;
                 addGradient(slot + 0, s0);
@@ -149,6 +180,9 @@ kernel void rasterizeBackward(
                 addGradient(slot + 6, s6);
                 addGradient(slot + 7, s7);
                 addGradient(slot + 8, s8);
+                if (depthMode) {
+                    addGradient(slot + 9, s9);
+                }
             }
         }
     }
@@ -225,14 +259,28 @@ inline void shBasisWithGradient(uint degree, float3 d, thread float* basis, thre
     }
 }
 
-// Writes zero gradients for one Gaussian (culled or degenerate).
-inline void zeroParameterGradient(uint gid, uint K, ulong shBase,
+// Writes `value` to a parameter gradient, or adds it when accumulating into existing gradients.
+inline void storeGradient(device float* target, float value, bool accumulate)
+{
+    if (accumulate) {
+        *target += value;
+    } else {
+        *target = value;
+    }
+}
+
+// Writes zero gradients for one Gaussian (culled or degenerate). In accumulate mode adding zero is a
+// no-op, so nothing is written.
+inline void zeroParameterGradient(uint gid, uint K, ulong shBase, bool accumulate,
                                   device float* gradPositions,
                                   device float* gradLogScales,
                                   device float* gradRotations,
                                   device float* gradOpacityLogits,
                                   device float* gradSH)
 {
+    if (accumulate) {
+        return;
+    }
     gradPositions[3u * gid] = 0.0f;
     gradPositions[3u * gid + 1u] = 0.0f;
     gradPositions[3u * gid + 2u] = 0.0f;
@@ -271,6 +319,8 @@ kernel void projectBackward(
     uint evalDegree = u.shInfo.y;              // min(shDegree, shDegreeLimit)
     uint used = (evalDegree + 1u) * (evalDegree + 1u);
     ulong shBase = ulong(gid) * ulong(K) * 3ul;
+    // shInfo.w == 1: add into the parameter gradients instead of overwriting them (Phase 4 accumulate).
+    bool accumulate = u.shInfo.w == 1u;
 
     // Camera rows, and columns of the camera rotation.
     float3 R0 = u.rotRow0.xyz;
@@ -289,7 +339,7 @@ kernel void projectBackward(
 
     // Culled Gaussians (no tiles touched, or behind the camera) receive no gradient.
     if (tilesTouched[gid] == 0u || !(z > 0.0f)) {
-        zeroParameterGradient(gid, K, shBase, gradPositions, gradLogScales, gradRotations,
+        zeroParameterGradient(gid, K, shBase, accumulate, gradPositions, gradLogScales, gradRotations,
                               gradOpacityLogits, gradSH);
         return;
     }
@@ -379,7 +429,7 @@ kernel void projectBackward(
     float c = dot(T1, U1) + eps2D;
     float det = a * c - b * b;
     if (!(det > 0.0f)) {
-        zeroParameterGradient(gid, K, shBase, gradPositions, gradLogScales, gradRotations,
+        zeroParameterGradient(gid, K, shBase, accumulate, gradPositions, gradLogScales, gradRotations,
                               gradOpacityLogits, gradSH);
         return;
     }
@@ -466,6 +516,9 @@ kernel void projectBackward(
     dpc.x += fx / z * gMean.x;
     dpc.y += fy / z * gMean.y;
     dpc.z += -fx * x * invZ2 * gMean.x - fy * y * invZ2 * gMean.y;
+    // Rendered depth (slot 9 = ∂L/∂z_cam, zero when depth is off). z_cam = R2·pw + t_z, so ∂z/∂pw = R2 and
+    // adding slot9 to dpc.z before the Rᵀ step gives gradPositions += slot9 · R2 (the CPU reference does the same).
+    dpc.z += slot[9];
 
     // Camera → world (Rᵀ · dpc).
     float3 dPos = float3(dot(dpc, cam0), dot(dpc, cam1), dot(dpc, cam2));
@@ -474,8 +527,10 @@ kernel void projectBackward(
     float3 camCenter = u.camCenter.xyz;
     float3 offset = pw - camCenter;
     float len = sqrt(dot(offset, offset));
-    for (uint i = 0u; i < 3u * K; ++i) {
-        gradSH[shBase + ulong(i)] = 0.0f;
+    if (!accumulate) {
+        for (uint i = 0u; i < 3u * K; ++i) {
+            gradSH[shBase + ulong(i)] = 0.0f;
+        }
     }
     if (len > 0.0f) {
         float3 dir = offset / len;
@@ -500,31 +555,31 @@ kernel void projectBackward(
             float3 coef = float3(shCoeffs[o], shCoeffs[o + 1ul], shCoeffs[o + 2ul]);
             float proj = dot(coef, dColor);
             dDir += proj * basisGrad[k];
-            gradSH[o] = basis[k] * dColor.x;
-            gradSH[o + 1ul] = basis[k] * dColor.y;
-            gradSH[o + 2ul] = basis[k] * dColor.z;
+            storeGradient(&gradSH[o], basis[k] * dColor.x, accumulate);
+            storeGradient(&gradSH[o + 1ul], basis[k] * dColor.y, accumulate);
+            storeGradient(&gradSH[o + 2ul], basis[k] * dColor.z, accumulate);
         }
         dPos += (dDir - dir * dot(dir, dDir)) / len;
     }
 
-    // Write parameter gradients.
-    gradPositions[3u * gid] = dPos.x;
-    gradPositions[3u * gid + 1u] = dPos.y;
-    gradPositions[3u * gid + 2u] = dPos.z;
-    gradLogScales[3u * gid] = dLogS0;
-    gradLogScales[3u * gid + 1u] = dLogS1;
-    gradLogScales[3u * gid + 2u] = dLogS2;
+    // Write parameter gradients (overwrite, or add when accumulating).
+    storeGradient(&gradPositions[3u * gid], dPos.x, accumulate);
+    storeGradient(&gradPositions[3u * gid + 1u], dPos.y, accumulate);
+    storeGradient(&gradPositions[3u * gid + 2u], dPos.z, accumulate);
+    storeGradient(&gradLogScales[3u * gid], dLogS0, accumulate);
+    storeGradient(&gradLogScales[3u * gid + 1u], dLogS1, accumulate);
+    storeGradient(&gradLogScales[3u * gid + 2u], dLogS2, accumulate);
     if (hasNorm) {
-        gradRotations[4u * gid] = (dqw - qw * radial) / qnorm;
-        gradRotations[4u * gid + 1u] = (dqx - qx * radial) / qnorm;
-        gradRotations[4u * gid + 2u] = (dqy - qy * radial) / qnorm;
-        gradRotations[4u * gid + 3u] = (dqz - qz * radial) / qnorm;
+        storeGradient(&gradRotations[4u * gid], (dqw - qw * radial) / qnorm, accumulate);
+        storeGradient(&gradRotations[4u * gid + 1u], (dqx - qx * radial) / qnorm, accumulate);
+        storeGradient(&gradRotations[4u * gid + 2u], (dqy - qy * radial) / qnorm, accumulate);
+        storeGradient(&gradRotations[4u * gid + 3u], (dqz - qz * radial) / qnorm, accumulate);
     } else {
-        gradRotations[4u * gid] = 0.0f;
-        gradRotations[4u * gid + 1u] = 0.0f;
-        gradRotations[4u * gid + 2u] = 0.0f;
-        gradRotations[4u * gid + 3u] = 0.0f;
+        storeGradient(&gradRotations[4u * gid], 0.0f, accumulate);
+        storeGradient(&gradRotations[4u * gid + 1u], 0.0f, accumulate);
+        storeGradient(&gradRotations[4u * gid + 2u], 0.0f, accumulate);
+        storeGradient(&gradRotations[4u * gid + 3u], 0.0f, accumulate);
     }
     float opacity = 1.0f / (1.0f + exp(-opacityLogits[gid]));
-    gradOpacityLogits[gid] = gOpacity * opacity * (1.0f - opacity);
+    storeGradient(&gradOpacityLogits[gid], gOpacity * opacity * (1.0f - opacity), accumulate);
 }

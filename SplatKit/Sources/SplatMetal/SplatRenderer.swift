@@ -67,8 +67,10 @@ public final class SplatRenderer {
     private(set) var finalTransmittance: MTLBuffer?
     /// Per pixel: sorted index one past the last blended sample, 0 if none.
     private(set) var lastContributor: MTLBuffer?
-    /// Per Gaussian: 12 float accumulator slots used by `rasterizeBackward`.
+    /// Per Gaussian: 12 float accumulator slots used by `rasterizeBackward` (slot 9 = depth, Phase 4).
     private(set) var gradientAccumulator: MTLBuffer?
+    /// Bound to the depth slots of the forward and backward kernels when no depth buffer is given.
+    private var dummyDepth: MTLBuffer?
 
     /// What the backward pass needs from the most recent successful forward pass.
     private struct LastFrame {
@@ -139,12 +141,26 @@ public final class SplatRenderer {
     /// first (the CPU needs the intersection total). Duplicate, sort, ranges and rasterize are encoded
     /// into a new command buffer that is returned uncommitted, so the caller can append backward work
     /// and commit once. Sets the state `encodeBackward` uses. Throws for an empty camera.
-    public func encodeForward(camera: Camera, settings: RasterSettings, to texture: MTLTexture) throws(MetalError) -> ForwardPass {
+    ///
+    /// Shared state and ordering: the projection buffers (`meanDepth`, `conicOpacity`, `colors`, tile rects,
+    /// sort keys and values, tile ranges, the per-pixel transmittance and last-contributor buffers and the
+    /// screen-space gradient accumulator) belong to this renderer and are shared by all views. One view's
+    /// forward AND backward command buffer must therefore be COMMITTED before the next view's `encodeForward`
+    /// is called. Encoding view B's forward before committing view A's silently makes A train on B's geometry.
+    /// Command buffers on the queue execute in commit order, so committing A first is enough.
+    ///
+    /// - Parameter depth: float2 per pixel, ≥ width·height·8 bytes, receives `(Draw, A)` = `(Σ αᵢTᵢzᵢ, 1 − T_final)`.
+    ///   `nil` is the Phase 3 forward pass (the image is identical either way).
+    public func encodeForward(camera: Camera, settings: RasterSettings, to texture: MTLTexture,
+                              depth: MTLBuffer? = nil) throws(MetalError) -> ForwardPass {
         lastFrame = nil
         let width = camera.width
         let height = camera.height
         guard width > 0, height > 0 else {
             throw .commandFailed("camera has no pixels")
+        }
+        if let depth, depth.length < width * height * 2 * MemoryLayout<Float>.size {
+            throw .commandFailed("depth must hold width·height float2 values")
         }
         let tile = Self.tileSize
         let tilesX = (width + tile - 1) / tile
@@ -250,8 +266,16 @@ public final class SplatRenderer {
             encoder.endEncoding()
         }
 
+        // The depth binding is always set (a 16-byte dummy when depth is off): the kernel writes it only in depth mode.
+        let depthBinding: MTLBuffer
+        if let depth {
+            depthBinding = depth
+        } else {
+            depthBinding = try dummyDepthBuffer()
+        }
         do {
-            var rasterUniforms = makeRasterUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY)
+            var rasterUniforms = makeRasterUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY,
+                                                    depthMode: depth != nil)
             let encoder = try context.makeComputeEncoder(commandBufferB)
             encoder.setComputePipelineState(rasterPipeline)
             encoder.setBuffer(meanDepthBuffer, offset: 0, index: 0)
@@ -263,6 +287,7 @@ public final class SplatRenderer {
             encoder.setTexture(texture, index: 0)
             encoder.setBuffer(finalTBuffer, offset: 0, index: 6)
             encoder.setBuffer(lastContributorBuffer, offset: 0, index: 7)
+            encoder.setBuffer(depthBinding, offset: 0, index: 8)
             encoder.dispatchThreadgroups(MTLSize(width: tilesX, height: tilesY, depth: 1),
                                          threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
             encoder.endEncoding()
@@ -311,7 +336,7 @@ public final class SplatRenderer {
     }
 
     private func makeProjectUniforms(camera: Camera, settings: RasterSettings,
-                                     tilesX: Int, tilesY: Int) -> ProjectUniforms {
+                                     tilesX: Int, tilesY: Int, accumulate: Bool = false) -> ProjectUniforms {
         let store = gaussians
         let evalDegree = max(0, min(store.shDegree, settings.shDegreeLimit))
         let rot = camera.rotation
@@ -326,15 +351,21 @@ public final class SplatRenderer {
             limits: SIMD4(settings.nearPlane, settings.farPlane, settings.eps2D, 0),
             counts: SIMD4(UInt32(store.count), UInt32(camera.width), UInt32(camera.height), UInt32(tilesX)),
             shInfo: SIMD4(UInt32(tilesY), UInt32(evalDegree),
-                          UInt32(GaussianCloud.coefficientCount(degree: store.shDegree)), 0))
+                          UInt32(GaussianCloud.coefficientCount(degree: store.shDegree)),
+                          accumulate ? 1 : 0))
     }
 
     private func makeRasterUniforms(camera: Camera, settings: RasterSettings,
-                                    tilesX: Int, tilesY: Int) -> RasterUniforms {
+                                    tilesX: Int, tilesY: Int, depthMode: Bool = false) -> RasterUniforms {
         let bg = settings.background
         return RasterUniforms(
-            background: SIMD4(bg.x, bg.y, bg.z, 0),
+            background: SIMD4(bg.x, bg.y, bg.z, depthMode ? 1 : 0),
             info: SIMD4(UInt32(camera.width), UInt32(camera.height), UInt32(tilesX), UInt32(tilesY)))
+    }
+
+    /// 16-byte buffer bound to the depth slots when depth is off. The kernels never touch it in that mode.
+    private func dummyDepthBuffer() throws(MetalError) -> MTLBuffer {
+        try context.ensureBuffer(&dummyDepth, length: 16)
     }
 }
 
@@ -346,12 +377,23 @@ extension SplatRenderer {
     /// - Parameter statistics: when given, this view's screen-space gradient norms and visible counts are
     ///   added to it (`accumulateDensifyStats`, after `rasterizeBackward`). The gradients do not change.
     ///   Its capacity must be at least the store's count.
+    /// - Parameter depthGradient: float2 per pixel `(∂L/∂Draw, ∂L/∂A)`, ≥ width·height·8 bytes. `nil` is the
+    ///   Phase 3 image-only backward. The forward pass must have been rendered for the same camera; its depth
+    ///   channel is not needed (the backward uses the saved transmittance and colour/depth of the samples).
+    /// - Parameter accumulate: add the parameter gradients into `gradients` instead of overwriting them. The
+    ///   gradient buffers are not zero-filled, and culled Gaussians are not written. The accumulator is always zeroed.
+    ///   The screen-space accumulator is shared by all views: a view's backward must be committed before the next
+    ///   view's `encodeForward` (see `encodeForward`), and per-view contributions are summed by accumulating into
+    ///   the same `gradients`.
     ///
-    /// Throws if the Gaussian count changed since the forward pass. The accumulator and the gradient
-    /// buffers are zeroed on the GPU first. When no tile is intersected, the gradients stay zero and
-    /// no kernel is dispatched (statistics are not touched either, since no Gaussian is visible).
-    public func encodeBackward(imageGradient: MTLBuffer, into gradients: GradientBuffers,
+    /// Throws if the Gaussian count changed since the forward pass. The accumulator and, unless `accumulate`,
+    /// the gradient buffers are zeroed on the GPU first. When no tile is intersected, the gradients stay as
+    /// they are (zero when not accumulating) and no kernel is dispatched (statistics are not touched either,
+    /// since no Gaussian is visible).
+    public func encodeBackward(imageGradient: MTLBuffer, depthGradient: MTLBuffer? = nil,
+                               into gradients: GradientBuffers,
                                statistics: DensificationStatisticsBuffers? = nil,
+                               accumulate: Bool = false,
                                commandBuffer: MTLCommandBuffer) throws(MetalError) {
         guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
         let store = gaussians
@@ -370,6 +412,9 @@ extension SplatRenderer {
         guard imageGradient.length >= width * height * 4 * MemoryLayout<Float>.size else {
             throw .commandFailed("imageGradient must hold width·height RGBA floats")
         }
+        if let depthGradient, depthGradient.length < width * height * 2 * MemoryLayout<Float>.size {
+            throw .commandFailed("depthGradient must hold width·height float2 values")
+        }
         let accumulator = try context.ensureBuffer(
             &gradientAccumulator, length: n * 12 * MemoryLayout<Float>.size)
 
@@ -377,9 +422,11 @@ extension SplatRenderer {
             throw .commandFailed("cannot create blit encoder")
         }
         blit.fill(buffer: accumulator, range: 0..<accumulator.length, value: 0)
-        for buffer in [gradients.positions, gradients.logScales, gradients.rotations,
-                       gradients.opacityLogits, gradients.sh] {
-            blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0)
+        if !accumulate {
+            for buffer in [gradients.positions, gradients.logScales, gradients.rotations,
+                           gradients.opacityLogits, gradients.sh] {
+                blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0)
+            }
         }
         blit.endEncoding()
 
@@ -390,10 +437,17 @@ extension SplatRenderer {
               let lastBuffer = lastContributor else {
             throw .commandFailed("forward buffers are missing")
         }
+        let depthBinding: MTLBuffer
+        if let depthGradient {
+            depthBinding = depthGradient
+        } else {
+            depthBinding = try dummyDepthBuffer()
+        }
 
         // Pixel stage: one threadgroup per tile, same layout as the forward rasterizer.
         var rasterUniforms = makeRasterUniforms(camera: frame.camera, settings: frame.settings,
-                                                tilesX: frame.tilesX, tilesY: frame.tilesY)
+                                                tilesX: frame.tilesX, tilesY: frame.tilesY,
+                                                depthMode: depthGradient != nil)
         let rasterEncoder = try context.makeComputeEncoder(commandBuffer)
         rasterEncoder.setComputePipelineState(rasterBackwardPipeline)
         rasterEncoder.setBuffer(meanDepthBuffer, offset: 0, index: 0)
@@ -406,6 +460,7 @@ extension SplatRenderer {
         rasterEncoder.setBuffer(finalTBuffer, offset: 0, index: 7)
         rasterEncoder.setBuffer(lastBuffer, offset: 0, index: 8)
         rasterEncoder.setBuffer(accumulator, offset: 0, index: 9)
+        rasterEncoder.setBuffer(depthBinding, offset: 0, index: 10)
         rasterEncoder.dispatchThreadgroups(
             MTLSize(width: frame.tilesX, height: frame.tilesY, depth: 1),
             threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
@@ -419,7 +474,8 @@ extension SplatRenderer {
 
         // Gaussian stage: one thread per Gaussian, chain rule to the stored parameters.
         var projectUniforms = makeProjectUniforms(camera: frame.camera, settings: frame.settings,
-                                                  tilesX: frame.tilesX, tilesY: frame.tilesY)
+                                                  tilesX: frame.tilesX, tilesY: frame.tilesY,
+                                                  accumulate: accumulate)
         let projectEncoder = try context.makeComputeEncoder(commandBuffer)
         projectEncoder.setComputePipelineState(projectBackwardPipeline)
         projectEncoder.setBuffer(store.positions, offset: 0, index: 0)
@@ -439,13 +495,54 @@ extension SplatRenderer {
         projectEncoder.endEncoding()
     }
 
-    /// Gradients of `L = Σ imageGradient · image` with respect to every Gaussian parameter, for the
-    /// most recent forward pass. Synchronous: waits for the GPU.
-    public func backward(imageGradient: [SIMD3<Float>]) throws(MetalError) -> GaussianGradients {
+    /// Rendered depth of the view, for tests and evaluation. Synchronous: waits for the GPU.
+    /// Returns `Draw = Σ αᵢTᵢzᵢ` (`raw`) and `A = 1 − T_final` (`alpha`), row-major width·height.
+    /// Like `render`, it leaves the frame state that `backward` needs.
+    /// Throws for an empty camera, like `encodeForward`.
+    public func renderDepth(camera: Camera, settings: RasterSettings) throws(MetalError) -> DepthRender {
+        lastFrame = nil
+        let width = camera.width
+        let height = camera.height
+        guard width > 0, height > 0 else {
+            throw .commandFailed("camera has no pixels")
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = context.device.makeTexture(descriptor: descriptor) else {
+            throw .bufferAllocation
+        }
+        let depthBuffer = try context.makeBuffer(length: width * height * 2 * MemoryLayout<Float>.size)
+        let pass = try encodeForward(camera: camera, settings: settings, to: texture, depth: depthBuffer)
+        let commandBuffer = pass.commandBuffer
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try Self.check(commandBuffer)
+
+        let pixelCount = width * height
+        let values = depthBuffer.contents().bindMemory(to: Float.self, capacity: 2 * pixelCount)
+        var raw = [Float](repeating: 0, count: pixelCount)
+        var alpha = [Float](repeating: 0, count: pixelCount)
+        for i in 0..<pixelCount {
+            raw[i] = values[2 * i]
+            alpha[i] = values[2 * i + 1]
+        }
+        return DepthRender(raw: raw, alpha: alpha)
+    }
+
+    /// Gradients of `L = Σ imageGradient · image + Σ (gD·Draw + gA·A)` with respect to every Gaussian
+    /// parameter, for the most recent forward pass. `depthGradient` holds `(∂L/∂Draw, ∂L/∂A)` per pixel;
+    /// `nil` is the Phase 3 image-only backward. Synchronous: waits for the GPU.
+    public func backward(imageGradient: [SIMD3<Float>],
+                         depthGradient: [SIMD2<Float>]? = nil) throws(MetalError) -> GaussianGradients {
         guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
         let pixelCount = frame.camera.width * frame.camera.height
         guard imageGradient.count == pixelCount else {
             throw .commandFailed("imageGradient must hold \(pixelCount) pixels")
+        }
+        if let depthGradient, depthGradient.count != pixelCount {
+            throw .commandFailed("depthGradient must hold \(pixelCount) pixels")
         }
 
         let gradientImage = try context.makeBuffer(length: pixelCount * 4 * MemoryLayout<Float>.size)
@@ -459,12 +556,24 @@ extension SplatRenderer {
             }
         }
 
+        var depthBuffer: MTLBuffer? = nil
+        if let depthGradient {
+            let buffer = try context.makeBuffer(length: max(1, pixelCount) * 2 * MemoryLayout<Float>.size)
+            let pointer = buffer.contents().bindMemory(to: Float.self, capacity: 2 * pixelCount)
+            for i in 0..<pixelCount {
+                pointer[2 * i] = depthGradient[i].x
+                pointer[2 * i + 1] = depthGradient[i].y
+            }
+            depthBuffer = buffer
+        }
+
         let store = gaussians
         let gradients = try GradientBuffers(context: context, count: store.count, shDegree: store.shDegree)
         guard let commandBuffer = context.queue.makeCommandBuffer() else {
             throw .commandFailed("cannot create command buffer")
         }
-        try encodeBackward(imageGradient: gradientImage, into: gradients, commandBuffer: commandBuffer)
+        try encodeBackward(imageGradient: gradientImage, depthGradient: depthBuffer, into: gradients,
+                           commandBuffer: commandBuffer)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         try Self.check(commandBuffer)
