@@ -38,11 +38,15 @@ public struct FrameProvenance: Codable, Sendable, Equatable {
     public var sourceName: String
     /// Position in the video in seconds, or `nil` for a photo.
     public var timestamp: Double?
+    /// 35 mm-equivalent focal length from the photo's EXIF, or `nil` when unknown. Optional, so
+    /// manifests written before this field existed still decode.
+    public var focalLength35mm: Double?
 
-    public init(imageName: String, sourceName: String, timestamp: Double?) {
+    public init(imageName: String, sourceName: String, timestamp: Double?, focalLength35mm: Double? = nil) {
         self.imageName = imageName
         self.sourceName = sourceName
         self.timestamp = timestamp
+        self.focalLength35mm = focalLength35mm
     }
 }
 
