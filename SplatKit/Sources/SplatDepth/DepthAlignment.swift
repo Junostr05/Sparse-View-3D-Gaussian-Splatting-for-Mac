@@ -49,6 +49,16 @@ public enum DepthAlignment {
     /// Inlier gate in robust standard deviations.
     static let inlierGate: Double = 2.5
     static let refinementPasses: Int = 2
+    /// Consensus inlier: relative residual |scale·prior + shift − target| / target at most this (P5).
+    /// A candidate is scored by how many samples agree with it, so a majority of occluded points
+    /// does not decide the fit. Measured on the synthetic scene (seed 5): 0.1 lets the back-side
+    /// samples (z/prior spread over 1.1...1.8, as dense as the front cluster) win at scale ≈ 1.15;
+    /// 0.05 selects the visible surface (scale 1.07...1.10, 94...95 % of pixels on the surface).
+    static let consensusTolerance: Double = 0.05
+    /// Refinement never gates a sample tighter than this fraction of its target.
+    static let refinementRelativeFloor: Double = 0.02
+    /// Targets are depths or inverse depths, always positive; this guards the divisions.
+    static let tinyTarget: Double = 1e-12
 
     /// Prior values and camera-z depths of the SfM points that are visible in one view.
     ///
@@ -121,6 +131,11 @@ public enum DepthAlignment {
 
     /// Fits `q ≈ s·p + t` with `q = 1/z` for inverse depth and `q = z` otherwise. With `scaleOnly`
     /// the shift is fixed at 0 (COLMAP metric depth).
+    ///
+    /// Robust to a majority of one-sided outliers (occluded SfM points): every candidate (scale,
+    /// shift) from a pair of samples (one per sample when `scaleOnly`) is scored by its consensus,
+    /// the number of samples within `consensusTolerance` relative error. The best consensus seeds
+    /// a least-squares refinement on its inliers. Ties and candidate order are deterministic.
     public static func fit(_ samples: [(prior: Double, z: Double)], kind: DepthKind, scaleOnly: Bool,
                            minimumPoints: Int, minimumInlierFraction: Double, seed: UInt64) -> Result<AlignmentResult, AlignmentFailure> {
         let count: Int = samples.count
@@ -191,69 +206,61 @@ public enum DepthAlignment {
             return .failure(.noPositiveFit)
         }
 
-        // Candidate with the smallest median absolute residual over all samples (first wins ties).
+        // Consensus candidate: the (scale, shift) with the most samples whose relative residual is
+        // within consensusTolerance. Ties go to the smaller median absolute residual of those
+        // samples, then to the first candidate.
         var scale: Double = candidates[0].scale
         var shift: Double = candidates[0].shift
+        var bestCount: Int = -1
         var bestMedian: Double = Double.infinity
+        var consensusResiduals: [Double] = []
+        consensusResiduals.reserveCapacity(count)
         for candidate in candidates {
-            var absoluteResiduals: [Double] = []
-            absoluteResiduals.reserveCapacity(count)
+            consensusResiduals.removeAll(keepingCapacity: true)
             for k in 0..<count {
-                let residual: Double = candidate.scale * priors[k] + candidate.shift - targets[k]
-                absoluteResiduals.append(abs(residual))
+                let residual: Double = abs(candidate.scale * priors[k] + candidate.shift - targets[k])
+                if residual <= consensusTolerance * max(targets[k], tinyTarget) {
+                    consensusResiduals.append(residual)
+                }
             }
-            let candidateMedian: Double = median(absoluteResiduals)
-            if candidateMedian < bestMedian {
+            let candidateCount: Int = consensusResiduals.count
+            guard candidateCount >= bestCount else {
+                continue
+            }
+            let candidateMedian: Double = median(consensusResiduals)
+            if candidateCount > bestCount || candidateMedian < bestMedian {
+                bestCount = candidateCount
                 bestMedian = candidateMedian
                 scale = candidate.scale
                 shift = candidate.shift
             }
         }
 
-        // Robust refinement: gate inliers by a MAD-based threshold and refit by least squares.
+        // Refinement: least squares on the current inliers, then the inliers are re-selected from
+        // all samples with a gate of inlierGate robust sigmas of the current inliers (sigma is
+        // computed on the inliers only, so the outliers never widen it). The gate is never tighter
+        // than refinementRelativeFloor of a sample's target. Start: the consensus inliers.
+        var inlier: [Bool] = consensusFlags(priors: priors, targets: targets, scale: scale, shift: shift)
         for _ in 0..<refinementPasses {
-            let residuals: [Double] = signedResiduals(priors: priors, targets: targets, scale: scale, shift: shift)
-            let inlier: [Bool] = inlierFlags(residuals: residuals)
-            var inlierCount: Int = 0
-            var sumP: Double = 0
-            var sumQ: Double = 0
-            var sumPP: Double = 0
-            var sumPQ: Double = 0
-            for k in 0..<count where inlier[k] {
-                inlierCount += 1
-                sumP += priors[k]
-                sumQ += targets[k]
-                sumPP += priors[k] * priors[k]
-                sumPQ += priors[k] * targets[k]
-            }
-            if scaleOnly {
-                if sumPP > 0 {
-                    scale = sumPQ / sumPP
-                }
-            } else {
-                let countDouble: Double = Double(inlierCount)
-                let determinant: Double = countDouble * sumPP - sumP * sumP
-                let reference: Double = countDouble * sumPP
-                if inlierCount >= 2, reference > 0, determinant > 1e-12 * reference {
-                    let newScale: Double = (countDouble * sumPQ - sumP * sumQ) / determinant
-                    let newShift: Double = (sumQ - newScale * sumP) / countDouble
-                    scale = newScale
-                    shift = newShift
-                }
+            if let fitted = leastSquares(priors: priors, targets: targets, inlier: inlier, scaleOnly: scaleOnly) {
+                scale = fitted.scale
+                shift = fitted.shift
             }
             guard scale > 0 else {
                 return .failure(.noPositiveFit)
             }
+            let residuals: [Double] = signedResiduals(priors: priors, targets: targets, scale: scale, shift: shift)
+            let sigma: Double = robustSigma(residuals: residuals, inlier: inlier)
+            inlier = gatedFlags(residuals: residuals, targets: targets, sigma: sigma)
         }
 
-        // Inlier count with the final parameters.
+        // Inlier count with the final parameters and the final gate.
         let finalResiduals: [Double] = signedResiduals(priors: priors, targets: targets, scale: scale, shift: shift)
-        let finalInlier: [Bool] = inlierFlags(residuals: finalResiduals)
         var inliers: Int = 0
         var relativeErrors: [Double] = []
-        for k in 0..<count where finalInlier[k] {
+        for k in 0..<count where inlier[k] {
             inliers += 1
-            relativeErrors.append(abs(finalResiduals[k]) / targets[k])
+            relativeErrors.append(abs(finalResiduals[k]) / max(targets[k], tinyTarget))
         }
         let fractionRequired: Int = Int((minimumInlierFraction * Double(count)).rounded(.up))
         let requiredInliers: Int = max(minimumPoints, fractionRequired)
@@ -316,15 +323,69 @@ public enum DepthAlignment {
         return residuals
     }
 
-    /// Inlier flags: |r| ≤ 2.5 · (1.4826 · median|r| + tiny).
-    private static func inlierFlags(residuals: [Double]) -> [Bool] {
-        let absolute: [Double] = residuals.map { abs($0) }
-        let sigma: Double = madScale * median(absolute) + 1e-12
-        let gate: Double = inlierGate * sigma
+    /// Consensus inliers: |r| ≤ consensusTolerance · target for every sample.
+    private static func consensusFlags(priors: [Double], targets: [Double], scale: Double, shift: Double) -> [Bool] {
+        var flags: [Bool] = []
+        flags.reserveCapacity(priors.count)
+        for k in 0..<priors.count {
+            let residual: Double = abs(scale * priors[k] + shift - targets[k])
+            flags.append(residual <= consensusTolerance * max(targets[k], tinyTarget))
+        }
+        return flags
+    }
+
+    /// Least-squares `target ≈ scale·prior + shift` over the flagged samples. With `scaleOnly` the
+    /// shift stays 0. Returns nil when the flagged samples do not determine the fit.
+    private static func leastSquares(priors: [Double], targets: [Double], inlier: [Bool],
+                                     scaleOnly: Bool) -> (scale: Double, shift: Double)? {
+        var inlierCount: Int = 0
+        var sumP: Double = 0
+        var sumQ: Double = 0
+        var sumPP: Double = 0
+        var sumPQ: Double = 0
+        for k in 0..<priors.count where inlier[k] {
+            inlierCount += 1
+            sumP += priors[k]
+            sumQ += targets[k]
+            sumPP += priors[k] * priors[k]
+            sumPQ += priors[k] * targets[k]
+        }
+        if scaleOnly {
+            guard sumPP > 0 else {
+                return nil
+            }
+            return (scale: sumPQ / sumPP, shift: 0)
+        }
+        let countDouble: Double = Double(inlierCount)
+        let determinant: Double = countDouble * sumPP - sumP * sumP
+        let reference: Double = countDouble * sumPP
+        guard inlierCount >= 2, reference > 0, determinant > 1e-12 * reference else {
+            return nil
+        }
+        let scale: Double = (countDouble * sumPQ - sumP * sumQ) / determinant
+        let shift: Double = (sumQ - scale * sumP) / countDouble
+        return (scale: scale, shift: shift)
+    }
+
+    /// Robust sigma of the residuals of the flagged samples: 1.4826 · median|r| + 1e-12. The
+    /// tiny term keeps the gate open when the inlier residuals are exactly zero.
+    private static func robustSigma(residuals: [Double], inlier: [Bool]) -> Double {
+        var absolute: [Double] = []
+        absolute.reserveCapacity(residuals.count)
+        for k in 0..<residuals.count where inlier[k] {
+            absolute.append(abs(residuals[k]))
+        }
+        return madScale * median(absolute) + 1e-12
+    }
+
+    /// Gate over all samples: |r| ≤ max(inlierGate · sigma, refinementRelativeFloor · target).
+    private static func gatedFlags(residuals: [Double], targets: [Double], sigma: Double) -> [Bool] {
+        let sigmaGate: Double = inlierGate * sigma
         var flags: [Bool] = []
         flags.reserveCapacity(residuals.count)
-        for value in absolute {
-            flags.append(value <= gate)
+        for k in 0..<residuals.count {
+            let gate: Double = max(sigmaGate, refinementRelativeFloor * max(targets[k], tinyTarget))
+            flags.append(abs(residuals[k]) <= gate)
         }
         return flags
     }

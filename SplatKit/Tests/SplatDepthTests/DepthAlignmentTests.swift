@@ -410,6 +410,96 @@ private func relativeError(_ value: Double, _ expected: Double) -> Double {
         #expect(first == second)
         #expect(try #require(try? first.get()).inliers >= 60)
     }
+
+    @Test func recoversWithSixtyPercentOccludedPoints() throws {
+        // n ≤ 64 takes every pair, n > 64 the seeded sampled pairs. 40 % are consistent.
+        for count in [40, 200] {
+            let consistentCount: Int = count * 2 / 5
+
+            let metricSamples = occludedSamples(count: count, kind: .metric, scale: 0.8, shift: 0)
+            let metricFit = DepthAlignment.fit(metricSamples, kind: .metric, scaleOnly: true,
+                                               minimumPoints: 8, minimumInlierFraction: 0.3, seed: 31)
+            let metricAlignment = try #require(try? metricFit.get())
+            #expect(relativeError(metricAlignment.scale, 0.8) < 0.02)
+            #expect(metricAlignment.shift == 0)
+            #expect(metricAlignment.inliers >= consistentCount)
+
+            let inverseSamples = occludedSamples(count: count, kind: .relativeInverseDepth, scale: 0.7, shift: 0.2)
+            let inverseFit = DepthAlignment.fit(inverseSamples, kind: .relativeInverseDepth, scaleOnly: false,
+                                                minimumPoints: 8, minimumInlierFraction: 0.3, seed: 32)
+            let inverseAlignment = try #require(try? inverseFit.get())
+            #expect(relativeError(inverseAlignment.scale, 0.7) < 0.02)
+            #expect(abs(inverseAlignment.shift - 0.2) < 0.02)
+            #expect(inverseAlignment.inliers >= consistentCount)
+        }
+    }
+
+    @Test func syntheticSceneBackProjectionStaysOnTheSurface() throws {
+        let scene = SyntheticScene.make(viewCount: 3, novelCount: 4, width: 160, height: 120,
+                                        gaussians: 1200, sparsePoints: 200, seed: 5)
+        let maps: [String: DepthMap] = Dictionary(uniqueKeysWithValues: zip(scene.train.map(\.name), scene.trainDepth))
+        let prepared = DepthPreparation.prepare(scene.dataset, provider: SuppliedDepthProvider(maps: maps),
+                                                trustMetric: false, settings: DepthPriorSettings(), seed: 0)
+        #expect(prepared.report.views.count == scene.train.count)
+
+        for viewIndex in 0..<scene.train.count {
+            guard case .aligned(let alignment) = prepared.report.views[viewIndex] else {
+                Issue.record("view \(viewIndex) expected to be aligned, got \(prepared.report.views[viewIndex])")
+                continue
+            }
+            #expect(alignment.scale >= 0.9 && alignment.scale <= 1.1)
+            #expect(alignment.shift == 0)
+
+            let view = prepared.dataset.views[viewIndex]
+            let raw: DepthMap = scene.trainDepth[viewIndex]
+            let metric: [Float] = try #require(view.depth?.metricDepth)
+            let width: Int = view.camera.width
+            var validCount: Int = 0
+            var onSurfaceCount: Int = 0
+            for y in stride(from: 0, to: view.camera.height, by: 3) {
+                for x in stride(from: 0, to: width, by: 3) {
+                    let pixelIndex: Int = y * width + x
+                    guard raw.isValid(pixelIndex) else {
+                        continue
+                    }
+                    validCount += 1
+                    let depth: Float = metric[pixelIndex]
+                    guard depth > 0 else {
+                        continue
+                    }
+                    let point: SIMD3<Float> = DepthGeometry.backProject(x: x, y: y, depth: depth, camera: view.camera)
+                    let squared: Float = point.x * point.x + point.y * point.y + point.z * point.z
+                    let radialError: Float = abs(squared.squareRoot() - 1)
+                    let groundError: Float = abs(point.y + 1.05)
+                    if radialError < 0.25 || groundError < 0.25 {
+                        onSurfaceCount += 1
+                    }
+                }
+            }
+            #expect(validCount > 0)
+            #expect(Double(onSurfaceCount) >= 0.85 * Double(validCount))
+        }
+    }
+}
+
+/// Samples of a known affine relation `target = scale·prior + shift`, where the target is the
+/// camera-z depth for `.metric` and the inverse depth for `.relativeInverseDepth`. A deterministic
+/// 40 % of the samples are consistent. The other 60 % are occluded: their camera z is `factor`
+/// times the visible surface, with `factor` in 1.3...2.5, so their target is pushed in one direction.
+private func occludedSamples(count: Int, kind: DepthKind, scale: Double, shift: Double) -> [(prior: Double, z: Double)] {
+    var result: [(prior: Double, z: Double)] = []
+    result.reserveCapacity(count)
+    for index in 0..<count {
+        let fraction: Double = Double(index) * 0.6180339887 - (Double(index) * 0.6180339887).rounded(.down)
+        let prior: Double = 1.0 + 0.9 * fraction
+        let target: Double = scale * prior + shift
+        let surfaceDepth: Double = kind == .relativeInverseDepth ? 1.0 / target : target
+        let factor: Double = 1.3 + 1.2 * (Double(index) * 0.7548776662 - (Double(index) * 0.7548776662).rounded(.down))
+        let consistent: Bool = index % 5 < 2
+        let depth: Double = consistent ? surfaceDepth : surfaceDepth * factor
+        result.append((prior: prior, z: depth))
+    }
+    return result
 }
 
 /// A provider whose lookup always fails.
