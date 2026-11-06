@@ -16,6 +16,7 @@ var targets: [Target] = [
 #if os(macOS)
 products.append(.library(name: "SplatMetal", targets: ["SplatMetal"]))
 products.append(.library(name: "SplatTraining", targets: ["SplatTraining"]))
+products.append(.library(name: "SplatDepth", targets: ["SplatDepth"]))
 targets += [
     .target(
         name: "SplatMetal",
@@ -35,6 +36,16 @@ targets += [
     .testTarget(
         name: "SplatTrainingTests",
         dependencies: ["SplatTraining", "SplatMetal", "SplatCore"]
+    ),
+    // Phase 4 Task 5: depth alignment, providers and preparation. Foundation only for now; the
+    // Core ML depth model is added here by a later task. Nonisolated default isolation.
+    .target(
+        name: "SplatDepth",
+        dependencies: ["SplatCore"]
+    ),
+    .testTarget(
+        name: "SplatDepthTests",
+        dependencies: ["SplatDepth", "SplatCore"]
     ),
 ]
 #endif
