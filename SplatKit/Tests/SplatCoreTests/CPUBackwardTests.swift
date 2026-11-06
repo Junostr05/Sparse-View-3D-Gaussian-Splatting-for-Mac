@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - Deterministic scene construction
 
-private struct SplitMix64: RandomNumberGenerator {
+struct SplitMix64: RandomNumberGenerator {
     var state: UInt64
     mutating func next() -> UInt64 {
         state &+= 0x9E37_79B9_7F4A_7C15
@@ -49,7 +49,7 @@ private func randomCloud(count: Int, shDegree: Int, seed: UInt64) -> GaussianClo
                               rotations: rotations, opacityLogits: logits, sh: sh)
 }
 
-private struct Scene {
+struct Scene {
     var cloud: GaussianCloud
     var camera: Camera
     var settings: RasterSettings
@@ -65,14 +65,14 @@ private func randomWeights(count: Int, seed: UInt64) -> [SIMD3<Float>] {
     }
 }
 
-private func translatedScene() -> Scene {
+func translatedScene() -> Scene {
     let camera = Camera(width: 40, height: 28, fx: 40, fy: 40, cx: 20, cy: 14,
                         rotation: .identity, translation: SIMD3(0.2, -0.1, 4))
     return Scene(cloud: randomCloud(count: 30, shDegree: 3, seed: 11), camera: camera,
                  settings: .init(), weights: randomWeights(count: 40 * 28, seed: 5))
 }
 
-private func rotatedScene() -> Scene {
+func rotatedScene() -> Scene {
     let rot = rotationAbout(x: 20 * .pi / 180, y: 20 * .pi / 180)
     let t = SIMD3<Float>(0.3, -0.2, 4)
     let camera = Camera(width: 40, height: 28, fx: 40, fy: 40, cx: 20, cy: 14,
@@ -83,7 +83,7 @@ private func rotatedScene() -> Scene {
 
 /// Opaque Gaussians stacked along the optical axis plus a few random ones, so that
 /// the 0.999 alpha clamp and early termination both occur.
-private func stackedScene() -> Scene {
+func stackedScene() -> Scene {
     let base = randomCloud(count: 30, shDegree: 1, seed: 31)
     var positions = base.positions, logits = base.opacityLogits
     var logScales = base.logScales
@@ -132,11 +132,11 @@ private func clampedJacobianScene() -> Scene {
 
 // MARK: - Parameter access and finite differences
 
-private enum Group: String, CaseIterable {
+enum Group: String, CaseIterable {
     case positions, logScales, rotations, opacityLogits, sh
 }
 
-private func values(_ c: GaussianCloud, _ g: Group) -> [Float] {
+func values(_ c: GaussianCloud, _ g: Group) -> [Float] {
     switch g {
     case .positions: c.positions
     case .logScales: c.logScales
@@ -146,7 +146,7 @@ private func values(_ c: GaussianCloud, _ g: Group) -> [Float] {
     }
 }
 
-private func values(_ gr: GaussianGradients, _ g: Group) -> [Float] {
+func values(_ gr: GaussianGradients, _ g: Group) -> [Float] {
     switch g {
     case .positions: gr.positions
     case .logScales: gr.logScales
@@ -156,7 +156,7 @@ private func values(_ gr: GaussianGradients, _ g: Group) -> [Float] {
     }
 }
 
-private func perturbed(_ c: GaussianCloud, _ g: Group, _ index: Int, _ delta: Float) -> GaussianCloud {
+func perturbed(_ c: GaussianCloud, _ g: Group, _ index: Int, _ delta: Float) -> GaussianCloud {
     var p = c.positions, s = c.logScales, r = c.rotations, o = c.opacityLogits, h = c.sh
     switch g {
     case .positions: p[index] += delta

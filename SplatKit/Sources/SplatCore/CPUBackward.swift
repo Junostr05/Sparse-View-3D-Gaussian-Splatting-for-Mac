@@ -96,6 +96,8 @@ private struct ScreenSpaceGradient {
     var opacity = 0.0
     var conic = SIMD3<Double>.zero
     var mean2D = SIMD2<Double>.zero
+    /// ∂L/∂zᵢ, camera-space depth of the Gaussian (Phase 4 rendered depth; zero otherwise).
+    var depth = 0.0
 }
 
 /// Result of a backward pass together with the screen-space gradients that densification
@@ -127,8 +129,26 @@ extension CPURasterizer {
                                                camera: Camera,
                                                settings: RasterSettings,
                                                imageGradient: [SIMD3<Float>]) -> ScreenSpaceBackward {
+        backwardWithScreenSpace(cloud, camera: camera, settings: settings,
+                                imageGradient: imageGradient, depthGradient: nil)
+    }
+
+    /// Gradients of `L = Σ imageGradient · image + Σ (gD·Draw + gA·A)` with respect to every
+    /// Gaussian parameter, where `Draw = Σ αᵢ Tᵢ zᵢ` and `A = 1 − T_final` (rendered depth).
+    ///
+    /// - Parameter depthGradient: `(∂L/∂Draw, ∂L/∂A)` per pixel, row-major `width·height`;
+    ///   `nil` is the Phase 3 image-only backward and is bit-identical to it.
+    public static func backwardWithScreenSpace(_ cloud: GaussianCloud,
+                                               camera: Camera,
+                                               settings: RasterSettings,
+                                               imageGradient: [SIMD3<Float>],
+                                               depthGradient: [SIMD2<Float>]?) -> ScreenSpaceBackward {
         precondition(imageGradient.count == camera.width * camera.height,
                      "imageGradient must hold width·height pixels")
+        if let depthGradient {
+            precondition(depthGradient.count == camera.width * camera.height,
+                         "depthGradient must hold width·height pixels")
+        }
 
         let sorted = projectedAndSorted(cloud, camera: camera, settings: settings)
         let pixels = blendedSamples(sorted, camera: camera, settings: settings)
@@ -138,18 +158,35 @@ extension CPURasterizer {
         let background = SIMD3<Double>(settings.background)
         for (pixelIndex, pixel) in pixels.enumerated() where !pixel.samples.isEmpty {
             let g = SIMD3<Double>(imageGradient[pixelIndex])
+            var pixelDepth: SIMD2<Double>? = nil
+            if let depthGradient {
+                let v = depthGradient[pixelIndex]
+                pixelDepth = SIMD2(Double(v.x), Double(v.y))
+            }
+            let finalT = Double(pixel.finalTransmittance)
             // S = Σ_{j>i} c_j α_j T_j + T_final · background, built back to front.
-            var behind = Double(pixel.finalTransmittance) * background
+            var behind = finalT * background
+            // Σ_{j>i} z_j α_j T_j, the depth counterpart of `behind`.
+            var behindZ: Double = 0
             for sample in pixel.samples.reversed() {
                 let gaussian = sorted[sample.entry].gaussian
                 let color = SIMD3<Double>(gaussian.color)
                 let alpha = Double(sample.alpha)
                 let t = Double(sample.transmittance)
+                let z = Double(gaussian.depth)
 
                 screen[sample.entry].color += (alpha * t) * g
 
-                let dAlpha = ((color * t - behind / (1 - alpha)) * g).sum()
+                var dAlpha = ((color * t - behind / (1 - alpha)) * g).sum()
+                if let gd = pixelDepth {
+                    // ∂L/∂z_i is taken before the clamp guard: z is not gated by the alpha clamp.
+                    screen[sample.entry].depth += alpha * t * gd.x
+                    // ∂Draw/∂α_i = z_i T_i − Σ_{j>i} z_j α_j T_j / (1 − α_i); ∂A/∂α_i = T_final / (1 − α_i).
+                    dAlpha += (z * t - behindZ / (1 - alpha)) * gd.x
+                        + (finalT / (1 - alpha)) * gd.y
+                }
                 behind += color * (alpha * t)
+                behindZ += z * (alpha * t)
 
                 guard !sample.clamped else { continue }
                 let e = exp(-Double(sample.sigma))
@@ -400,6 +437,8 @@ private struct GaussianChain {
         let x = pCam.x, z = pCam.z
         let y = pCam.y
         var dpc = SIMD3<Double>.zero
+        // Rendered depth: z_cam = W[2]·p + t_z, so dz/dp = W[2] (applied by the Wᵀ step below).
+        dpc.z += g.depth
         // J entries: J00 = fx/z, J02 = −fx·tx/z², J11 = fy/z, J12 = −fy·ty/z².
         dpc.z += -fx / (z * z) * dJ[0][0] - fy / (z * z) * dJ[1][1]
         dpc.z += 2 * fx * tx / (z * z * z) * dJ[0][2] + 2 * fy * ty / (z * z * z) * dJ[1][2]
