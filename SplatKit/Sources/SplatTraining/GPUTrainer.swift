@@ -8,7 +8,8 @@ import SplatMetal
 //   1 sample a view; forward render (depth mode only when the view has a prior and iteration ≥ depth start)
 //   2 image loss (`imageLoss.encode`); depth loss (`.pixelGradient` terms)
 //   3 backward with statistics (`encodeBackward`, depth gradient passed only for depth-mode views)
-//   4 pseudo-views: not in this task (Task 18)
+//   4 pseudo-views (Task 18): on a pseudo iteration, steps 1–3 are committed first; then a pseudo forward, its depth
+//     loss (slot 1), a backward that ACCUMULATES with a zero image gradient and no statistics, and steps 5–7
 //   5 anisotropy gradient (`.parameterGradient` terms)
 //   6 Adam (`adam.encode`)
 //   7 scale cap (`.postOptimizer` terms)
@@ -69,15 +70,18 @@ public struct StepReport: Sendable {
     public var depthLoss: DepthLossValue?
     /// Gaussians removed by isolation pruning after this step. Nil when no isolation boundary ran.
     public var isolationPruned: Int?
+    /// Depth loss of this iteration's pseudo-view, read at the same wait points. Nil when no pseudo-view ran.
+    public var pseudoDepthLoss: DepthLossValue?
 
     public init(iteration: Int, loss: ImageLossValue?, visibleGaussians: Int, densify: DensifySummary?,
-                depthLoss: DepthLossValue? = nil, isolationPruned: Int? = nil) {
+                depthLoss: DepthLossValue? = nil, isolationPruned: Int? = nil, pseudoDepthLoss: DepthLossValue? = nil) {
         self.iteration = iteration
         self.loss = loss
         self.visibleGaussians = visibleGaussians
         self.densify = densify
         self.depthLoss = depthLoss
         self.isolationPruned = isolationPruned
+        self.pseudoDepthLoss = pseudoDepthLoss
     }
 }
 
@@ -95,7 +99,12 @@ public final class GPUTrainer {
     /// Live Gaussians.
     public var gaussianCount: Int { store.count }
     /// Extra terms, encoded after the built-in Phase 4 terms at their stages. Empty by default.
-    public var auxiliaryLosses: [any AuxiliaryLoss] = []
+    public var auxiliaryLosses: [any AuxiliaryLoss] = [] {
+        didSet { rebuildTermCache() }
+    }
+    /// Per-stage term lists (built-in terms first, then `auxiliaryLosses`, in array order). Rebuilt only when the
+    /// term sets change, not on every step.
+    private var termsByStage: [AuxiliaryStage: [any AuxiliaryLoss]] = [:]
 
     private let context: MetalContext
     private let configuration: TrainingConfiguration
@@ -115,6 +124,16 @@ public final class GPUTrainer {
     private let phase4Terms: [any AuxiliaryLoss]
     /// The depth term, when the run has one. Its value is read at the wait points.
     private let depthTerm: DepthLossTerm?
+    /// Pseudo-view pool (P9), built once in `init` from the metric views; empty unless `.pseudoViews` is on.
+    private let pseudoPool: [PseudoView]
+    /// Uploaded depth prior of each pseudo-view, in pool order.
+    private let pseudoPriors: [GPUDepthPrior]
+    /// The depth loss kernel: slot 0 for the training views (through `depthTerm`), slot 1 for pseudo-views.
+    private let depthLoss: GPUDepthLoss?
+    /// Grow-only, zero-filled dL/drendered for pseudo-view backward passes. Only read by the GPU, so it stays zero.
+    private var zeroImageGradient: MTLBuffer?
+    /// True from a pseudo-view encode until the trainer reads its value at a wait point.
+    private var pendingPseudoLoss = false
     /// One rgba32Float render target per distinct image size, created on first use. N distinct sizes
     /// allocate N textures, which `TrainingMemoryBudget.reservedImageBytes` does not fully count (it
     /// reserves one largest-view render target). Known gap for Task 16 and later: cap or share the
@@ -143,6 +162,7 @@ public final class GPUTrainer {
     private struct LossReadout {
         var image: ImageLossValue?
         var depth: DepthLossValue?
+        var pseudoDepth: DepthLossValue?
     }
 
     /// - Precondition: `initialCloud.shDegree == configuration.shDegree`.
@@ -163,11 +183,24 @@ public final class GPUTrainer {
         precondition(initialCloud.shDegree == configuration.shDegree,
                      "initial cloud SH degree \(initialCloud.shDegree) does not match the configuration")
 
+        // Pseudo-view pool (P9), built once from the metric views; empty unless `.pseudoViews` is on.
+        let pseudoPool: [PseudoView] = configuration.isEnabled(.pseudoViews)
+            ? PseudoViews.make(dataset.views, settings: configuration.pseudoViews, near: GPUTrainer.depthNearPlane).views
+            : []
+        let pseudoSizes: [SIMD2<Int>] = pseudoPool.map { SIMD2<Int>($0.camera.width, $0.camera.height) }
+        let wantsDepthLoss: Bool = configuration.isEnabled(.depthPearson) || configuration.isEnabled(.depthL1)
+        let hasTrainingPrior: Bool = dataset.views.contains(where: { $0.depth != nil })
+        let hasDepthTerm: Bool = wantsDepthLoss && hasTrainingPrior
+
         // Budget (D13). Each view keeps its own size; the reserved image bytes use the largest view.
-        // Depth buffers are reserved for every training view and no pseudo-view yet (Task 18 adds them).
+        // Depth buffers are reserved only when a depth term or the pseudo-view pool exists, so a run with
+        // `regularizers == []` reserves exactly the Phase 3 bytes.
         let viewSizes: [SIMD2<Int>] = dataset.views.map { SIMD2<Int>($0.camera.width, $0.camera.height) }
-        let reservedBytes: Int = TrainingMemoryBudget.reservedImageBytes(viewSizes: viewSizes)
-            + TrainingMemoryBudget.reservedDepthBytes(viewSizes: viewSizes, pseudoViewSizes: [])
+        var reservedBytes: Int = TrainingMemoryBudget.reservedImageBytes(viewSizes: viewSizes)
+        if hasDepthTerm || !pseudoPool.isEmpty {
+            reservedBytes += TrainingMemoryBudget.reservedDepthBytes(viewSizes: viewSizes,
+                                                                     pseudoViewSizes: pseudoSizes)
+        }
         let budget = TrainingMemoryBudget.maxGaussians(
             workingSetBytes: context.device.recommendedMaxWorkingSetSize,
             shDegree: configuration.shDegree,
@@ -220,13 +253,26 @@ public final class GPUTrainer {
 
         // Phase 4 terms (P12), built from the switches. The depth term exists only when a depth switch is on and
         // at least one view has a prior; its priors are uploaded once, one entry per view.
-        var phase4Terms: [any AuxiliaryLoss] = []
-        var depthTerm: DepthLossTerm?
-        let wantsDepthLoss: Bool = configuration.isEnabled(.depthPearson) || configuration.isEnabled(.depthL1)
-        if wantsDepthLoss, dataset.views.contains(where: { $0.depth != nil }) {
-            let depthLoss = try metalCall { () throws(MetalError) -> GPUDepthLoss in
+        // One GPUDepthLoss serves the training views (slot 0) and the pseudo-views (slot 1).
+        var depthLossObject: GPUDepthLoss?
+        if hasDepthTerm || !pseudoPool.isEmpty {
+            depthLossObject = try metalCall { () throws(MetalError) -> GPUDepthLoss in
                 try GPUDepthLoss(context: context)
             }
+        }
+        var pseudoPriors: [GPUDepthPrior] = []
+        if let depthLossObject, !pseudoPool.isEmpty {
+            for pseudo in pseudoPool {
+                let uploaded = try metalCall { () throws(MetalError) -> GPUDepthPrior in
+                    try depthLossObject.makePrior(pseudo.prior)
+                }
+                pseudoPriors.append(uploaded)
+            }
+        }
+
+        var phase4Terms: [any AuxiliaryLoss] = []
+        var depthTerm: DepthLossTerm?
+        if hasDepthTerm, let depthLoss = depthLossObject {
             var priors: [GPUDepthPrior?] = []
             priors.reserveCapacity(dataset.views.count)
             for view in dataset.views {
@@ -278,6 +324,10 @@ public final class GPUTrainer {
         // Same scene extent as CPUTrainer: camera centres, falling back to the dataset points.
         self.sceneExtent = SceneExtent.estimate(cameraCenters: dataset.cameraCenters,
                                                 points: dataset.points?.positions ?? [])
+        self.pseudoPool = pseudoPool
+        self.pseudoPriors = pseudoPriors
+        self.depthLoss = depthLossObject
+        rebuildTermCache()
     }
 
     /// One training iteration. Does not wait for the GPU unless a boundary requires it (see the file
@@ -330,7 +380,7 @@ public final class GPUTrainer {
             try self.renderer.encodeForward(camera: camera, settings: settings, to: texture,
                                             depth: depthPass?.rendered)
         }
-        let commandBuffer = pass.commandBuffer
+        var commandBuffer = pass.commandBuffer
 
         // Validate the previous step before this step's loss encode overwrites the loss state. The wait
         // is cheap (see the file comment); it throws `.nonFiniteLoss(iteration: index - 1)` for a NaN loss.
@@ -371,22 +421,16 @@ public final class GPUTrainer {
                                              commandBuffer: commandBuffer)
         }
 
-        // Step 5: parameter-gradient terms (anisotropy), after the backward pass and before Adam.
-        for term in terms(.parameterGradient) {
-            try term.encode(auxiliary)
-        }
-
-        // Step 6: Adam with the pre-increment schedule and step = index + 1 (CPUAdam increments first).
-        let rates = configuration.learningRates(iteration: index, sceneRadius: sceneExtent.radius)
-        try metalCall { () throws(MetalError) -> Void in
-            try self.adam.encode(parameters: self.store, gradients: currentGradients, state: self.adamState,
-                                 rates: rates, step: index + 1, hyper: self.configuration.adam,
-                                 commandBuffer: commandBuffer)
-        }
-
-        // Step 7: post-optimizer terms (scale cap), after Adam and before the increment.
-        for term in terms(.postOptimizer) {
-            try term.encode(auxiliary)
+        // Step 4 (Task 18): a pseudo iteration commits the training part (steps 1–3) and encodes the pseudo-view into
+        // its own command buffer, which then carries steps 5–7 of this iteration (`encodePseudoViewStep`).
+        // Otherwise steps 5–7 go into the training command buffer.
+        if let poolIndex = pseudoPoolIndex(iteration: index) {
+            commandBuffer.commit()
+            pending.append(commandBuffer)
+            commandBuffer = try encodePseudoViewStep(viewIndex: viewIndex, iteration: index, poolIndex: poolIndex,
+                                                     settings: settings, gradients: currentGradients)
+        } else {
+            try encodeParameterUpdate(auxiliary, iteration: index)
         }
 
         commandBuffer.commit()
@@ -432,12 +476,23 @@ public final class GPUTrainer {
         }
 
         return StepReport(iteration: completed, loss: readout.image, visibleGaussians: pass.visibleGaussians,
-                          densify: summary, depthLoss: readout.depth, isolationPruned: isolationPruned)
+                          densify: summary, depthLoss: readout.depth, isolationPruned: isolationPruned,
+                          pseudoDepthLoss: readout.pseudoDepth)
     }
 
-    /// Terms of `stage`, built-in first, then the caller's `auxiliaryLosses`, in array order.
+    /// Terms of `stage`, built-in first, then the caller's `auxiliaryLosses`, in array order (from the cache).
     private func terms(_ stage: AuxiliaryStage) -> [any AuxiliaryLoss] {
-        (phase4Terms + auxiliaryLosses).filter { $0.stage == stage }
+        termsByStage[stage] ?? []
+    }
+
+    /// Rebuilds the per-stage lists. Called from `init` and whenever `auxiliaryLosses` is set.
+    private func rebuildTermCache() {
+        let all: [any AuxiliaryLoss] = phase4Terms + auxiliaryLosses
+        var cache: [AuxiliaryStage: [any AuxiliaryLoss]] = [:]
+        for stage in [AuxiliaryStage.pixelGradient, .parameterGradient, .postOptimizer] {
+            cache[stage] = all.filter { $0.stage == stage }
+        }
+        termsByStage = cache
     }
 
     /// Same boundary rule as CPUTrainer.step, applied to the completed iteration count.
@@ -490,7 +545,15 @@ public final class GPUTrainer {
         if let depth, !depth.loss.isFinite {
             throw .nonFiniteLoss(iteration: stepIndex)
         }
-        return LossReadout(image: image, depth: depth)
+        var pseudo: DepthLossValue?
+        if pendingPseudoLoss, let depthLoss {
+            pseudo = depthLoss.readValue(slot: 1)
+        }
+        pendingPseudoLoss = false
+        if let pseudo, !pseudo.loss.isFinite {
+            throw .nonFiniteLoss(iteration: stepIndex)
+        }
+        return LossReadout(image: image, depth: depth, pseudoDepth: pseudo)
     }
 
     /// Runs `body` unless an earlier error made the trainer fatal; records any error it throws.
@@ -625,6 +688,170 @@ public final class GPUTrainer {
     private func makeGradients() throws(TrainingError) -> GradientBuffers {
         try metalCall { () throws(MetalError) -> GradientBuffers in
             try GradientBuffers(context: self.context, count: self.store.capacity, shDegree: self.store.shDegree)
+        }
+    }
+}
+
+// MARK: - Pseudo-views (Task 18, P9), held-out evaluation
+
+// Command-buffer contract of a pseudo iteration (CPUTrainer step 4, GPU order):
+// 1. The training part (steps 1–3: forward, image and depth loss, backward with statistics) is committed as B.
+// 2. `encodeForward` for the pseudo camera queues its projection behind B and returns the pseudo buffer P, uncommitted.
+// 3. In P: the pseudo depth loss (slot 1), `encodeBackward` with a zero image gradient, `accumulate: true` and no
+//    statistics, then steps 5–7 (anisotropy, Adam, scale cap). Gradients written by B are overwritten by B's own
+//    backward (accumulate off), so P adds the pseudo part on top of exactly the training gradients.
+// 4. P is committed by `advance` like any step buffer and joins `pending`, so the next wait point covers B and P.
+// The pseudo depth buffers and the forward's projection/render buffers are shared with the training view. This is safe
+// because B is committed before P is encoded and Metal orders the command buffers of one queue for tracked resources.
+
+extension GPUTrainer {
+    /// Number of pseudo-views in the pool (P9). Zero when `.pseudoViews` is off or the dataset has no metric view.
+    public var pseudoViewCount: Int { pseudoPool.count }
+
+    /// PSNR and SSIM of `view`, rendered with the full SH degree, using the CPU metric definitions on the GPU rendering.
+    /// Waits for the GPU first and throws if the most recent step's losses are non-finite. Does not change the model
+    /// or the densification statistics.
+    public func evaluate(view: TrainingView) throws(TrainingError) -> HeldOutMetrics {
+        try guarded { () throws(TrainingError) -> HeldOutMetrics in
+            try self.measureHeldOut(view)
+        }
+    }
+
+    private func measureHeldOut(_ view: TrainingView) throws(TrainingError) -> HeldOutMetrics {
+        _ = try synchronize()
+        let settings = RasterSettings(shDegreeLimit: configuration.shDegree, background: configuration.background)
+        let rendered = try metalCall { () throws(MetalError) -> RGBImage in
+            try self.renderer.renderImage(camera: view.camera, settings: settings)
+        }
+        return HeldOutMetrics(psnr: ImageMetrics.psnr(rendered, view.image),
+                              ssim: ImageMetrics.ssim(rendered, view.image))
+    }
+
+    /// Pool index of the pseudo-view used by this iteration, or nil when the iteration has none (the CPUTrainer gate).
+    func pseudoPoolIndex(iteration: Int) -> Int? {
+        let schedule = configuration.pseudoViews
+        guard configuration.isEnabled(.pseudoViews), !pseudoPool.isEmpty,
+              iteration >= schedule.startIteration, schedule.interval > 0,
+              (iteration - schedule.startIteration) % schedule.interval == 0 else {
+            return nil
+        }
+        return PseudoViews.index(iteration: iteration, count: pseudoPool.count, seed: configuration.seed)
+    }
+
+    /// Step 4 and steps 5–7 of a pseudo iteration. Precondition: the training part has been committed.
+    /// Returns the pseudo command buffer, uncommitted. Adds into `gradients` and touches no statistics.
+    func encodePseudoViewStep(viewIndex: Int, iteration: Int, poolIndex: Int, settings: RasterSettings,
+                              gradients: GradientBuffers) throws(TrainingError) -> MTLCommandBuffer {
+        guard let depthLoss else {
+            throw .metal("pseudo-view step without a depth loss kernel")
+        }
+        let pseudo: PseudoView = pseudoPool[poolIndex]
+        let camera = pseudo.camera
+        let width = camera.width
+        let height = camera.height
+        let texture = try renderTarget(width: width, height: height)
+        let depthBuffers = try ensureDepthBuffers(pixelCount: width * height)
+        let pass = try metalCall { () throws(MetalError) -> ForwardPass in
+            try self.renderer.encodeForward(camera: camera, settings: settings, to: texture,
+                                            depth: depthBuffers.rendered)
+        }
+        let commandBuffer = pass.commandBuffer
+
+        // Depth loss into slot 1 with the pseudo weight: Pearson only (no L1), as in CPUTrainer step 4.
+        let weights = DepthLossWeights(pearson: configuration.pseudoViews.weight, l1: 0,
+                                       alphaMask: configuration.depthPrior.alphaMask,
+                                       minimumPixels: configuration.depthPrior.minimumPixels,
+                                       nearPlane: GPUTrainer.depthNearPlane)
+        try metalCall { () throws(MetalError) -> Void in
+            try depthLoss.encode(renderedDepth: depthBuffers.rendered, prior: self.pseudoPriors[poolIndex],
+                                 weights: weights, slot: 1, depthGradient: depthBuffers.gradient,
+                                 commandBuffer: commandBuffer)
+        }
+        pendingPseudoLoss = true
+
+        // Backward with a zero image gradient. Accumulates into the step's gradients; statistics: nil.
+        let zeros = try zeroImageGradientBuffer(pixelCount: width * height)
+        try metalCall { () throws(MetalError) -> Void in
+            try self.renderer.encodeBackward(imageGradient: zeros, depthGradient: depthBuffers.gradient,
+                                             into: gradients, statistics: nil, accumulate: true,
+                                             commandBuffer: commandBuffer)
+        }
+
+        let auxiliary = AuxiliaryContext(
+            viewIndex: viewIndex,
+            iteration: iteration,
+            isPseudoView: true,
+            camera: camera,
+            renderedDepth: depthBuffers.rendered,
+            depthGradient: depthBuffers.gradient,
+            parameters: store,
+            gradients: gradients,
+            sceneExtent: sceneExtent,
+            commandBuffer: commandBuffer)
+        try encodeParameterUpdate(auxiliary, iteration: iteration)
+        return commandBuffer
+    }
+
+    /// Steps 5–7 of an iteration, in CPUTrainer order: parameter-gradient terms (anisotropy), Adam with the
+    /// pre-increment schedule and step = index + 1, then post-optimizer terms (scale cap). Shared by the training
+    /// and pseudo command buffers, so both encode the same order.
+    func encodeParameterUpdate(_ auxiliary: AuxiliaryContext, iteration index: Int) throws(TrainingError) {
+        for term in terms(.parameterGradient) {
+            try term.encode(auxiliary)
+        }
+        let rates = configuration.learningRates(iteration: index, sceneRadius: sceneExtent.radius)
+        try metalCall { () throws(MetalError) -> Void in
+            try self.adam.encode(parameters: self.store, gradients: auxiliary.gradients, state: self.adamState,
+                                 rates: rates, step: index + 1, hyper: self.configuration.adam,
+                                 commandBuffer: auxiliary.commandBuffer)
+        }
+        for term in terms(.postOptimizer) {
+            try term.encode(auxiliary)
+        }
+    }
+
+    /// Grow-only, zero-filled `float4` per pixel. Zeroed once when created; the GPU only reads it.
+    func zeroImageGradientBuffer(pixelCount: Int) throws(TrainingError) -> MTLBuffer {
+        let bytes = pixelCount * 4 * MemoryLayout<Float>.size
+        if let existing = zeroImageGradient, existing.length >= bytes {
+            return existing
+        }
+        let buffer = try metalCall { () throws(MetalError) -> MTLBuffer in
+            try self.context.makeBuffer(length: bytes)
+        }
+        memset(buffer.contents(), 0, buffer.length)
+        zeroImageGradient = buffer
+        return buffer
+    }
+}
+
+/// Test-only copy of the trainer state after the GPU is idle.
+struct GPUTrainerTestReadout {
+    /// Gradients left by the most recent step (Adam does not change them).
+    var gradients: GaussianGradients
+    /// Densification statistics: summed screen-space gradient norms and visible counts, one entry per Gaussian.
+    var gradientNormSums: [Float]
+    var visibleCounts: [UInt32]
+}
+
+extension GPUTrainer {
+    /// Test hook: waits for the GPU, validates the most recent step and copies the gradients and statistics to the CPU.
+    func testingReadout() throws(TrainingError) -> GPUTrainerTestReadout {
+        try guarded { () throws(TrainingError) -> GPUTrainerTestReadout in
+            _ = try self.synchronize()
+            let count: Int = self.store.count
+            let gradientCopy = self.gradients.toGaussianGradients(count: count, shDegree: self.store.shDegree)
+            let norms: [Float] = count > 0
+                ? Array(UnsafeBufferPointer(
+                    start: self.statistics.gradientNormSums.contents().bindMemory(to: Float.self, capacity: count),
+                    count: count))
+                : []
+            let visible: [UInt32] = count > 0
+                ? Array(UnsafeBufferPointer(
+                    start: self.statistics.visibleCounts.contents().bindMemory(to: UInt32.self, capacity: count),
+                    count: count))
+                : []
+            return GPUTrainerTestReadout(gradients: gradientCopy, gradientNormSums: norms, visibleCounts: visible)
         }
     }
 }
