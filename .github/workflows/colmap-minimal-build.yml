@@ -1,0 +1,29 @@
+name: COLMAP minimal build spike
+
+# Produces the colmap-min-report artifact; see Tools/ci/colmap_minimal_build.sh.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/colmap-minimal-build.yml"
+      - "Tools/ci/colmap_minimal_build.sh"
+      - "Tools/ci/make_textured_scene.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and run minimal COLMAP
+        run: bash Tools/ci/colmap_minimal_build.sh
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colmap-min-report
+          path: ${{ runner.temp }}/colmap-min-report
+          retention-days: 14
