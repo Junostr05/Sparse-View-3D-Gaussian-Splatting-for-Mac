@@ -20,6 +20,8 @@ targets:
         product: SplatMetal
       - package: SplatKit
         product: SplatTraining
+      - package: SplatKit
+        product: SplatDepth
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.junostr05.SparseSplat

@@ -1,4 +1,3 @@
-import Metal
 import Observation
 import SwiftUI
 import SplatCore
@@ -10,6 +9,12 @@ nonisolated struct PreparedRun: Sendable {
     let dataset: TrainingDataset
     let initialCloud: GaussianCloud
     let configuration: TrainingConfiguration
+}
+
+/// Updated package contents plus an optional, non-fatal message for the inspector.
+nonisolated struct ImportResult: Sendable {
+    let contents: ProjectContents
+    let message: String?
 }
 
 /// Blocking file, decode and GPU-budget work. Each function runs off the main actor (`@concurrent`).
@@ -45,10 +50,11 @@ nonisolated enum ProjectImport {
         }
     }
 
-    /// Reads `capture.json` and the images it names from an ARKit folder.
+    /// Reads `capture.json`, the images it names and each frame's depth file, if it lists one.
+    /// Missing or unreadable depth files do not fail the import; they are named in the message.
     @concurrent
-    static func arkitContents(folder: URL, base: ProjectContents) async throws -> ProjectContents {
-        try withSecurityScope(folder) { () throws -> ProjectContents in
+    static func arkitContents(folder: URL, base: ProjectContents) async throws -> ImportResult {
+        try withSecurityScope(folder) { () throws -> ImportResult in
             let captureData: Data = try Data(contentsOf: folder.appending(path: "capture.json"))
             let capture: ARKitCapture
             do {
@@ -68,35 +74,95 @@ nonisolated enum ProjectImport {
             guard missing.isEmpty else {
                 throw DatasetError.missingImages(missing)
             }
-            return ProjectBundle.importARKit(capture: captureData, imageFiles: imageFiles, into: base)
+
+            var depthFiles: [String: Data] = [:]
+            var missingDepth: [String] = []
+            var unreadableDepth: [String] = []
+            for frame in capture.frames {
+                guard let depthName = frame.depth else {
+                    continue
+                }
+                guard let data = try? Data(contentsOf: folder.appending(path: depthName)) else {
+                    missingDepth.append(frame.image)
+                    continue
+                }
+                do {
+                    _ = try DepthMapCodec.decode(data)
+                    depthFiles[frame.image] = data
+                } catch {
+                    unreadableDepth.append(frame.image)
+                }
+            }
+
+            let contents: ProjectContents = ProjectBundle.importARKit(capture: captureData,
+                                                                      imageFiles: imageFiles,
+                                                                      depthFiles: depthFiles,
+                                                                      into: base)
+            return ImportResult(contents: contents,
+                                message: depthMessage(missing: missingDepth, unreadable: unreadableDepth))
         }
     }
 
-    /// Decodes the dataset and sizes the initial cloud to the memory budget of this Mac.
+    /// Reads every `<image name>.sdpt` in a folder and stores the ones that match an image. Files that match
+    /// no image, or do not decode, are named in the message.
     @concurrent
-    static func prepare(_ contents: ProjectContents) async throws -> PreparedRun {
-        let dataset: TrainingDataset = try ProjectBundle.loadDataset(contents, decode: ImageIODecoder.decode)
-        let configuration: TrainingConfiguration = contents.manifest.training
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw TrainingError.metal("no Metal device")
-        }
+    static func depthContents(folder: URL, base: ProjectContents) async throws -> ImportResult {
+        try withSecurityScope(folder) { () throws -> ImportResult in
+            let names: Set<String> = Set(base.manifest.imageFiles)
+            let suffix: String = "." + DepthMapCodec.fileExtension
+            let entries: [URL] = try FileManager.default.contentsOfDirectory(at: folder,
+                                                                            includingPropertiesForKeys: nil)
+            var maps: [String: DepthMap] = [:]
+            var unmatched: [String] = []
+            var unreadable: [String] = []
+            for entry in entries where entry.lastPathComponent.hasSuffix(suffix) {
+                let fileName: String = entry.lastPathComponent
+                let imageName: String = String(fileName.dropLast(suffix.count))
+                guard names.contains(imageName) else {
+                    unmatched.append(fileName)
+                    continue
+                }
+                do {
+                    maps[imageName] = try DepthMapCodec.decode(Data(contentsOf: entry))
+                } catch {
+                    unreadable.append(fileName)
+                }
+            }
 
-        var viewSizes: [SIMD2<Int>] = []
-        viewSizes.reserveCapacity(dataset.views.count)
-        for view in dataset.views {
-            viewSizes.append(SIMD2<Int>(view.image.width, view.image.height))
+            let contents: ProjectContents = maps.isEmpty ? base : ProjectBundle.withDepthMaps(base, maps)
+            var parts: [String] = []
+            if maps.count + unmatched.count + unreadable.count == 0 {
+                parts.append("No .sdpt depth maps were found in the folder.")
+            } else {
+                parts.append("Imported \(maps.count) depth map\(maps.count == 1 ? "" : "s").")
+            }
+            if !unmatched.isEmpty {
+                parts.append("No image matches: \(Self.listing(unmatched)).")
+            }
+            if !unreadable.isEmpty {
+                parts.append("Could not be read: \(Self.listing(unreadable)).")
+            }
+            return ImportResult(contents: contents, message: parts.joined(separator: " "))
         }
-        let reserved: Int = TrainingMemoryBudget.reservedImageBytes(viewSizes: viewSizes)
-        let cap: Int = TrainingMemoryBudget.maxGaussians(
-            workingSetBytes: device.recommendedMaxWorkingSetSize,
-            shDegree: configuration.shDegree,
-            reservedBytes: reserved,
-            configuredMax: configuration.maxGaussians
-        )
-        let cloud: GaussianCloud = GaussianInitializer.initialize(dataset,
-                                                                  configuration: configuration,
-                                                                  maxCount: cap)
-        return PreparedRun(dataset: dataset, initialCloud: cloud, configuration: configuration)
+    }
+
+    /// Summary of the depth files an ARKit import could not use. `nil` when every listed file was found.
+    static func depthMessage(missing: [String], unreadable: [String]) -> String? {
+        var parts: [String] = []
+        if !missing.isEmpty {
+            parts.append("Depth files are missing for \(listing(missing)).")
+        }
+        if !unreadable.isEmpty {
+            parts.append("Depth files could not be read for \(listing(unreadable)).")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Up to five names, then the count of the rest.
+    static func listing(_ names: [String]) -> String {
+        let shown: String = names.prefix(5).joined(separator: ", ")
+        let rest: Int = names.count - min(names.count, 5)
+        return rest > 0 ? "\(shown) and \(rest) more" : shown
     }
 
     /// Parses the stored checkpoint PLY, if the package has one.
@@ -124,6 +190,10 @@ final class ProjectModel {
     private(set) var progress: TrainingProgress?
     private(set) var isTraining = false
     var errorMessage: String?
+    /// Non-fatal notes from the last import or run, such as depth files that were missing or unreadable.
+    var warningMessage: String?
+    /// Depth outcome per image from the last preparation. `nil` until a run has prepared depth.
+    private(set) var depthStatuses: [DepthStatusRow]?
     /// The viewport model. Created from the stored checkpoint, or from the initial cloud of a run.
     private(set) var viewer: ViewerModel?
 
@@ -154,8 +224,26 @@ final class ProjectModel {
         let base: ProjectContents = document.wrappedValue.contents
         Task {
             do {
-                let updated = try await ProjectImport.arkitContents(folder: folder, base: base)
-                self.adopt(updated, into: document)
+                let updated: ImportResult = try await ProjectImport.arkitContents(folder: folder, base: base)
+                self.adopt(updated.contents, into: document)
+                self.warningMessage = updated.message
+            } catch {
+                self.errorMessage = Self.describe(error)
+            }
+        }
+    }
+
+    /// Stores the `.sdpt` depth maps of a folder whose names match the images of the project.
+    func importDepthMaps(folder: URL, into document: Binding<ProjectDocument>) {
+        guard !isTraining else { return }
+        let base: ProjectContents = document.wrappedValue.contents
+        Task {
+            do {
+                let updated: ImportResult = try await ProjectImport.depthContents(folder: folder, base: base)
+                // The viewer and the progress stay: depth maps do not change the reconstruction shown.
+                document.wrappedValue.contents = updated.contents
+                self.errorMessage = nil
+                self.warningMessage = updated.message
             } catch {
                 self.errorMessage = Self.describe(error)
             }
@@ -168,6 +256,8 @@ final class ProjectModel {
         viewer = nil
         progress = nil
         errorMessage = nil
+        warningMessage = nil
+        depthStatuses = nil
     }
 
     // MARK: - Viewer
@@ -203,7 +293,17 @@ final class ProjectModel {
 
     private func runTraining(contents: ProjectContents, document: Binding<ProjectDocument>) async {
         do {
-            let prepared: PreparedRun = try await ProjectImport.prepare(contents)
+            // Depth problems never fail the run: they only appear in the status and the warning.
+            let depth: DepthPreparedRun = try await DepthPipeline.prepare(contents: contents,
+                                                                          store: PipelineModel.makeModelStore())
+            let prepared: PreparedRun = depth.run
+            depthStatuses = depth.statuses
+            warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
+            if !depth.estimatedMaps.isEmpty {
+                // Cache the inferred maps in the project, so the next run skips the model.
+                document.wrappedValue.contents = ProjectBundle.withDepthMaps(document.wrappedValue.contents,
+                                                                             depth.estimatedMaps)
+            }
             let trainingSession = TrainingSession(dataset: prepared.dataset,
                                                   initialCloud: prepared.initialCloud,
                                                   configuration: prepared.configuration)

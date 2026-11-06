@@ -4,7 +4,7 @@ import SplatIO
 import SplatTraining
 
 /// The project inspector: pipeline steps and input sections while the project has no images, the capture
-/// summary and training controls after that. The depth model row sits between them.
+/// summary, the Sparse-View Quality settings and training controls after that. The depth model row sits between them.
 struct ProjectInspector: View {
     let document: Binding<ProjectDocument>
     let model: ProjectModel
@@ -21,12 +21,20 @@ struct ProjectInspector: View {
             }
             DepthModelSection(pipeline: pipeline)
             if !manifest.imageFiles.isEmpty {
+                SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)
                 trainingSection
             }
             if let message = model.errorMessage {
                 Section {
                     Text(message)
                         .foregroundStyle(.red)
+                }
+            }
+            if let message = model.warningMessage {
+                Section {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             if let message = pipeline.errorMessage {

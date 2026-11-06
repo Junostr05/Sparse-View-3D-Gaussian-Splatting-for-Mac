@@ -340,7 +340,7 @@ struct DepthModelSection: View {
         let size: String = ByteCountFormatter.string(fromByteCount: descriptor.totalSizeBytes, countStyle: .file)
         Section("Depth Model") {
             LabeledContent(descriptor.displayName, value: statusText)
-            Text("Used for depth guidance in a later update. Training does not use it yet.")
+            Text("Gives depth guidance to projects without depth maps. Used by training when the depth prior is on.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let progress = pipeline.depthProgress {

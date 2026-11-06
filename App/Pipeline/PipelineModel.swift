@@ -603,7 +603,7 @@ final class PipelineModel {
     }
 
     /// `Application Support/SparseSplat/Models` inside the app container.
-    private static func makeModelStore() -> ModelStore? {
+    static func makeModelStore() -> ModelStore? {
         guard let support = try? FileManager.default.url(for: .applicationSupportDirectory,
                                                          in: .userDomainMask,
                                                          appropriateFor: nil,
