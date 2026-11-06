@@ -289,7 +289,7 @@ public struct ApplePhotogrammetryPoseProvider: PoseProvider {
                     }
                 case .requestError(_, let error):
                     session.cancel()
-                    throw PoseEstimationFailure.failed(reason: String(describing: error))
+                    throw PoseEstimationFailure.failed(reason: "Apple Photogrammetry could not reconstruct the scene (\(String(describing: error))). Nearly identical frames, too little overlap between them or too few distinct views are the usual causes")
                 case .processingComplete, .processingCancelled:
                     break outputLoop
                 default:

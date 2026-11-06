@@ -285,14 +285,14 @@ final class PipelineModel {
     /// Switches between every frame and the best `bestCount`. Manual changes are dropped.
     func setUsesAllFrames(_ value: Bool) {
         usesAllFrames = value
-        plan?.setMode(mode)
+        plan?.setMode(mode, minimumSpacing: minimumSpacing)
     }
 
     /// Sets the number of best frames. Manual changes are dropped when the mode is "best N".
     func setBestCount(_ count: Int) {
         bestCount = max(1, count)
         if !usesAllFrames {
-            plan?.setMode(mode)
+            plan?.setMode(mode, minimumSpacing: minimumSpacing)
         }
     }
 
@@ -544,7 +544,28 @@ final class PipelineModel {
         for item in items {
             planItems.append(FrameSelectionPlan.Item(id: item.id, time: item.time, sharpness: item.sharpness))
         }
-        plan = FrameSelectionPlan(items: planItems, mode: mode)
+        plan = FrameSelectionPlan(items: planItems, mode: mode, minimumSpacing: minimumSpacing)
+    }
+
+    /// Smallest time between two automatically chosen video frames: half the even spacing of the chosen
+    /// count. Nearly identical neighbours (a paused camera) make poor and sometimes unusable views. Photos and
+    /// "use all frames" have no spacing.
+    private var minimumSpacing: Double {
+        guard !usesAllFrames, case .video = source else {
+            return 0
+        }
+        var first: Double = .greatestFiniteMagnitude
+        var last: Double = -.greatestFiniteMagnitude
+        for item in candidates {
+            if let time = item.time {
+                first = min(first, time)
+                last = max(last, time)
+            }
+        }
+        guard last > first else {
+            return 0
+        }
+        return (last - first) / Double(2 * max(1, bestCount))
     }
 
     /// Drops the pipeline and shows why the scan failed.
