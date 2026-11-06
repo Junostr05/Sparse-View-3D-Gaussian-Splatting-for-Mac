@@ -4,13 +4,6 @@ import SplatCore
 import SplatIO
 import SplatTraining
 
-/// Everything `TrainingSession` needs, built off the main actor.
-nonisolated struct PreparedRun: Sendable {
-    let dataset: TrainingDataset
-    let initialCloud: GaussianCloud
-    let configuration: TrainingConfiguration
-}
-
 /// Updated package contents plus an optional, non-fatal message for the inspector.
 nonisolated struct ImportResult: Sendable {
     let contents: ProjectContents
@@ -199,6 +192,9 @@ final class ProjectModel {
 
     @ObservationIgnored private var session: TrainingSession?
     @ObservationIgnored private var runTask: Task<Void, Never>?
+    /// The held-out view of the current leave-one-out run. Named only in the `.selection` phase, so the
+    /// final-phase events and the checkpoint take it from here.
+    @ObservationIgnored private var heldOutViewName: String?
 
     var isPaused: Bool {
         progress?.state == .paused
@@ -285,6 +281,7 @@ final class ProjectModel {
         }
         errorMessage = nil
         progress = nil
+        heldOutViewName = nil
         isTraining = true
         Task {
             await self.runTraining(contents: contents, document: document)
@@ -296,7 +293,6 @@ final class ProjectModel {
             // Depth problems never fail the run: they only appear in the status and the warning.
             let depth: DepthPreparedRun = try await DepthPipeline.prepare(contents: contents,
                                                                           store: PipelineModel.makeModelStore())
-            let prepared: PreparedRun = depth.run
             depthStatuses = depth.statuses
             warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
             if !depth.estimatedMaps.isEmpty {
@@ -304,13 +300,17 @@ final class ProjectModel {
                 document.wrappedValue.contents = ProjectBundle.withDepthMaps(document.wrappedValue.contents,
                                                                              depth.estimatedMaps)
             }
-            let trainingSession = TrainingSession(dataset: prepared.dataset,
-                                                  initialCloud: prepared.initialCloud,
-                                                  configuration: prepared.configuration)
-            session = trainingSession
             if viewer == nil {
-                viewer = ViewerModel(scene: LoadedScene(cloud: prepared.initialCloud, removedNonFinite: 0))
+                let cloud: GaussianCloud = await DepthPipeline.previewCloud(depth)
+                if viewer == nil {
+                    viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0))
+                }
             }
+            // Each run builds its own initial cloud from its own dataset (see `DepthPreparedRun.initializer`).
+            let trainingSession = TrainingSession(dataset: depth.dataset,
+                                                  configuration: depth.configuration,
+                                                  initializer: depth.initializer)
+            session = trainingSession
             // The run is a separate task so that `stop()` can cancel it. The stream ends when it returns.
             runTask = Task {
                 do {
@@ -335,6 +335,9 @@ final class ProjectModel {
         if case .failed(let message) = event.state {
             errorMessage = message
         }
+        if case .selection(let name) = event.phase {
+            heldOutViewName = name
+        }
         var stored: TrainingProgress = event
         stored.preview = nil
         progress = stored
@@ -346,16 +349,33 @@ final class ProjectModel {
         switch event.state {
         case .finished, .cancelled:
             if let cloud = event.preview {
+                // A single run has no held-out fields; leave-one-out carries them on the terminal event.
                 let record = CheckpointRecord(iteration: event.iteration,
                                               gaussianCount: cloud.count,
                                               psnr: event.psnr,
-                                              date: Date())
+                                              date: Date(),
+                                              heldOutView: heldOutView(for: event.phase),
+                                              heldOutPSNR: event.heldOut?.psnr,
+                                              heldOutSSIM: event.heldOut?.ssim,
+                                              bestIteration: event.bestIteration)
                 document.wrappedValue.contents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
                                                                               cloud: cloud,
                                                                               record: record)
             }
         case .running, .paused, .failed:
             break
+        }
+    }
+
+    /// The held-out view of a phase: named in `.selection`, remembered from it in `.final`, nil for `.single`.
+    private func heldOutView(for phase: TrainingPhase) -> String? {
+        switch phase {
+        case .single:
+            return nil
+        case .selection(let name):
+            return name
+        case .final:
+            return heldOutViewName
         }
     }
 

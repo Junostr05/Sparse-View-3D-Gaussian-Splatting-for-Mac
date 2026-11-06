@@ -71,6 +71,17 @@ struct ProjectInspector: View {
                 LabeledContent("PSNR", value: progress.psnr.map { String(format: "%.2f dB", $0) } ?? "\u{2014}")
                 LabeledContent("Gaussians", value: progress.gaussianCount.formatted())
                 LabeledContent("Iterations/s", value: String(format: "%.1f", progress.iterationsPerSecond))
+                LabeledContent("Phase", value: Self.phaseLabel(progress.phase))
+                if let heldOut = progress.heldOut {
+                    LabeledContent("Held-out PSNR", value: String(format: "%.2f dB", heldOut.psnr))
+                    LabeledContent("Held-out SSIM", value: String(format: "%.3f", heldOut.ssim))
+                }
+                if let best = progress.bestIteration {
+                    LabeledContent("Best iteration", value: best.formatted())
+                }
+                if let depthLoss = progress.depthLoss {
+                    LabeledContent("Depth loss", value: String(format: "%.4f", depthLoss))
+                }
             }
         }
     }
@@ -124,6 +135,18 @@ struct ProjectInspector: View {
     private static func preset(for configuration: TrainingConfiguration) -> TrainingPreset? {
         TrainingPreset.allCases.first { preset in
             preset.maxImageSide == configuration.maxImageSide && preset.iterations == configuration.iterations
+        }
+    }
+
+    /// What the run is doing now: the plain run, the held-out iteration choice, or the final retrain.
+    private static func phaseLabel(_ phase: TrainingPhase) -> String {
+        switch phase {
+        case .single:
+            return "Training"
+        case .selection(let heldOutView):
+            return "Choosing iteration (holding out \(heldOutView))"
+        case .final(let stopIteration):
+            return "Final training to \(stopIteration.formatted())"
         }
     }
 

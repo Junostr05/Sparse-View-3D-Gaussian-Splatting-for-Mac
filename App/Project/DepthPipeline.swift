@@ -15,7 +15,12 @@ nonisolated struct DepthStatusRow: Identifiable, Sendable {
 
 /// Everything a run needs from depth preparation. Depth problems are listed here and never fail the run.
 nonisolated struct DepthPreparedRun: Sendable {
-    let run: PreparedRun
+    /// The full dataset with its depth priors set. Leave-one-out takes views out of it inside the session.
+    let dataset: TrainingDataset
+    let configuration: TrainingConfiguration
+    /// Builds the dense initial cloud of a run from that run's dataset, with the memory cap of the full dataset.
+    /// Each run calls it, so a held-out view never reaches the cloud of a run that must not see it.
+    let initializer: @Sendable (TrainingDataset) -> GaussianCloud
     let report: DepthPreparationReport
     /// Statuses in dataset order, for the "Depth status" disclosure.
     let statuses: [DepthStatusRow]
@@ -108,9 +113,9 @@ nonisolated enum DepthPipeline {
             reservedBytes: reserved,
             configuredMax: configuration.maxGaussians
         )
-        let cloud: GaussianCloud = DenseInitializer.initialize(prepared.dataset,
-                                                               configuration: configuration,
-                                                               maxCount: cap)
+        let initializer: @Sendable (TrainingDataset) -> GaussianCloud = { runDataset in
+            DenseInitializer.initialize(runDataset, configuration: configuration, maxCount: cap)
+        }
 
         var statuses: [DepthStatusRow] = []
         statuses.reserveCapacity(prepared.dataset.views.count)
@@ -119,12 +124,21 @@ nonisolated enum DepthPipeline {
         }
 
         return DepthPreparedRun(
-            run: PreparedRun(dataset: prepared.dataset, initialCloud: cloud, configuration: configuration),
+            dataset: prepared.dataset,
+            configuration: configuration,
+            initializer: initializer,
             report: prepared.report,
             statuses: statuses,
             estimatedMaps: recorder?.maps ?? [:],
             warnings: warnings
         )
+    }
+
+    /// The first cloud the viewport shows, before any run has a preview: the initializer applied to the full
+    /// dataset. Only drawn, never trained on, so it does not leak a held-out view.
+    @concurrent
+    static func previewCloud(_ depth: DepthPreparedRun) async -> GaussianCloud {
+        depth.initializer(depth.dataset)
     }
 
     /// Upper bound of the pseudo-view priors: every nearest-neighbour pair yields `perPair` views at
