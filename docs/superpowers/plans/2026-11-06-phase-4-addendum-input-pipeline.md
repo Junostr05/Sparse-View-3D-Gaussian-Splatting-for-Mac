@@ -44,3 +44,9 @@ The main plan's Task 20 (SplatDepth/Core ML) now loads the model from P8's locat
 ## Guidance for `docs/ARCHITECTURE.md` (apply when the tasks land)
 
 Add decision-log rows for A1-A8 (inputs, frame selection, pose provider chain, COLMAP bundling under the sandbox, downloaded depth model, SSIM/PSNR metric, presets, frames-only projects) and extend the *Project bundle* section with the provenance fields.
+
+## Real-data findings (2026-11-06, user photos)
+
+- The user's 13 iPhone 15 Pro photos of a glass/brass coffee table (HEIC, 4284x5712, portrait, GPS in EXIF) were reduced to 900x1200 JPEG (EXIF stripped) and run through **pycolmap 4.2.1 on CPU (Linux)**: SIMPLE_RADIAL, single camera, **all 13 images registered in ~13 s, 1448 points, mean reprojection error 0.52 px.** So the COLMAP pose stage works on this kind of scene even with glass and reflections (floor texture and a QR-code coaster give plenty of features).
+- COLMAP 4.x additionally writes `rigs.bin` and `frames.bin`; `cameras.bin`, `images.bin` and `points3D.bin` keep the legacy layout (verified: poses equal pycolmap's, files parse to the last byte). The existing `COLMAPReader` needs no change; Swift loader + initialization + CPU trainer ran on the dataset (13 views, 1448 points, finite loss).
+- The **HEIC** input format must be supported by the photo-folder import (ImageIO reads HEIC on macOS) and **EXIF orientation must be applied**; iPhone photos are 12-48 MP, so downscaling to the preset's maximum side is mandatory before COLMAP and training.

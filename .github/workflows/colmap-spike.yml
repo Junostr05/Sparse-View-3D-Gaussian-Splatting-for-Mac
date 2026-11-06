@@ -1,0 +1,32 @@
+name: COLMAP feasibility spike
+
+# Produces the colmap-spike-report artifact; see Tools/ci/colmap_spike.sh.
+# Runs when the spike files change (this also registers the workflow while it only exists on a
+# feature branch, where a pure workflow_dispatch trigger cannot be used) and on manual dispatch.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/colmap-spike.yml"
+      - "Tools/ci/colmap_spike.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  colmap-spike:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run COLMAP feasibility spike
+        run: bash Tools/ci/colmap_spike.sh
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colmap-spike-report
+          path: ${{ runner.temp }}/colmap-report
+          retention-days: 14
