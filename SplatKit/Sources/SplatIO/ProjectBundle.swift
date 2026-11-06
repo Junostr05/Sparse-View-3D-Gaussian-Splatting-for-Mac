@@ -22,7 +22,34 @@ public struct CheckpointRecord: Codable, Sendable, Equatable {
     }
 }
 
+/// What the project was captured from. Optional: Phase 3 projects do not have one.
+public enum InputKind: String, Codable, Sendable {
+    case video
+    case photos
+    case colmap
+    case arkit
+}
+
+/// Where one stored image came from. Only written for projects built from frames.
+public struct FrameProvenance: Codable, Sendable, Equatable {
+    /// Name of the image under `images/`.
+    public var imageName: String
+    /// Original file name the image came from.
+    public var sourceName: String
+    /// Position in the video in seconds, or `nil` for a photo.
+    public var timestamp: Double?
+
+    public init(imageName: String, sourceName: String, timestamp: Double?) {
+        self.imageName = imageName
+        self.sourceName = sourceName
+        self.timestamp = timestamp
+    }
+}
+
 /// Contents of `manifest.json` in a `.gsproj` package.
+///
+/// `inputKind` and `frameProvenance` are optional additions within format version 1. A manifest
+/// without them (every Phase 3 project) decodes with `nil` and `[]`.
 public struct ProjectManifest: Codable, Sendable, Equatable {
     public static let currentFormatVersion = 1
 
@@ -32,6 +59,10 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
     public var imageFiles: [String]
     public var training: TrainingConfiguration
     public var checkpoints: [CheckpointRecord]
+    /// The kind of capture the images came from, if recorded.
+    public var inputKind: InputKind?
+    /// Per-image origin, in the order the images were stored. Empty when not recorded.
+    public var frameProvenance: [FrameProvenance]
 
     /// An empty project at the current format version.
     public init() {
@@ -40,6 +71,22 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         imageFiles = []
         training = TrainingConfiguration()
         checkpoints = []
+        inputKind = nil
+        frameProvenance = []
+    }
+
+    /// Decodes a manifest. Keys added after format version 1 shipped are optional, so older
+    /// manifests still load.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try container.decode(Int.self, forKey: .formatVersion)
+        source = try container.decodeIfPresent(PoseSource.self, forKey: .source)
+        imageFiles = try container.decode([String].self, forKey: .imageFiles)
+        training = try container.decode(TrainingConfiguration.self, forKey: .training)
+        checkpoints = try container.decode([CheckpointRecord].self, forKey: .checkpoints)
+        inputKind = try container.decodeIfPresent(InputKind.self, forKey: .inputKind)
+        frameProvenance = try container.decodeIfPresent([FrameProvenance].self,
+                                                        forKey: .frameProvenance) ?? []
     }
 }
 
@@ -147,7 +194,11 @@ public enum ProjectBundle {
                                     points3D: Data?,
                                     imageFiles: [String: Data],
                                     into contents: ProjectContents) -> ProjectContents {
-        var result = clearedForImport(contents, source: .colmap, imageFiles: imageFiles)
+        var result = clearedForImport(contents,
+                                      source: .colmap,
+                                      inputKind: .colmap,
+                                      imageFiles: imageFiles,
+                                      frameProvenance: [])
         let directory = ProjectLayout.colmapDirectory
         result.files[directory + "/cameras.bin"] = cameras
         result.files[directory + "/images.bin"] = images
@@ -161,9 +212,48 @@ public enum ProjectBundle {
     public static func importARKit(capture: Data,
                                    imageFiles: [String: Data],
                                    into contents: ProjectContents) -> ProjectContents {
-        var result = clearedForImport(contents, source: .arkit, imageFiles: imageFiles)
+        var result = clearedForImport(contents,
+                                      source: .arkit,
+                                      inputKind: .arkit,
+                                      imageFiles: imageFiles,
+                                      frameProvenance: [])
         result.files[ProjectLayout.arkitCapture] = capture
         return result
+    }
+
+    /// Imports the frames a pose provider registered, with the poses and sparse points it produced.
+    ///
+    /// Only frames whose name is in `result.registeredImageNames` are kept. They are stored under
+    /// `images/`, and their poses are written as COLMAP binaries under `poses/colmap/`. Provenance
+    /// is recorded in sorted name order. A point cloud is written only when it is not empty.
+    public static func importEstimatedPoses(frames: [CapturedFrame],
+                                            result: PoseEstimationResult,
+                                            inputKind: InputKind,
+                                            into contents: ProjectContents) -> ProjectContents {
+        let registered = Set(result.registeredImageNames)
+        let kept = frames
+            .filter { registered.contains($0.name) }
+            .sorted { $0.name < $1.name }
+        let keptNames = Set(kept.map(\.name))
+        let imageFiles = Dictionary(kept.map { ($0.name, $0.data) },
+                                    uniquingKeysWith: { first, _ in first })
+        let provenance = kept.map {
+            FrameProvenance(imageName: $0.name, sourceName: $0.sourceName, timestamp: $0.timestamp)
+        }
+
+        var imported = clearedForImport(contents,
+                                       source: .colmap,
+                                       inputKind: inputKind,
+                                       imageFiles: imageFiles,
+                                       frameProvenance: provenance)
+        let directory = ProjectLayout.colmapDirectory
+        let images = result.images.filter { keptNames.contains($0.name) }
+        imported.files[directory + "/cameras.bin"] = COLMAPWriter.cameras(result.cameras)
+        imported.files[directory + "/images.bin"] = COLMAPWriter.images(images)
+        if !result.points.isEmpty {
+            imported.files[directory + "/points3D.bin"] = COLMAPWriter.points3D(result.points)
+        }
+        return imported
     }
 
     // MARK: - Dataset and checkpoints
@@ -244,10 +334,13 @@ public enum ProjectBundle {
         return true
     }
 
-    /// Drops everything an import replaces, then records the new source and image names.
+    /// Drops everything an import replaces, then records the new source, input kind, provenance
+    /// and image names.
     private static func clearedForImport(_ contents: ProjectContents,
                                          source: PoseSource,
-                                         imageFiles: [String: Data]) -> ProjectContents {
+                                         inputKind: InputKind,
+                                         imageFiles: [String: Data],
+                                         frameProvenance: [FrameProvenance]) -> ProjectContents {
         let managedPrefixes = [
             ProjectLayout.imagesDirectory + "/",
             "poses/",
@@ -258,6 +351,8 @@ public enum ProjectBundle {
             !managedPrefixes.contains { path.hasPrefix($0) }
         }
         result.manifest.source = source
+        result.manifest.inputKind = inputKind
+        result.manifest.frameProvenance = frameProvenance
         result.manifest.imageFiles = imageFiles.keys.sorted()
         result.manifest.checkpoints = []
         for (name, data) in imageFiles {
