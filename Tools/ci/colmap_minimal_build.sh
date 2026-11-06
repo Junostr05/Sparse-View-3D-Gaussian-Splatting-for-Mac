@@ -40,6 +40,8 @@ BREW=$(brew --prefix)
 ok=1
 step clone_ceres git clone --depth 1 --branch "$CERES_REF" https://github.com/ceres-solver/ceres-solver.git "$WORK_DIR/ceres" || ok=0
 if [ $ok = 1 ]; then
+  # Ceres 2.2.0 asks for Eigen 3.3 (same-major version check); Homebrew ships Eigen 5. Drop the version.
+  sed -i '' -E 's/find_package\(Eigen3 [0-9.]+/find_package(Eigen3/' "$WORK_DIR/ceres/CMakeLists.txt"
   step configure_ceres cmake -S "$WORK_DIR/ceres" -B "$WORK_DIR/ceres-build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DBUILD_SHARED_LIBS=ON \
     -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
