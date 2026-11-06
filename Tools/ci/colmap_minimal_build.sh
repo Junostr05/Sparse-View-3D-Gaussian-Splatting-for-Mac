@@ -10,6 +10,7 @@ REPORT_DIR=${REPORT_DIR:-${RUNNER_TEMP:-/tmp}/colmap-min-report}
 WORK_DIR=${WORK_DIR:-${RUNNER_TEMP:-/tmp}/colmap-min-work}
 COLMAP_REF=${COLMAP_REF:-4.2.1}
 CERES_REF=${CERES_REF:-2.2.0}
+OIIO_REF=${OIIO_REF:-v3.2.2.0}
 PREFIX=$WORK_DIR/prefix
 LOGS=$REPORT_DIR/logs
 REPORT=$REPORT_DIR/report.md
@@ -29,12 +30,14 @@ step() { # step NAME CMD...  -> runs, logs, records exit code
 
 md '# COLMAP minimal source build'
 md
-md "colmap ref \`$COLMAP_REF\`, ceres ref \`$CERES_REF\`, runner: $(sw_vers -productVersion) $(uname -m), $(xcodebuild -version | head -1)"
+md "colmap ref \`$COLMAP_REF\`, ceres ref \`$CERES_REF\`, openimageio ref \`$OIIO_REF\`, runner: $(sw_vers -productVersion) $(uname -m), $(xcodebuild -version | head -1)"
 md
 md '## Build'
 
-# Permissive-only build dependencies. No Qt, ffmpeg, SuiteSparse, CGAL, ONNX, CUDA.
-step brew_install brew install cmake ninja eigen boost glog gflags sqlite flann metis libomp ccache pkgconf openimageio || true
+# Permissive-only build dependencies. No Qt, ffmpeg, SuiteSparse, CGAL, ONNX, CUDA. Homebrew's openimageio
+# formula pulls ffmpeg (GPL), x264/x265, libheif and libraw, so OpenImageIO is built from source below.
+step brew_install brew install cmake ninja eigen boost glog gflags sqlite metis libomp ccache pkgconf \
+  imath openexr libtiff jpeg-turbo libpng fmt robin-map pugixml opencolorio || true
 
 BREW=$(brew --prefix)
 ok=1
@@ -50,6 +53,20 @@ if [ $ok = 1 ]; then
 fi
 [ $ok = 1 ] && { step build_ceres cmake --build "$WORK_DIR/ceres-build" -j 4 || ok=0; }
 [ $ok = 1 ] && { step install_ceres cmake --install "$WORK_DIR/ceres-build" || ok=0; }
+
+step clone_oiio git clone --depth 1 --branch "$OIIO_REF" https://github.com/AcademySoftwareFoundation/OpenImageIO.git "$WORK_DIR/oiio" || ok=0
+if [ $ok = 1 ]; then
+  step configure_oiio cmake -S "$WORK_DIR/oiio" -B "$WORK_DIR/oiio-build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DBUILD_SHARED_LIBS=ON \
+    -DOIIO_BUILD_TOOLS=OFF -DOIIO_BUILD_TESTS=OFF -DBUILD_TESTING=OFF -DUSE_PYTHON=OFF \
+    -DBUILD_DOCS=OFF -DINSTALL_DOCS=OFF \
+    -DUSE_FFMPEG=OFF -DUSE_LIBHEIF=OFF -DUSE_LIBRAW=OFF -DUSE_FREETYPE=OFF -DUSE_OPENCV=OFF \
+    -DUSE_DCMTK=OFF -DUSE_OPENJPEG=OFF -DUSE_OPENJPH=OFF -DUSE_OPENVDB=OFF -DUSE_PTEX=OFF \
+    -DUSE_GIF=OFF -DUSE_WEBP=OFF -DUSE_JXL=OFF -DUSE_LIBUHDR=OFF -DUSE_QT=OFF -DUSE_TBB=OFF \
+    -DCMAKE_PREFIX_PATH="$PREFIX;$BREW" || ok=0
+fi
+[ $ok = 1 ] && { step build_oiio cmake --build "$WORK_DIR/oiio-build" -j 4 || ok=0; }
+[ $ok = 1 ] && { step install_oiio cmake --install "$WORK_DIR/oiio-build" || ok=0; }
 
 step clone_colmap git clone --depth 1 --branch "$COLMAP_REF" https://github.com/colmap/colmap.git "$WORK_DIR/colmap" || ok=0
 if [ -d "$WORK_DIR/colmap" ]; then
@@ -103,6 +120,17 @@ with open(out, "w") as fh:
         fh.write("%8.2f MB  %s\n" % (s / 1e6, f))
 PY
   md '### Dependency closure'; md '```'; cat "$REPORT_DIR/closure.md" | cut -c1-200 >>"$REPORT"; md '```'
+
+  # Licence gate. LSD is AGPL and SiftGPU is non-commercial (both vendored by COLMAP); the rest are the
+  # copyleft libraries that the Homebrew build pulled in. Any hit makes this build unusable for the bundle.
+  md; md '### Licence gate'
+  hits=$(grep -iE 'ffmpeg|avcodec|x264|x265|suitesparse|cholmod|libQt|qtbase|libheif|libde265|libraw|mpfr|gmp' "$REPORT_DIR/closure.md" || true)
+  vendored=$(find "$WORK_DIR/colmap-build" \( -iname '*siftgpu*' -o -iname '*lsd*' \) 2>/dev/null | head -20)
+  if [ -n "$hits" ] || [ -n "$vendored" ]; then
+    md '**FAILED**'; md '```'; printf '%s\n%s\n' "$hits" "$vendored" >>"$REPORT"; md '```'
+  else
+    md 'passed: no copyleft libraries in the closure, no LSD or SiftGPU in the build tree'
+  fi
 
   md; md '## Headless run on a textured synthetic scene'
   python3 -m pip install --quiet --break-system-packages numpy pillow >"$LOGS/pip.log" 2>&1 || pip3 install --quiet numpy pillow >>"$LOGS/pip.log" 2>&1
