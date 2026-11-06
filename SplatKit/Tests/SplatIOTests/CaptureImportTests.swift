@@ -158,6 +158,34 @@ private func writePhoto(to url: URL, width: Int, height: Int, orientation: Int) 
     }
 }
 
+/// Writes a JPEG whose EXIF dictionary holds the given value for `FocalLenIn35mmFilm`, plus a GPS block.
+/// Pass `nil` to write no focal length at all.
+private func writePhotoWithFocalLength(to url: URL, focalLength: Any?) throws {
+    let image: CGImage = try makeSolidImage(width: 320, height: 240)
+    guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else {
+        throw CaptureTestError.io
+    }
+    let gps: [String: Any] = [
+        kCGImagePropertyGPSLatitude as String: 52.52,
+        kCGImagePropertyGPSLatitudeRef as String: "N",
+        kCGImagePropertyGPSLongitude as String: 13.405,
+        kCGImagePropertyGPSLongitudeRef as String: "E",
+    ]
+    var properties: [String: Any] = [
+        kCGImagePropertyGPSDictionary as String: gps,
+    ]
+    if let focalLength {
+        let exif: [String: Any] = [
+            kCGImagePropertyExifFocalLenIn35mmFilm as String: focalLength,
+        ]
+        properties[kCGImagePropertyExifDictionary as String] = exif
+    }
+    CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+    guard CGImageDestinationFinalize(destination) else {
+        throw CaptureTestError.io
+    }
+}
+
 // MARK: - Tests
 
 @Suite struct CaptureImportTests {
@@ -224,6 +252,44 @@ private func writePhoto(to url: URL, width: Int, height: Int, orientation: Int) 
             let properties: [String: Any] = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any]) ?? [:]
             #expect(properties[kCGImagePropertyGPSDictionary as String] == nil)
         }
+    }
+
+    @Test func photoFolderReadsFocalLengthFromExifAndStripsMetadata() throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writePhotoWithFocalLength(to: directory.appendingPathComponent("a.jpg"), focalLength: NSNumber(value: 35))
+
+        let frames: [CapturedFrame] = try PhotoFolderImporter.load(folder: directory)
+        #expect(frames.count == 1)
+        #expect(frames[0].focalLength35mm == 35)
+
+        let source: CGImageSource? = CGImageSourceCreateWithData(frames[0].data as CFData, nil)
+        let properties: [String: Any] = (source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) } as? [String: Any]) ?? [:]
+        // ImageIO may write its own pixel-size EXIF block, but the source focal length must not survive.
+        let exif: [String: Any] = (properties[kCGImagePropertyExifDictionary as String] as? [String: Any]) ?? [:]
+        #expect(exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] == nil)
+        #expect(properties[kCGImagePropertyGPSDictionary as String] == nil)
+    }
+
+    @Test func photoWithoutFocalLengthGivesNil() throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writePhotoWithFocalLength(to: directory.appendingPathComponent("a.jpg"), focalLength: nil)
+
+        let frames: [CapturedFrame] = try PhotoFolderImporter.load(folder: directory)
+        #expect(frames.count == 1)
+        #expect(frames[0].focalLength35mm == nil)
+    }
+
+    @Test func photoWithImplausibleFocalLengthGivesNil() throws {
+        let directory: URL = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writePhotoWithFocalLength(to: directory.appendingPathComponent("zero.jpg"), focalLength: NSNumber(value: 0))
+        try writePhotoWithFocalLength(to: directory.appendingPathComponent("huge.jpg"), focalLength: NSNumber(value: 5000))
+
+        let frames: [CapturedFrame] = try PhotoFolderImporter.load(folder: directory)
+        #expect(frames.map { $0.sourceName } == ["huge.jpg", "zero.jpg"])
+        #expect(frames.allSatisfy { $0.focalLength35mm == nil })
     }
 
     @Test func emptyFolderThrows() throws {

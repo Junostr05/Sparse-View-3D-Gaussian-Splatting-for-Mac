@@ -79,11 +79,34 @@ public struct PhotoFolderImporter: Sendable {
         for url in urls {
             let sourceName: String = url.lastPathComponent
             let image: CGImage = try decodeThumbnail(url, sourceName: sourceName, maxSide: maxSide)
+            // Read the focal length before re-encoding, because the PNG carries no EXIF.
+            let focalLength: Double? = focalLength35mm(url)
             let data: Data = try CaptureImageSupport.pngData(image, sourceName: sourceName)
             let name: String = FrameNaming.name(prefix: "photo", index: frames.count + 1, ext: "png")
-            frames.append(CapturedFrame(name: name, data: data, sourceName: sourceName, timestamp: nil))
+            frames.append(CapturedFrame(name: name,
+                                        data: data,
+                                        sourceName: sourceName,
+                                        timestamp: nil,
+                                        focalLength35mm: focalLength))
         }
         return frames
+    }
+
+    /// Reads the 35 mm-equivalent focal length from the EXIF of the first image in the file.
+    /// Returns `nil` when the key is missing, is not a number, or is outside 8...400 mm.
+    private static func focalLength35mm(_ url: URL) -> Double? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
+              let raw = exif[kCGImagePropertyExifFocalLenIn35mmFilm as String],
+              let number = raw as? NSNumber else {
+            return nil
+        }
+        let value: Double = number.doubleValue
+        guard value.isFinite, value >= 8, value <= 400 else {
+            return nil
+        }
+        return value
     }
 
     /// Decodes the first image of the file at `maxSide`, applying the EXIF orientation.

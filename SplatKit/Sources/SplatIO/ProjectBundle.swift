@@ -242,7 +242,10 @@ public enum ProjectBundle {
         let imageFiles = Dictionary(kept.map { ($0.name, $0.data) },
                                     uniquingKeysWith: { first, _ in first })
         let provenance = kept.map {
-            FrameProvenance(imageName: $0.name, sourceName: $0.sourceName, timestamp: $0.timestamp)
+            FrameProvenance(imageName: $0.name,
+                            sourceName: $0.sourceName,
+                            timestamp: $0.timestamp,
+                            focalLength35mm: $0.focalLength35mm)
         }
 
         var imported = clearedForImport(contents,

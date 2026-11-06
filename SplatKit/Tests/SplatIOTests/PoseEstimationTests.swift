@@ -217,6 +217,22 @@ private struct StubProvider: PoseProvider {
     #expect(dataset.points?.positions.count == 2)
 }
 
+@Test func importEstimatedPosesCopiesFocalLengthIntoProvenance() {
+    let frames = [
+        CapturedFrame(name: "a.png", data: Data([1]), sourceName: "a.jpg", timestamp: nil, focalLength35mm: 35),
+        CapturedFrame(name: "b.png", data: Data([2]), sourceName: "b.jpg", timestamp: nil),
+    ]
+    let empty = ProjectContents(manifest: ProjectManifest(), files: [:])
+    let imported = ProjectBundle.importEstimatedPoses(frames: frames,
+                                                      result: result(names: ["a.png", "b.png"]),
+                                                      inputKind: .photos,
+                                                      into: empty)
+    #expect(imported.manifest.frameProvenance == [
+        FrameProvenance(imageName: "a.png", sourceName: "a.jpg", timestamp: nil, focalLength35mm: 35),
+        FrameProvenance(imageName: "b.png", sourceName: "b.jpg", timestamp: nil, focalLength35mm: nil),
+    ])
+}
+
 @Test func importEstimatedPosesWithoutPointsOmitsPointFile() {
     let empty = ProjectContents(manifest: ProjectManifest(), files: [:])
     let imported = ProjectBundle.importEstimatedPoses(frames: [frame("a.png"), frame("b.png")],
