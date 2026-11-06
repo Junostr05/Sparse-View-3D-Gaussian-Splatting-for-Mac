@@ -1,5 +1,6 @@
 import SwiftUI
 import SplatCore
+import SplatIO
 
 /// The window of a `.gsproj` project: image list, live viewport and the training inspector.
 struct ProjectWindow: View {
