@@ -62,7 +62,7 @@ if [ $ok = 1 ]; then
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX/colmap" \
     -DGUI_ENABLED=OFF -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DCGAL_ENABLED=OFF -DOPENGL_ENABLED=OFF \
     -DTESTS_ENABLED=OFF -DBUILD_SHARED_LIBS=ON \
-    -DCMAKE_PREFIX_PATH="$PREFIX;$BREW" -DCMAKE_INSTALL_RPATH='@loader_path/../lib' || ok=0
+    -DCMAKE_PREFIX_PATH="$PREFIX;$BREW" -DOpenMP_ROOT="$(brew --prefix libomp)" -DCMAKE_INSTALL_RPATH='@loader_path/../lib' || ok=0
 fi
 [ $ok = 1 ] && { step build_colmap cmake --build "$WORK_DIR/colmap-build" -j 4 || ok=0; }
 [ $ok = 1 ] && { step install_colmap cmake --install "$WORK_DIR/colmap-build" || ok=0; }
