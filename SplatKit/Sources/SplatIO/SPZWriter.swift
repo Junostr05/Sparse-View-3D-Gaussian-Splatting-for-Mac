@@ -25,7 +25,12 @@ import SplatCore
 /// rotations to 1/127.5 per component, SH to 1/128. Scales outside [−10, 5.9375] and SH outside [−1, 1)
 /// are clamped. Positions outside ±2048 cannot be stored and throw.
 ///
-/// Coordinate frame: the values are written as they are in the cloud. No axis conversion is applied.
+/// Coordinate frame: `GaussianCloud` is in the 3DGS / COLMAP PLY frame, RDF (x right, y down, z forward).
+/// The SPZ data is stored in RUB (x right, y up, z back), the frame of Niantic's official tools
+/// (`load-spz.cc`, `splat-types.h`). The writer therefore maps the cloud from RDF to RUB before quantising:
+/// positions and the xyz part of each quaternion get the signs (1, −1, −1), and each higher-order SH
+/// coefficient c_i becomes s_i · c_i (see `SPZFrame`). The map F = diag(1, −1, −1) is its own inverse,
+/// so `SPZReader` applies it again.
 ///
 /// Throws `SplatIOError.empty` for an empty cloud (the format requires numPoints ≥ 1),
 /// `.nonFinite` for NaN or infinite values, and `.outOfRange` for positions that do not fit.
@@ -55,10 +60,10 @@ public enum SPZWriter {
 
         let positionScale: Double = Double(1 << Int(fractionalBits))
 
-        // Positions: 24-bit signed fixed point, three per Gaussian.
+        // Positions: 24-bit signed fixed point, three per Gaussian, in the RUB storage frame.
         for i in 0..<n {
             for c in 0..<3 {
-                let value = cloud.positions[3 * i + c]
+                let value: Float = cloud.positions[3 * i + c] * SPZFrame.axisSigns[c]
                 guard value.isFinite else { throw .nonFinite }
                 let scaled: Double = (Double(value) * positionScale).rounded()
                 guard scaled >= -8_388_608, scaled <= 8_388_607 else {
@@ -117,18 +122,23 @@ public enum SPZWriter {
             } else {
                 quaternion = [1, 0, 0, 0]
             }
-            // quaternion is (w, x, y, z); the reader expects w >= 0.
+            // quaternion is (w, x, y, z) in RDF. Conjugation by F = diag(1, −1, −1) (a 180° turn about x)
+            // keeps w and maps the xyz part by the axis signs, so the stored xyz is in the RUB frame.
+            for component in 1..<4 {
+                quaternion[component] *= Double(SPZFrame.axisSigns[component - 1])
+            }
+            // The reader expects w >= 0.
             let sign: Double = quaternion[0] < 0 ? -1 : 1
             for component in 1..<4 {
                 payload.append(clampedByte(sign * quaternion[component] * 127.5 + 127.5))
             }
         }
 
-        // Higher-order SH: coefficient-major, channel-minor, DC excluded.
+        // Higher-order SH: coefficient-major, channel-minor, DC excluded. Each coefficient gets its basis sign.
         for i in 0..<n {
             for coefficient in 1..<k {
                 for c in 0..<3 {
-                    let value = cloud.sh[(i * k + coefficient) * 3 + c]
+                    let value: Float = cloud.sh[(i * k + coefficient) * 3 + c] * SPZFrame.shSigns[coefficient]
                     guard value.isFinite else { throw .nonFinite }
                     payload.append(clampedByte(Double(value) * 128 + 128))
                 }
@@ -152,5 +162,64 @@ public enum SPZWriter {
         bytes.append(UInt8((value >> 8) & 0xff))
         bytes.append(UInt8((value >> 16) & 0xff))
         bytes.append(UInt8(value >> 24))
+    }
+}
+
+/// The change of frame between `GaussianCloud` (RDF, the PLY frame) and the SPZ storage frame (RUB).
+///
+/// The map is F = diag(1, −1, −1), a 180° rotation about x, and it is its own inverse. It is the table that
+/// `coordinateConverter(RDF, RUB)` builds in the official `splat-types.h`: flipP = (1, −1, −1), flipQ = (1, −1, −1)
+/// on the xyz components (w is never flipped), and the per-coefficient SH flips of the rest coefficients.
+enum SPZFrame {
+    /// Sign of x, y, z for positions, and for the xyz part of a quaternion.
+    static let axisSigns: [Float] = [1, -1, -1]
+
+    /// Sign s_i per SH basis index i, in `SphericalHarmonics` order (index 0 is DC, 1…3 band 1, 4…8 band 2,
+    /// 9…15 band 3), such that Y_i(F·d) = s_i · Y_i(d) for every unit direction d.
+    ///
+    /// Derivation: F sends (x, y, z) to (x, −y, −z), so a monomial x^a y^b z^c changes sign by (−1)^(b+c).
+    /// Every basis function has one parity in (y, z), which gives its sign:
+    /// - band 0: constant, +1;
+    /// - band 1: y (−1), z (−1), x (+1);
+    /// - band 2: xy (−1), yz (+1), 2z² − x² − y² (+1), xz (−1), x² − y² (+1);
+    /// - band 3: y(3x² − y²) (−1), xyz (+1), y(4z² − x² − y²) (−1), z(2z² − 3x² − 3y²) (−1),
+    ///   x(4z² − x² − y²) (+1), z(x² − y²) (−1), x(x² − 3y²) (+1).
+    ///
+    /// `SPZTests` checks every entry numerically against `SphericalHarmonics.evaluate`.
+    static let shSigns: [Float] = [
+        1,
+        -1, -1, 1,
+        -1, 1, 1, -1, 1,
+        -1, 1, -1, -1, 1, -1, 1,
+    ]
+
+    /// Applies the map to a whole cloud. `SPZWriter` and `SPZReader` apply the same signs element by element;
+    /// this form states the map in one place and is the reference for the tests.
+    static func convert(_ cloud: GaussianCloud) throws(GaussianCloudError) -> GaussianCloud {
+        let n = cloud.count
+        let k = GaussianCloud.coefficientCount(degree: cloud.shDegree)
+        var positions: [Float] = cloud.positions
+        var rotations: [Float] = cloud.rotations
+        var sh: [Float] = cloud.sh
+        for i in 0..<n {
+            for c in 0..<3 {
+                positions[3 * i + c] *= axisSigns[c]
+            }
+            // Quaternion stored (w, x, y, z): w is kept, the xyz part takes the axis signs.
+            for q in 1..<4 {
+                rotations[4 * i + q] *= axisSigns[q - 1]
+            }
+            for coefficient in 0..<k {
+                for c in 0..<3 {
+                    sh[(i * k + coefficient) * 3 + c] *= shSigns[coefficient]
+                }
+            }
+        }
+        return try GaussianCloud(shDegree: cloud.shDegree,
+                                 positions: positions,
+                                 logScales: cloud.logScales,
+                                 rotations: rotations,
+                                 opacityLogits: cloud.opacityLogits,
+                                 sh: sh)
     }
 }

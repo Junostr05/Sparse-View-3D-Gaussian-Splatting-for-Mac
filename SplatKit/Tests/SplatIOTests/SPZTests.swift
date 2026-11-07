@@ -150,6 +150,49 @@ private func header(magic: UInt32 = SPZWriter.magic,
     return bytes
 }
 
+/// Unit quaternion (w, x, y, z) with no sign or w restriction, for the frame-conversion tests.
+private func anyUnitQuaternion(_ rng: inout SeededGenerator) -> [Float] {
+    while true {
+        let v: [Float] = (0..<4).map { _ in Float.random(in: -1...1, using: &rng) }
+        let squared: Float = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]
+        let norm: Float = squared.squareRoot()
+        if norm > 0.1 {
+            return v.map { $0 / norm }
+        }
+    }
+}
+
+/// Uniformly distributed unit direction.
+private func randomUnitDirection(_ rng: inout SeededGenerator) -> SIMD3<Float> {
+    while true {
+        let v = SIMD3<Float>(Float.random(in: -1...1, using: &rng),
+                             Float.random(in: -1...1, using: &rng),
+                             Float.random(in: -1...1, using: &rng))
+        let squared: Float = (v * v).sum()
+        let length: Float = squared.squareRoot()
+        if length > 0.1 && length <= 1 {
+            return v / length
+        }
+    }
+}
+
+/// The frame map F = diag(1, −1, −1) as a matrix, for the rotation consistency test.
+private let frameMatrix = Matrix3(c0: SIMD3<Float>(1, 0, 0),
+                                  c1: SIMD3<Float>(0, -1, 0),
+                                  c2: SIMD3<Float>(0, 0, -1))
+
+/// Largest absolute component of a vector.
+private func maxAbsComponent(_ v: SIMD3<Float>) -> Float {
+    let x: Float = abs(v.x)
+    let y: Float = abs(v.y)
+    let z: Float = abs(v.z)
+    return max(x, max(y, z))
+}
+
+private func quaternion(_ values: [Float], _ i: Int) -> SIMD4<Float> {
+    SIMD4<Float>(values[4 * i], values[4 * i + 1], values[4 * i + 2], values[4 * i + 3])
+}
+
 @Suite struct SPZTests {
     @Test(arguments: [0, 1, 2, 3])
     func roundTripsWithQuantisationBounds(degree: Int) throws {
@@ -338,5 +381,102 @@ private func header(magic: UInt32 = SPZWriter.magic,
         let scene = try SceneLoader.load(file, fileExtension: "SPZ")
         #expect(scene.cloud.count == 12)
         #expect(scene.removedNonFinite == 0)
+    }
+
+    // MARK: - Frame conversion (RDF in memory, RUB in the file)
+
+    @Test func shSignTableMatchesBasisParity() {
+        // Y_i(F·d) = s_i · Y_i(d) for all 16 basis functions of degree 3, checked with the project's evaluation.
+        #expect(SPZFrame.shSigns.count == 16)
+        var rng = SeededGenerator(seed: 17)
+        var maxError: Float = 0
+        for i in 0..<16 {
+            var coefficients = [Float](repeating: 0, count: 16 * 3)
+            coefficients[3 * i] = 1 // unit weight on basis i, red channel only
+            for _ in 0..<64 {
+                let d = randomUnitDirection(&rng)
+                let mirrored = SIMD3<Float>(d.x, -d.y, -d.z)
+                let y: Float = SphericalHarmonics.evaluate(degree: 3, coefficients: coefficients[...], direction: d).x
+                let yMirrored: Float = SphericalHarmonics.evaluate(degree: 3, coefficients: coefficients[...], direction: mirrored).x
+                let expected: Float = SPZFrame.shSigns[i] * y
+                maxError = max(maxError, abs(yMirrored - expected))
+            }
+        }
+        #expect(maxError < 1e-5)
+    }
+
+    @Test func shRenderEquivalenceUnderFrameConversion() throws {
+        // A Gaussian seen from d in RDF must colour the same as the converted Gaussian seen from F·d in RUB.
+        let cloud = try randomCloud(degree: 3, count: 40, seed: 77)
+        let converted = try SPZFrame.convert(cloud)
+        let k = GaussianCloud.coefficientCount(degree: 3)
+        var rng = SeededGenerator(seed: 5)
+        var maxError: Float = 0
+        for i in 0..<cloud.count {
+            let range: Range<Int> = (i * k * 3)..<((i + 1) * k * 3)
+            for _ in 0..<16 {
+                let d = randomUnitDirection(&rng)
+                let mirrored = SIMD3<Float>(d.x, -d.y, -d.z)
+                let original = SphericalHarmonics.evaluate(degree: 3, coefficients: cloud.sh[range], direction: d)
+                let rendered = SphericalHarmonics.evaluate(degree: 3, coefficients: converted.sh[range], direction: mirrored)
+                let difference: SIMD3<Float> = rendered - original
+                maxError = max(maxError, maxAbsComponent(difference))
+            }
+        }
+        #expect(maxError < 1e-5)
+    }
+
+    @Test func rotationConversionIsConjugationByFrame() throws {
+        // R(q') = F · R(q) · F for random unit quaternions, with R from the project's Matrix3.rotation.
+        var rng = SeededGenerator(seed: 31)
+        let count = 500
+        var rotations: [Float] = []
+        for _ in 0..<count {
+            rotations.append(contentsOf: anyUnitQuaternion(&rng))
+        }
+        let cloud = try GaussianCloud(shDegree: 0,
+                                      positions: [Float](repeating: 0, count: 3 * count),
+                                      logScales: [Float](repeating: 0, count: 3 * count),
+                                      rotations: rotations,
+                                      opacityLogits: [Float](repeating: 0, count: count),
+                                      sh: [Float](repeating: 0, count: 3 * count))
+        let converted = try SPZFrame.convert(cloud)
+        var maxError: Float = 0
+        for i in 0..<count {
+            let expected: Matrix3 = frameMatrix * Matrix3.rotation(quaternion: quaternion(cloud.rotations, i)) * frameMatrix
+            let actual: Matrix3 = Matrix3.rotation(quaternion: quaternion(converted.rotations, i))
+            let d0: SIMD3<Float> = expected.c0 - actual.c0
+            let d1: SIMD3<Float> = expected.c1 - actual.c1
+            let d2: SIMD3<Float> = expected.c2 - actual.c2
+            maxError = max(maxError, maxAbsComponent(d0), maxAbsComponent(d1), maxAbsComponent(d2))
+        }
+        #expect(maxError < 1e-5)
+    }
+
+    @Test func fileStoresTheRUBFrame() throws {
+        // One Gaussian: position (1, 2, 3); quaternion (w, x, y, z) = (0.8, 0, 0.6, 0); SH degree 1 with the
+        // band-1 y coefficient at 0.5 on the red channel. The stored bytes must be the RUB values.
+        let cloud = try GaussianCloud(shDegree: 1,
+                                      positions: [1, 2, 3],
+                                      logScales: [0, 0, 0],
+                                      rotations: [0.8, 0, 0.6, 0],
+                                      opacityLogits: [0],
+                                      sh: [0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0])
+        let bytes = try payload(of: try SPZWriter.write(cloud))
+
+        // Positions follow the 16-byte header: 24-bit little-endian fixed point, value · 4096.
+        func fixed(_ offset: Int) -> Int {
+            let raw = Int(bytes[offset]) | Int(bytes[offset + 1]) << 8 | Int(bytes[offset + 2]) << 16
+            return raw >= 0x80_0000 ? raw - 0x100_0000 : raw
+        }
+        #expect(fixed(16) == 4096) // x unchanged
+        #expect(fixed(19) == -8192) // y stored as -2
+        #expect(fixed(22) == -12288) // z stored as -3
+
+        // Rotations start at 16 + 9 + 1 + 3 + 3 = 32. The stored xyz is (0, −0.6, 0): y byte round(−0.6 · 127.5 + 127.5) = 51.
+        #expect(abs(Int(bytes[33]) - 51) <= 1)
+
+        // The first rest coefficient starts at 35. Its sign for band 1, y is −1, so 0.5 is stored as −0.5, byte 64.
+        #expect(bytes[35] == 64)
     }
 }

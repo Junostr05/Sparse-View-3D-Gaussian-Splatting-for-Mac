@@ -15,6 +15,10 @@ import SplatCore
 /// Deflate streams: on Apple platforms every stream is inflated with the `Compression` framework. Elsewhere
 /// only stored blocks are accepted; a compressed stream throws `SplatIOError.unsupportedCompression`.
 ///
+/// Coordinate frame: the file holds RUB data (x right, y up, z back). The decoded cloud is returned in the RDF frame
+/// of `GaussianCloud` (x right, y down, z forward), so positions, the quaternion's xyz part and the higher-order SH
+/// coefficients are mapped back by the same signs as in `SPZWriter` (see `SPZFrame`).
+///
 /// Decoded values: positions are multiplied by 2^−fractionalBits. Alphas are `invSigmoid(b / 255)` and are
 /// clamped to [1e-4, 1 − 1e-4] first, as `AntimatterSplatReader` does, so the decoded logit stays finite.
 /// Colours are `((b / 255) − 0.5) / 0.15`, log-scales `b / 16 − 10`, rotations `w = sqrt(max(0, 1 − |xyz|²))`
@@ -100,7 +104,8 @@ public enum SPZReader {
                 if fixed & 0x80_0000 != 0 {
                     fixed -= 0x100_0000
                 }
-                positions[3 * i + c] = Float(fixed) / positionDivisor
+                let stored: Float = Float(fixed) / positionDivisor
+                positions[3 * i + c] = stored * SPZFrame.axisSigns[c]
             }
 
             let alphaByte = payload[alphaBase + i]
@@ -123,15 +128,17 @@ public enum SPZReader {
                 squaredNorm += value * value
             }
             let w: Float = max(0, 1 - squaredNorm).squareRoot()
+            // w is unchanged by the frame map; the xyz part takes the axis signs (RUB to RDF).
             rotations[4 * i] = w
-            rotations[4 * i + 1] = xyz[0]
-            rotations[4 * i + 2] = xyz[1]
-            rotations[4 * i + 3] = xyz[2]
+            rotations[4 * i + 1] = xyz[0] * SPZFrame.axisSigns[0]
+            rotations[4 * i + 2] = xyz[1] * SPZFrame.axisSigns[1]
+            rotations[4 * i + 3] = xyz[2] * SPZFrame.axisSigns[2]
 
             for coefficient in 0..<restCount {
                 for c in 0..<3 {
                     let byte = payload[shBase + i * restCount * 3 + coefficient * 3 + c]
-                    sh[(i * k + coefficient + 1) * 3 + c] = (Float(byte) - 128) / 128
+                    let decoded: Float = (Float(byte) - 128) / 128
+                    sh[(i * k + coefficient + 1) * 3 + c] = decoded * SPZFrame.shSigns[coefficient + 1]
                 }
             }
         }
