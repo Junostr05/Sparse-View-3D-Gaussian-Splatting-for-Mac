@@ -195,3 +195,27 @@ import SplatCore
         #expect(decoded.earlyStopping == EarlyStoppingPolicy())
     }
 }
+
+@Suite struct V12ConfigurationTests {
+    @Test func oldManifestWithoutV12KeysDecodesWithFeaturesOff() throws {
+        let json = Data("{\"iterations\": 123}".utf8)
+        let configuration = try JSONDecoder().decode(TrainingConfiguration.self, from: json)
+        #expect(configuration.iterations == 123)
+        #expect(!configuration.appearance.isEnabled)
+        #expect(!configuration.mcmc.isEnabled)
+        #expect(!configuration.antiAliasing.isEnabled)
+        #expect(!configuration.poseRefinement.isEnabled)
+    }
+
+    @Test func v12SettingsRoundTrip() throws {
+        var configuration = TrainingConfiguration()
+        configuration.appearance.isEnabled = true
+        configuration.mcmc.isEnabled = true
+        configuration.mcmc.growthFraction = 0.1
+        configuration.antiAliasing.isEnabled = true
+        configuration.poseRefinement.isEnabled = true
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(TrainingConfiguration.self, from: data)
+        #expect(decoded == configuration)
+    }
+}

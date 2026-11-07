@@ -238,6 +238,125 @@ public struct EarlyStoppingPolicy: Codable, Sendable, Equatable {
     }
 }
 
+/// Per-image colour compensation (v1.2): a learned gain and bias per colour channel and training view, applied
+/// to the render before the image loss. It absorbs exposure and white-balance changes between photos, so the
+/// Gaussians do not smear them into the scene. Only the loss sees it; the stored model stays unchanged.
+public struct AppearanceSettings: Codable, Sendable, Equatable {
+    public var isEnabled = false
+    public var learningRate: Float = 2e-3
+    /// Weight of the pull of every view's gain towards 1 and bias towards 0 (fixes the global gauge).
+    public var identityWeight: Float = 0.01
+    public var startIteration = 0
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppearanceSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        learningRate = try container.decodeIfPresent(Float.self, forKey: .learningRate) ?? defaults.learningRate
+        identityWeight = try container.decodeIfPresent(Float.self, forKey: .identityWeight)
+            ?? defaults.identityWeight
+        startIteration = try container.decodeIfPresent(Int.self, forKey: .startIteration)
+            ?? defaults.startIteration
+    }
+}
+
+/// MCMC densification (v1.2, after "3D Gaussian Splatting as Markov Chain Monte Carlo"): instead of clone and
+/// split, dead Gaussians are relocated onto live ones, new Gaussians are added up to the budget, and the
+/// positions get gradient-scaled noise. Replaces the classic densification when enabled.
+public struct MCMCSettings: Codable, Sendable, Equatable {
+    public var isEnabled = false
+    public var startIteration = 500
+    public var stopIteration = 25_000
+    public var interval = 100
+    /// Share of the current count added per interval, until `TrainingConfiguration.maxGaussians` is reached.
+    public var growthFraction: Float = 0.05
+    /// Opacity below which a Gaussian counts as dead and is relocated.
+    public var deadOpacity: Float = 0.005
+    public var noiseLearningRate: Float = 5e5
+    public var opacityRegularizer: Float = 0.01
+    public var scaleRegularizer: Float = 0.01
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = MCMCSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        startIteration = try container.decodeIfPresent(Int.self, forKey: .startIteration)
+            ?? defaults.startIteration
+        stopIteration = try container.decodeIfPresent(Int.self, forKey: .stopIteration)
+            ?? defaults.stopIteration
+        interval = try container.decodeIfPresent(Int.self, forKey: .interval) ?? defaults.interval
+        growthFraction = try container.decodeIfPresent(Float.self, forKey: .growthFraction)
+            ?? defaults.growthFraction
+        deadOpacity = try container.decodeIfPresent(Float.self, forKey: .deadOpacity) ?? defaults.deadOpacity
+        noiseLearningRate = try container.decodeIfPresent(Float.self, forKey: .noiseLearningRate)
+            ?? defaults.noiseLearningRate
+        opacityRegularizer = try container.decodeIfPresent(Float.self, forKey: .opacityRegularizer)
+            ?? defaults.opacityRegularizer
+        scaleRegularizer = try container.decodeIfPresent(Float.self, forKey: .scaleRegularizer)
+            ?? defaults.scaleRegularizer
+    }
+}
+
+/// Anti-aliasing after Mip-Splatting (v1.2): a 3D smoothing filter limits every Gaussian to what the training
+/// cameras can resolve, and a 2D box-like filter with compensation replaces the fixed 0.3 px dilation.
+public struct AntiAliasingSettings: Codable, Sendable, Equatable {
+    public var isEnabled = false
+    /// Variance of the 3D filter, in squared pixels at the training resolution (Mip-Splatting: 0.2).
+    public var filter3DVariance: Float = 0.2
+    /// Variance added to the projected 2D covariance (Mip-Splatting: 0.1; the classic dilation is 0.3).
+    public var filter2DVariance: Float = 0.1
+    /// The per-Gaussian sampling rate is recomputed from the training cameras every this many iterations.
+    public var samplingRateInterval = 100
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AntiAliasingSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        filter3DVariance = try container.decodeIfPresent(Float.self, forKey: .filter3DVariance)
+            ?? defaults.filter3DVariance
+        filter2DVariance = try container.decodeIfPresent(Float.self, forKey: .filter2DVariance)
+            ?? defaults.filter2DVariance
+        samplingRateInterval = try container.decodeIfPresent(Int.self, forKey: .samplingRateInterval)
+            ?? defaults.samplingRateInterval
+    }
+}
+
+/// Joint camera pose refinement (v1.2): every training camera gets a small learned rotation and translation
+/// correction, optimized with the Gaussians. Helps poses that are slightly off (for example pose-free ones).
+public struct PoseRefinementSettings: Codable, Sendable, Equatable {
+    public var isEnabled = false
+    /// Rotation learning rate in radians per Adam step.
+    public var rotationLearningRate: Float = 2e-4
+    /// Translation learning rate, multiplied by the scene radius.
+    public var translationLearningRate: Float = 1e-3
+    /// Poses stay fixed until the geometry has settled.
+    public var startIteration = 1_000
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = PoseRefinementSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        rotationLearningRate = try container.decodeIfPresent(Float.self, forKey: .rotationLearningRate)
+            ?? defaults.rotationLearningRate
+        translationLearningRate = try container.decodeIfPresent(Float.self, forKey: .translationLearningRate)
+            ?? defaults.translationLearningRate
+        startIteration = try container.decodeIfPresent(Int.self, forKey: .startIteration)
+            ?? defaults.startIteration
+    }
+}
+
 public struct TrainingConfiguration: Codable, Sendable, Equatable {
     /// Revision 1 is Phase 3 (no revision key). Revision 2 is Phase 4 (P14): a manifest
     /// without the key gets the new default regularizer set.
@@ -273,6 +392,11 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var artifacts = ArtifactRegularizerSettings()
     public var denseInit = DenseInitSettings()
     public var earlyStopping = EarlyStoppingPolicy.offByDefault
+    /// v1.2 quality features, all off by default until measured (see the decision log).
+    public var appearance = AppearanceSettings()
+    public var mcmc = MCMCSettings()
+    public var antiAliasing = AntiAliasingSettings()
+    public var poseRefinement = PoseRefinementSettings()
 
     public init() {}
 
@@ -337,6 +461,13 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
             ?? defaults.denseInit
         earlyStopping = try container.decodeIfPresent(EarlyStoppingPolicy.self, forKey: .earlyStopping)
             ?? defaults.earlyStopping
+        appearance = try container.decodeIfPresent(AppearanceSettings.self, forKey: .appearance)
+            ?? defaults.appearance
+        mcmc = try container.decodeIfPresent(MCMCSettings.self, forKey: .mcmc) ?? defaults.mcmc
+        antiAliasing = try container.decodeIfPresent(AntiAliasingSettings.self, forKey: .antiAliasing)
+            ?? defaults.antiAliasing
+        poseRefinement = try container.decodeIfPresent(PoseRefinementSettings.self, forKey: .poseRefinement)
+            ?? defaults.poseRefinement
     }
 
     /// SH degree in use at `iteration`: grows by one every `shDegreeInterval` iterations.
