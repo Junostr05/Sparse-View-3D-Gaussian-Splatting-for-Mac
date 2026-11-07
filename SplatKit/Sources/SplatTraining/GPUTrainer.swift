@@ -314,6 +314,9 @@ public final class GPUTrainer {
             phase4Terms.append(ScaleCapTerm(regularizers: regularizers,
                                             fraction: configuration.artifacts.scaleCapFraction))
         }
+        // MCMC per-step terms (v1.2): empty unless `mcmc.isEnabled` (MCMCTerms.swift).
+        let mcmcTerms = try MCMCTerms.make(context: context, configuration: configuration)
+        phase4Terms.append(contentsOf: mcmcTerms)
 
         self.context = context
         self.configuration = configuration
@@ -453,7 +456,8 @@ public final class GPUTrainer {
 
         // Step 3: backward with statistics. Statistics only while the densify window is open, as in CPUTrainer
         // (index before increment). The depth gradient is passed only for a depth-mode view.
-        let collectsStatistics = index < configuration.densification.stopIteration
+        // MCMC replaces classic densification, so it needs no statistics (v1.2).
+        let collectsStatistics = index < configuration.densification.stopIteration && !configuration.mcmc.isEnabled
         let statisticsTarget: DensificationStatisticsBuffers? = collectsStatistics ? statistics : nil
         try metalCall { () throws(MetalError) -> Void in
             try self.renderer.encodeBackward(imageGradient: gradientImage, depthGradient: depthPass?.gradient,
@@ -485,8 +489,9 @@ public final class GPUTrainer {
         let isLastStep = completed >= configuration.iterations
         let isDensifyStep = isDensificationBoundary(completed)
         let isIsolationStep = isIsolationBoundary(completed)
+        let isMCMCStep = isMCMCBoundary(completed)
         var readout = LossReadout()
-        if isLogStep || isLastStep || isDensifyStep || isIsolationStep {
+        if isLogStep || isLastStep || isDensifyStep || isIsolationStep || isMCMCStep {
             readout = try synchronize()
         }
 
@@ -507,6 +512,11 @@ public final class GPUTrainer {
                 gradients = try makeGradients()
             }
             summary = result
+        }
+
+        // Step 9b (v1.2): MCMC relocation and growth at its boundaries, after the wait above. Replaces densification.
+        if isMCMCStep {
+            _ = try relocateMCMC(iteration: completed)
         }
 
         // Step 10: isolation pruning at its boundaries. Runs after densification, which has waited.
@@ -539,6 +549,7 @@ public final class GPUTrainer {
     private func isDensificationBoundary(_ completed: Int) -> Bool {
         let policy = configuration.densification
         return policy.isEnabled
+            && !configuration.mcmc.isEnabled
             && completed >= policy.startIteration
             && completed < policy.stopIteration
             && completed % policy.interval == 0
@@ -552,6 +563,35 @@ public final class GPUTrainer {
             && artifacts.isolationInterval > 0
             && (completed - artifacts.isolationStartIteration) % artifacts.isolationInterval == 0
             && completed < configuration.iterations
+    }
+
+    // MARK: - MCMC (v1.2)
+
+    /// MCMC boundary rule: every `interval` completed iterations inside `startIteration..<stopIteration`.
+    private func isMCMCBoundary(_ completed: Int) -> Bool {
+        let settings = configuration.mcmc
+        return settings.isEnabled
+            && settings.interval > 0
+            && completed >= settings.startIteration
+            && completed < settings.stopIteration
+            && completed % settings.interval == 0
+    }
+
+    /// MCMC relocation and growth on the CPU, after a wait (see MCMCRelocator). A capacity change replaces the
+    /// buffers, so the statistics and gradient buffers follow it, as in densification.
+    private func relocateMCMC(iteration: Int) throws(TrainingError) -> MCMCRelocator.Result {
+        let result = try metalCall { () throws(MetalError) -> MCMCRelocator.Result in
+            try MCMCRelocator.run(parameters: self.store, m: self.adamState.m, v: self.adamState.v,
+                                  settings: self.configuration.mcmc, maxGaussians: self.maxGaussians,
+                                  seed: self.configuration.seed ^ UInt64(iteration))
+        }
+        if result.grewCapacity {
+            try metalCall { () throws(MetalError) -> Void in
+                try self.statistics.grow(toCapacity: self.store.capacity)
+            }
+            gradients = try makeGradients()
+        }
+        return result
     }
 
     // MARK: - Synchronization
