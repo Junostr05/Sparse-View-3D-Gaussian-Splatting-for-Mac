@@ -242,7 +242,8 @@ public struct EarlyStoppingPolicy: Codable, Sendable, Equatable {
 /// to the render before the image loss. It absorbs exposure and white-balance changes between photos, so the
 /// Gaussians do not smear them into the scene. Only the loss sees it; the stored model stays unchanged.
 public struct AppearanceSettings: Codable, Sendable, Equatable {
-    public var isEnabled = false
+    /// On by default (user decision 2026-11-08, after the synthetic benchmark: +3.5 dB with exposure changes, neutral without).
+    public var isEnabled = true
     public var learningRate: Float = 2e-3
     /// Weight of the pull of every view's gain towards 1 and bias towards 0 (fixes the global gauge).
     public var identityWeight: Float = 0.01
@@ -392,7 +393,7 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var artifacts = ArtifactRegularizerSettings()
     public var denseInit = DenseInitSettings()
     public var earlyStopping = EarlyStoppingPolicy.offByDefault
-    /// v1.2 quality features, all off by default until measured (see the decision log).
+    /// v1.2 quality features: exposure compensation is on by default, the others stay off (see the decision log).
     public var appearance = AppearanceSettings()
     public var mcmc = MCMCSettings()
     public var antiAliasing = AntiAliasingSettings()

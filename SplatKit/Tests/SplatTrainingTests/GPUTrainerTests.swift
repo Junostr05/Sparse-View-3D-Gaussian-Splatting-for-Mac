@@ -71,6 +71,8 @@ struct GPUTrainerTests {
                                             makeCamera(width: 64, height: 64, shift: 1.0)])
         let initial = try makeRandomCloud(count: 500, seed: 97, shDegree: 0)
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 300
         configuration.logInterval = 50
@@ -104,6 +106,8 @@ struct GPUTrainerTests {
                                             makeCamera(width: 48, height: 48, shift: 0.2)])
         let initial = try makeRandomCloud(count: 500, seed: 97, shDegree: 0)
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 200
         configuration.logInterval = 50
@@ -152,6 +156,8 @@ struct GPUTrainerTests {
                                             makeCamera(width: 32, height: 32, shift: 0.2)])
         let initial = try makeRandomCloud(count: 100, seed: 52, shDegree: 0)
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 60
         configuration.logInterval = 10
@@ -190,6 +196,8 @@ struct GPUTrainerTests {
         let dataset = TrainingDataset(views: [TrainingView(name: "comparison", camera: camera, image: target)])
         let initial = try comparisonInitialCloud()
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 5
         configuration.logInterval = 1
@@ -241,6 +249,8 @@ struct GPUTrainerTests {
         let blank = RGBImage(width: 32, height: 32, pixels: [SIMD3<Float>](repeating: .zero, count: 32 * 32))
         let dataset = TrainingDataset(views: [TrainingView(name: "away", camera: away, image: blank)])
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 2
         configuration.logInterval = 1
@@ -273,6 +283,8 @@ struct GPUTrainerTests {
                                             makeCamera(width: 32, height: 32, shift: 0.1)])
         let initial = try makeRandomCloud(count: 150, seed: 22, shDegree: 0)
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 60
         configuration.logInterval = 20
@@ -303,6 +315,8 @@ struct GPUTrainerTests {
         views[0].image.pixels[0] = SIMD3<Float>(Float.nan, 0, 0)
         let initial = try makeRandomCloud(count: 100, seed: 32, shDegree: 0)
         var configuration = TrainingConfiguration()
+        // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
+        configuration.appearance.isEnabled = false
         configuration.shDegree = 0
         configuration.iterations = 100
         configuration.logInterval = 10

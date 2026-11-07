@@ -197,11 +197,12 @@ import SplatCore
 }
 
 @Suite struct V12ConfigurationTests {
-    @Test func oldManifestWithoutV12KeysDecodesWithFeaturesOff() throws {
+    @Test func oldManifestWithoutV12KeysDecodesWithDefaults() throws {
         let json = Data("{\"iterations\": 123}".utf8)
         let configuration = try JSONDecoder().decode(TrainingConfiguration.self, from: json)
         #expect(configuration.iterations == 123)
-        #expect(!configuration.appearance.isEnabled)
+        // Exposure compensation is the one v1.2 feature that is on by default.
+        #expect(configuration.appearance.isEnabled)
         #expect(!configuration.mcmc.isEnabled)
         #expect(!configuration.antiAliasing.isEnabled)
         #expect(!configuration.poseRefinement.isEnabled)
