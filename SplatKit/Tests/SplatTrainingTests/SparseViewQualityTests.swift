@@ -306,6 +306,8 @@ private let benchmarkVariants: [BenchmarkVariant] = [
                      regularizers: [.depthPearson, .depthL1, .anisotropy, .scaleCap, .isolationPrune], leaveOneOut: false),
     BenchmarkVariant(name: "+ pseudo-views (depth prior only)", denseInit: true, prepared: true,
                      regularizers: [.depthPearson, .depthL1, .pseudoViews], leaveOneOut: false),
+    BenchmarkVariant(name: "defaults (depth prior, anisotropy, isolation pruning)", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false),
     BenchmarkVariant(name: "all", denseInit: true, prepared: true,
                      regularizers: Set(RegularizerKind.allCases), leaveOneOut: false),
     BenchmarkVariant(name: "all + leave-one-out", denseInit: true, prepared: true,
@@ -333,7 +335,9 @@ struct SparseViewBenchmark {
             let prepared = preparedDataset(scene)
             let extent: SceneExtent = sceneExtent(scene)
             for variant in benchmarkVariants {
-                let configuration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
+                var configuration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
+                // Early stopping is off in the default configuration, so the leave-one-out rows switch it on.
+                configuration.earlyStopping.isEnabled = variant.leaveOneOut
                 let dataset: TrainingDataset = variant.prepared ? prepared.dataset : scene.dataset
                 let budget: Int = configuration.maxGaussians
 
