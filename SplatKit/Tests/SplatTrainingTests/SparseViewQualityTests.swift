@@ -343,6 +343,60 @@ private let benchmarkVariants: [BenchmarkVariant] = [
                          configuration.mcmc.isEnabled = true
                          configuration.poseRefinement.isEnabled = true
                      }),
+    // Ablations of the "all four" row (which lost 4.7 dB on the clean scene): drop one feature at a time.
+    BenchmarkVariant(name: "ablation: exposure + anti-aliasing + MCMC (no pose refinement)", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.appearance.isEnabled = true
+                         configuration.antiAliasing.isEnabled = true
+                         configuration.mcmc.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "ablation: exposure + pose refinement", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.appearance.isEnabled = true
+                         configuration.poseRefinement.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "ablation: MCMC + pose refinement", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.mcmc.isEnabled = true
+                         configuration.poseRefinement.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "ablation: anti-aliasing + MCMC", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.antiAliasing.isEnabled = true
+                         configuration.mcmc.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "poselr: pose refinement, lr / 10", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.poseRefinement.isEnabled = true
+                         configuration.poseRefinement.rotationLearningRate = 2e-5
+                         configuration.poseRefinement.translationLearningRate = 1e-4
+                     }),
+    BenchmarkVariant(name: "poselr: pose refinement, lr / 100", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.poseRefinement.isEnabled = true
+                         configuration.poseRefinement.rotationLearningRate = 2e-6
+                         configuration.poseRefinement.translationLearningRate = 1e-5
+                     }),
+    BenchmarkVariant(name: "poselr: MCMC + pose refinement, lr / 10", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.mcmc.isEnabled = true
+                         configuration.poseRefinement.isEnabled = true
+                         configuration.poseRefinement.rotationLearningRate = 2e-5
+                         configuration.poseRefinement.translationLearningRate = 1e-4
+                     }),
+    BenchmarkVariant(name: "ablation: exposure + anti-aliasing", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.appearance.isEnabled = true
+                         configuration.antiAliasing.isEnabled = true
+                     }),
 ]
 
 /// `SPLAT_BENCHMARK_PERTURB=1`: training views get a realistic error the v1.2 features are meant to absorb.
@@ -427,6 +481,8 @@ struct SparseViewBenchmark {
         let perturbed: Bool = SparseViewBenchmarkPerturbation.isEnabled
         let viewCounts: [Int] = environment["SPLAT_BENCHMARK_VIEWS"]
             .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [3, 4, 6]
+        // SPLAT_BENCHMARK_ONLY narrows the run to the variants whose name contains this text (e.g. "ablation").
+        let onlyMatching: String? = environment["SPLAT_BENCHMARK_ONLY"]
         for views in viewCounts {
             let cleanScene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
                                                  gaussians: 1_200, sparsePoints: 200, seed: seed)
@@ -436,7 +492,7 @@ struct SparseViewBenchmark {
                 ? perturbedTrainingViews(cleanScene, radius: extent.radius, seed: seed)
                 : cleanScene
             let prepared = preparedDataset(scene)
-            for variant in benchmarkVariants {
+            for variant in benchmarkVariants where onlyMatching.map({ variant.name.contains($0) }) ?? true {
                 var mutableConfiguration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
                 variant.configure?(&mutableConfiguration)
                 // Early stopping is off in the default configuration, so the leave-one-out rows switch it on.

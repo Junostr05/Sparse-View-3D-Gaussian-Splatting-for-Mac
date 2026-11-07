@@ -335,9 +335,9 @@ public struct AntiAliasingSettings: Codable, Sendable, Equatable {
 public struct PoseRefinementSettings: Codable, Sendable, Equatable {
     public var isEnabled = false
     /// Rotation learning rate in radians per Adam step.
-    public var rotationLearningRate: Float = 2e-4
+    public var rotationLearningRate: Float = 2e-5
     /// Translation learning rate, multiplied by the scene radius.
-    public var translationLearningRate: Float = 1e-3
+    public var translationLearningRate: Float = 1e-4
     /// Poses stay fixed until the geometry has settled.
     public var startIteration = 1_000
 
