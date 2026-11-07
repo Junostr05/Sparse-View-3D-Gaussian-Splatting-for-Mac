@@ -477,9 +477,10 @@ final class ProjectModel {
         depthStatuses = depth.statuses
         warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
         if !depth.estimatedMaps.isEmpty {
-            // Cache the inferred maps in the project, so the next run skips the model.
-            document.wrappedValue.contents = ProjectBundle.withDepthMaps(document.wrappedValue.contents,
-                                                                         depth.estimatedMaps)
+            // Cache the inferred maps in the project under their estimator, so the next run with that model skips it.
+            document.wrappedValue.contents = ProjectBundle.withEstimatedDepthMaps(document.wrappedValue.contents,
+                                                                                  depth.estimatedMaps,
+                                                                                  estimator: depth.estimator)
         }
         return depth
     }

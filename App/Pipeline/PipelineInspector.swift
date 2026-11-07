@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SplatCore
+import SplatDepth
 import SplatIO
 import UniformTypeIdentifiers
 
@@ -249,11 +250,11 @@ struct PipelineStepList: View {
         }
 
         let depthState: StepState
-        if pipeline.depthProgress != nil {
+        if pipeline.isDepthDownloading {
             depthState = .running
-        } else if pipeline.depthIsReady {
+        } else if pipeline.anyDepthModelReady {
             depthState = .done
-        } else if pipeline.depthError != nil {
+        } else if pipeline.depthErrorText != nil {
             depthState = .failed
         } else {
             depthState = .pending
@@ -346,33 +347,32 @@ private struct StepRow: View {
     }
 }
 
-/// Depth model row: state, download with progress and cancel, and the note that training does not use it yet.
+/// Depth Model section: the depth estimator picker and one row per downloadable depth model, with its state,
+/// download with progress and cancel, and removal. Training uses the picked estimator when the depth prior is on.
 struct DepthModelSection: View {
     let pipeline: PipelineModel
+    let document: Binding<ProjectDocument>
+    let isTraining: Bool
 
     var body: some View {
-        let descriptor: ModelDescriptor = PipelineModel.depthDescriptor
-        let size: String = ByteCountFormatter.string(fromByteCount: descriptor.totalSizeBytes, countStyle: .file)
+        let selected: DepthEstimatorKind = document.wrappedValue.contents.manifest.training.depthPrior.estimator
         Section("Depth Model") {
-            LabeledContent(descriptor.displayName, value: statusText)
+            Picker("Depth estimator", selection: estimatorBinding) {
+                ForEach(DepthEstimatorKind.allCases, id: \.self) { kind in
+                    Text(kind.descriptor.displayName).tag(kind)
+                }
+            }
+            .disabled(isTraining)
+            if !pipeline.isDepthReady(selected) {
+                Text("Download the model first to use it for depth.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Text("Gives depth guidance to projects without depth maps. Used by training when the depth prior is on.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            if let progress = pipeline.depthProgress {
-                ProgressView(value: progress, total: 1)
-                Button("Cancel Download") {
-                    pipeline.cancelDepthDownload()
-                }
-                .buttonStyle(.bordered)
-            } else if pipeline.depthCanDownload {
-                Button(downloadTitle(size: size)) {
-                    pipeline.downloadDepthModel()
-                }
-                .buttonStyle(.bordered)
-            }
-            if let error = pipeline.depthError {
-                Text(error)
-                    .foregroundStyle(.red)
+            ForEach(PipelineModel.depthDescriptors, id: \.id) { descriptor in
+                DepthModelRow(pipeline: pipeline, descriptor: descriptor, isTraining: isTraining)
             }
         }
         .task {
@@ -380,14 +380,81 @@ struct DepthModelSection: View {
         }
     }
 
-    private var statusText: String {
-        switch pipeline.depthStatus {
+    /// The estimator stored in the project's training settings.
+    private var estimatorBinding: Binding<DepthEstimatorKind> {
+        Binding(
+            get: { document.wrappedValue.contents.manifest.training.depthPrior.estimator },
+            set: { kind in
+                document.wrappedValue.contents.manifest.training.depthPrior.estimator = kind
+            }
+        )
+    }
+}
+
+/// One depth model: name, size and licence, its state, and the Download, Cancel and Remove controls.
+private struct DepthModelRow: View {
+    let pipeline: PipelineModel
+    let descriptor: ModelDescriptor
+    let isTraining: Bool
+    @State private var isConfirmingRemoval = false
+
+    var body: some View {
+        let size: String = ByteCountFormatter.string(fromByteCount: descriptor.totalSizeBytes, countStyle: .file)
+        let state: DepthModelState = pipeline.depthState(descriptor)
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent(descriptor.displayName, value: statusText(state))
+            Text("\(size) \u{00B7} \(descriptor.license)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if let progress = state.progress {
+                ProgressView(value: progress, total: 1)
+                Button("Cancel Download") {
+                    pipeline.cancelDepthDownload(descriptor)
+                }
+                .buttonStyle(.bordered)
+            } else {
+                if pipeline.depthCanDownload(descriptor) {
+                    Button(downloadTitle(state: state, size: size)) {
+                        pipeline.downloadDepthModel(descriptor)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isTraining || pipeline.isDepthDownloading)
+                }
+                if case .ready? = state.status {
+                    Button("Remove", role: .destructive) {
+                        isConfirmingRemoval = true
+                    }
+                    .disabled(isTraining || pipeline.isDepthDownloading)
+                }
+            }
+            if let error = state.error {
+                Text(error)
+                    .foregroundStyle(.red)
+            }
+        }
+        .confirmationDialog("Remove \(descriptor.displayName)?", isPresented: $isConfirmingRemoval) {
+            Button("Remove", role: .destructive) {
+                pipeline.removeDepthModel(descriptor)
+            }
+        } message: {
+            Text("The downloaded model is deleted. Download it again to use it for depth.")
+        }
+    }
+
+    private func statusText(_ state: DepthModelState) -> String {
+        if let progress = state.progress {
+            return "Downloading \(Int((progress * 100).rounded()))%"
+        }
+        if state.error != nil, !isInstalled(state) {
+            return "Failed"
+        }
+        switch state.status {
         case nil:
-            return pipeline.depthProgress == nil ? "Checking\u{2026}" : "Downloading"
+            return "Checking\u{2026}"
         case .notConfigured?:
             return "Not available in this build"
         case .missing?:
-            return "Not downloaded"
+            return "Not installed"
         case .corrupt?:
             return "Damaged"
         case .ready?:
@@ -395,8 +462,15 @@ struct DepthModelSection: View {
         }
     }
 
-    private func downloadTitle(size: String) -> String {
-        if case .corrupt? = pipeline.depthStatus {
+    private func isInstalled(_ state: DepthModelState) -> Bool {
+        if case .ready? = state.status {
+            return true
+        }
+        return false
+    }
+
+    private func downloadTitle(state: DepthModelState, size: String) -> String {
+        if case .corrupt? = state.status {
             return "Download Again (\(size))"
         }
         return "Download (\(size))"

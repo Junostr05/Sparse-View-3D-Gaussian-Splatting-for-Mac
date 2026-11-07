@@ -19,7 +19,7 @@ struct ProjectInspector: View {
             } else {
                 captureSection(manifest: manifest)
             }
-            DepthModelSection(pipeline: pipeline)
+            DepthModelSection(pipeline: pipeline, document: document, isTraining: model.isTraining)
             PoseFreeModelSection(pipeline: pipeline)
             if !manifest.imageFiles.isEmpty {
                 SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)

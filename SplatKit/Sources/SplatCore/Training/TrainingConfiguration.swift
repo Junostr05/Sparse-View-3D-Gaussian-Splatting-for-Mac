@@ -71,8 +71,19 @@ public enum RegularizerKind: String, Codable, Sendable, CaseIterable {
     case pseudoViews
 }
 
+/// The monocular depth model that fills in depth for views without a supplied map. The raw value is the
+/// stable id used in storage (for example the per-estimator depth cache directory of a project).
+public enum DepthEstimatorKind: String, Codable, Sendable, CaseIterable {
+    /// Depth Anything V2 Small (Apache-2.0). Relative inverse depth, the default.
+    case depthAnythingV2Small
+    /// MoGe-2 ViT-S (MIT). Affine-invariant camera-space depth.
+    case moge2Small
+}
+
 /// Strengths and gates of the depth prior (Phase 4 P4-P7).
 public struct DepthPriorSettings: Codable, Sendable, Equatable {
+    /// Monocular model used for views without a supplied depth map. Depth Anything V2 Small by default.
+    public var estimator: DepthEstimatorKind = .depthAnythingV2Small
     public var pearsonWeight: Float = 0.05
     public var l1Weight: Float = 0.1
     /// Pixels with rendered opacity below this are excluded from the depth terms.
@@ -88,6 +99,8 @@ public struct DepthPriorSettings: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = DepthPriorSettings()
+        estimator = try container.decodeIfPresent(DepthEstimatorKind.self, forKey: .estimator)
+            ?? defaults.estimator
         pearsonWeight = try container.decodeIfPresent(Float.self, forKey: .pearsonWeight)
             ?? defaults.pearsonWeight
         l1Weight = try container.decodeIfPresent(Float.self, forKey: .l1Weight) ?? defaults.l1Weight

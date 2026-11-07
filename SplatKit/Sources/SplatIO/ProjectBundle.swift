@@ -196,6 +196,17 @@ public enum ProjectLayout {
     public static func depthPath(forImage name: String) -> String {
         depthDirectory + "/" + name + "." + DepthMapCodec.fileExtension
     }
+
+    /// Directory of the maps one monocular estimator produced: `depth/estimated/<estimator>/`. Kept apart from the
+    /// supplied maps directly under `depth/`, and apart per estimator, so a map of one model is never used for another.
+    public static func estimatedDepthDirectory(for estimator: DepthEstimatorKind) -> String {
+        depthDirectory + "/estimated/" + estimator.rawValue
+    }
+
+    /// `depth/estimated/<estimator>/<name>.sdpt` for the image stored as `name`.
+    public static func estimatedDepthPath(forImage name: String, estimator: DepthEstimatorKind) -> String {
+        estimatedDepthDirectory(for: estimator) + "/" + name + "." + DepthMapCodec.fileExtension
+    }
 }
 
 /// The package contents as plain data: the manifest plus every other file by relative path.
@@ -379,17 +390,45 @@ public enum ProjectBundle {
         return result
     }
 
+    /// Stores the maps of one monocular estimator under `depth/estimated/<estimator>/`. Maps of other estimators
+    /// and the supplied maps are left as they are.
+    public static func withEstimatedDepthMaps(_ contents: ProjectContents,
+                                              _ maps: [String: DepthMap],
+                                              estimator: DepthEstimatorKind) -> ProjectContents {
+        var result = contents
+        for (name, map) in maps {
+            result.files[ProjectLayout.estimatedDepthPath(forImage: name, estimator: estimator)] = DepthMapCodec.encode(map)
+        }
+        return result
+    }
+
     /// Decodes every `depth/<name>.sdpt` file, keyed by image name. A file that does not decode is
-    /// reported in `failures` under its name, and the other maps still load.
+    /// reported in `failures` under its name, and the other maps still load. Only direct children of
+    /// `depth/` count: the per-estimator cache under `depth/estimated/` is not a supplied map.
     public static func depthMaps(_ contents: ProjectContents)
+        -> (maps: [String: DepthMap], failures: [String: DepthMapError]) {
+        let prefix = ProjectLayout.depthDirectory + "/"
+        return decodeMaps(contents, prefix: prefix)
+    }
+
+    /// Decodes the maps one monocular estimator stored under `depth/estimated/<estimator>/`, keyed by image name.
+    /// Failures are reported as in `depthMaps(_:)`.
+    public static func estimatedDepthMaps(_ contents: ProjectContents, estimator: DepthEstimatorKind)
+        -> (maps: [String: DepthMap], failures: [String: DepthMapError]) {
+        let prefix = ProjectLayout.estimatedDepthDirectory(for: estimator) + "/"
+        return decodeMaps(contents, prefix: prefix)
+    }
+
+    /// Shared decoding for `depthMaps` and `estimatedDepthMaps`: every `<prefix><name>.sdpt` whose name has no
+    /// slash, so a file in a deeper directory is never taken for a map of this one.
+    private static func decodeMaps(_ contents: ProjectContents, prefix: String)
         -> (maps: [String: DepthMap], failures: [String: DepthMapError]) {
         var maps: [String: DepthMap] = [:]
         var failures: [String: DepthMapError] = [:]
-        let prefix = ProjectLayout.depthDirectory + "/"
         let suffix = "." + DepthMapCodec.fileExtension
         for (path, data) in contents.files where path.hasPrefix(prefix) && path.hasSuffix(suffix) {
             let name = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-            guard !name.isEmpty else {
+            guard !name.isEmpty, !name.contains("/") else {
                 continue
             }
             do {

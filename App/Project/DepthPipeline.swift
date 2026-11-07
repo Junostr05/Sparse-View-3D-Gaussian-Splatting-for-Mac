@@ -24,19 +24,21 @@ nonisolated struct DepthPreparedRun: Sendable {
     let report: DepthPreparationReport
     /// Statuses in dataset order, for the "Depth status" disclosure.
     let statuses: [DepthStatusRow]
-    /// Maps the monocular model produced in this run, keyed by image name. The project stores them,
-    /// so the next run skips inference.
+    /// Maps the monocular model produced in this run, keyed by image name. The project stores them under
+    /// `estimator`, so the next run with the same model skips inference.
     let estimatedMaps: [String: DepthMap]
-    /// Non-fatal problems: unreadable depth files, a depth model that would not load.
+    /// The estimator that produced `estimatedMaps`.
+    let estimator: DepthEstimatorKind
+    /// Non-fatal problems: unreadable depth files, a depth model that would not load or is not installed.
     let warnings: [String]
 }
 
 /// Wraps the monocular estimator and keeps every map it produces, keyed by view name, so the project can store them.
 nonisolated final class EstimatedDepthRecorder: DepthProvider, Sendable {
-    private let estimator: MonocularDepthEstimator
+    private let estimator: any DepthProvider
     private let produced: Mutex<[String: DepthMap]> = Mutex([:])
 
-    init(estimator: MonocularDepthEstimator) {
+    init(estimator: any DepthProvider) {
         self.estimator = estimator
     }
 
@@ -67,25 +69,36 @@ nonisolated enum DepthPipeline {
                                                                      useRefinedPoses: useRefinedPoses)
 
         var warnings: [String] = []
-        let supplied = ProjectBundle.depthMaps(contents)
-        if !supplied.failures.isEmpty {
-            let names: String = supplied.failures.keys.sorted().joined(separator: ", ")
+        // Supplied maps and the cache of the chosen estimator only; another estimator's maps are never read.
+        let estimator: DepthEstimatorKind = configuration.depthPrior.estimator
+        let sources: DepthSources = ProjectBundle.depthSources(contents, estimator: estimator)
+        if !sources.suppliedFailures.isEmpty {
+            let names: String = sources.suppliedFailures.keys.sorted().joined(separator: ", ")
             warnings.append("Depth files could not be read: \(names).")
         }
+        if !sources.cachedFailures.isEmpty {
+            let names: String = sources.cachedFailures.keys.sorted().joined(separator: ", ")
+            warnings.append("Cached depth maps could not be read and are estimated again: \(names).")
+        }
 
-        // A supplied map wins over inference. The model runs only when the depth prior is on.
+        // A supplied map wins over inference. The cache of the selected estimator comes next. The model runs only when the depth prior is on.
         var providers: [any DepthProvider] = []
-        if !supplied.maps.isEmpty {
-            providers.append(SuppliedDepthProvider(maps: supplied.maps))
+        if !sources.supplied.isEmpty {
+            providers.append(SuppliedDepthProvider(maps: sources.supplied))
+        }
+        let cachedMaps: [String: DepthMap] = sources.cached
+        if !cachedMaps.isEmpty {
+            providers.append(SuppliedDepthProvider(maps: cachedMaps))
         }
         var recorder: EstimatedDepthRecorder?
         if configuration.isEnabled(.depthPearson), let store {
             do {
-                if let estimator = try MonocularDepthEstimator.installed(in: store,
-                                                                         descriptor: ModelCatalog.depthAnythingV2Small) {
-                    let created = EstimatedDepthRecorder(estimator: estimator)
+                if let provider = try DepthEstimatorFactory.installed(estimator, in: store) {
+                    let created = EstimatedDepthRecorder(estimator: provider)
                     recorder = created
                     providers.append(created)
+                } else if cachedMaps.isEmpty {
+                    warnings.append("\(estimator.descriptor.displayName) is not installed. Download it in the Depth Model section.")
                 }
             } catch {
                 warnings.append("The depth model could not be loaded: \(String(describing: error)).")
@@ -135,6 +148,7 @@ nonisolated enum DepthPipeline {
             report: prepared.report,
             statuses: statuses,
             estimatedMaps: recorder?.maps ?? [:],
+            estimator: estimator,
             warnings: warnings
         )
     }

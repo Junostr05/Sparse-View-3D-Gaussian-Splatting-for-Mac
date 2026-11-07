@@ -171,6 +171,16 @@ nonisolated enum PipelineWork {
     }
 }
 
+/// The state of one downloadable depth model, as the Depth Model section shows it.
+struct DepthModelState: Equatable {
+    /// Result of the last check of the store. `nil` until the model has been checked.
+    var status: ModelStatus?
+    /// Download fraction in 0...1 while this model downloads, `nil` otherwise.
+    var progress: Double?
+    /// Message of the last failed download or removal.
+    var error: String?
+}
+
 /// The pose method picked in the Poses section. `automatic` tries Apple Photogrammetry first and Depth Anything 3
 /// after it, when its package is installed.
 nonisolated enum PoseMethodPreference: String, CaseIterable, Sendable {
@@ -222,7 +232,10 @@ final class PipelineModel {
 
     static let sampleIntervals: [Double] = [0.1, 0.25, 0.5, 1.0]
     static let defaultSampleInterval: Double = 0.25
-    static let depthDescriptor: ModelDescriptor = ModelCatalog.depthAnythingV2Small
+    /// The downloadable depth models, one per estimator, in the order the Depth Model section lists them.
+    static let depthDescriptors: [ModelDescriptor] = ModelCatalog.all.filter { descriptor in
+        DepthEstimatorKind.allCases.contains { $0.descriptor.id == descriptor.id }
+    }
     static let da3Descriptor: ModelDescriptor = ModelDescriptor.depthAnything3Base
     /// `UserDefaults` key of the pose method preference.
     static let poseMethodDefaultsKey: String = "SparseSplat.poseMethodPreference"
@@ -244,10 +257,8 @@ final class PipelineModel {
     private(set) var poseSummary: String?
     var errorMessage: String?
 
-    private(set) var depthStatus: ModelStatus?
-    /// Download fraction in 0...1 while the depth model downloads, `nil` otherwise.
-    private(set) var depthProgress: Double?
-    private(set) var depthError: String?
+    /// State of each depth model, by descriptor id. A model without an entry has not been checked yet.
+    private(set) var depthStates: [String: DepthModelState] = [:]
 
     /// The method the user picked. Kept even while its model is missing.
     private(set) var poseMethodPreference: PoseMethodPreference
@@ -262,7 +273,8 @@ final class PipelineModel {
     /// The video URL when the system granted a security scope. Released by `discard`, or on deinit.
     @ObservationIgnored private var scopedURL: URL?
     @ObservationIgnored private var work: Task<Void, Never>?
-    @ObservationIgnored private var depthDownload: Task<Void, Never>?
+    /// The running depth model download by descriptor id. One download runs at a time.
+    @ObservationIgnored private var depthDownloads: [String: Task<Void, Never>] = [:]
     /// Incremented whenever work starts or is cancelled. Results of older work are dropped.
     @ObservationIgnored private var generation: Int = 0
     private let modelStore: ModelStore?
@@ -294,16 +306,42 @@ final class PipelineModel {
         return plan.selectedCount > 0
     }
 
-    var depthIsReady: Bool {
-        if case .ready? = depthStatus {
+    /// The state of one depth model. Unchecked models report no status and no progress.
+    func depthState(_ descriptor: ModelDescriptor) -> DepthModelState {
+        depthStates[descriptor.id] ?? DepthModelState()
+    }
+
+    /// `true` when the depth model of `kind` is installed and verified.
+    func isDepthReady(_ kind: DepthEstimatorKind) -> Bool {
+        if case .ready? = depthState(kind.descriptor).status {
             return true
         }
         return false
     }
 
+    /// `true` when any depth model is installed. The pipeline step list reads it.
+    var anyDepthModelReady: Bool {
+        DepthEstimatorKind.allCases.contains { isDepthReady($0) }
+    }
+
+    /// `true` while any depth model downloads.
+    var isDepthDownloading: Bool {
+        !depthDownloads.isEmpty
+    }
+
+    /// The first download error of any depth model, for the pipeline step list.
+    var depthErrorText: String? {
+        for descriptor in Self.depthDescriptors {
+            if let error = depthState(descriptor).error {
+                return error
+            }
+        }
+        return nil
+    }
+
     /// `true` when the model is missing or damaged and a download can fix it.
-    var depthCanDownload: Bool {
-        switch depthStatus {
+    func depthCanDownload(_ descriptor: ModelDescriptor) -> Bool {
+        switch depthState(descriptor).status {
         case .missing?, .corrupt?:
             return true
         default:
@@ -404,11 +442,13 @@ final class PipelineModel {
         errorMessage = nil
     }
 
-    /// Called when the project window closes. Stops all work and the depth download.
+    /// Called when the project window closes. Stops all work and the depth downloads.
     func close() {
         discard()
-        depthDownload?.cancel()
-        depthDownload = nil
+        for task in depthDownloads.values {
+            task.cancel()
+        }
+        depthDownloads = [:]
     }
 
     // MARK: - Thumbnails
@@ -506,42 +546,72 @@ final class PipelineModel {
 
     // MARK: - Depth model
 
-    /// Reads the depth model state from the store. Runs hashing off the main actor.
-    func refreshDepthStatus() async {
-        guard let store = modelStore else {
-            depthError = "The model folder is not available."
-            return
-        }
-        depthStatus = await PipelineWork.depthStatus(store: store, descriptor: Self.depthDescriptor)
+    /// Sets the state of one depth model, creating its entry when needed.
+    private func updateDepthState(_ id: String, _ change: (inout DepthModelState) -> Void) {
+        var state: DepthModelState = depthStates[id] ?? DepthModelState()
+        change(&state)
+        depthStates[id] = state
     }
 
-    /// Downloads the depth model into the app container. One download at a time.
-    func downloadDepthModel() {
-        guard depthDownload == nil, let store = modelStore else {
+    /// Reads the state of every depth model from the store. Runs hashing off the main actor.
+    func refreshDepthStatus() async {
+        guard let store = modelStore else {
+            for descriptor in Self.depthDescriptors {
+                updateDepthState(descriptor.id) { $0.error = "The model folder is not available." }
+            }
             return
         }
-        depthError = nil
-        depthProgress = 0
-        let descriptor: ModelDescriptor = Self.depthDescriptor
-        depthDownload = Task {
+        for descriptor in Self.depthDescriptors {
+            let status: ModelStatus = await PipelineWork.depthStatus(store: store, descriptor: descriptor)
+            updateDepthState(descriptor.id) { $0.status = status }
+        }
+    }
+
+    /// Downloads one depth model into the app container. One download at a time, across all depth models.
+    func downloadDepthModel(_ descriptor: ModelDescriptor) {
+        guard depthDownloads.isEmpty, let store = modelStore else {
+            return
+        }
+        let id: String = descriptor.id
+        updateDepthState(id) { state in
+            state.error = nil
+            state.progress = 0
+        }
+        depthDownloads[id] = Task {
             do {
                 try await PipelineWork.downloadDepth(store: store, descriptor: descriptor) { fraction in
                     Task { @MainActor in
-                        guard self.depthDownload != nil else { return }
-                        self.depthProgress = fraction
+                        guard self.depthDownloads[id] != nil else { return }
+                        self.updateDepthState(id) { $0.progress = fraction }
                     }
                 }
             } catch {
-                self.depthError = Self.errorText(error)
+                self.updateDepthState(id) { $0.error = Self.errorText(error) }
             }
-            self.depthProgress = nil
-            self.depthDownload = nil
+            self.updateDepthState(id) { $0.progress = nil }
+            self.depthDownloads[id] = nil
             await self.refreshDepthStatus()
         }
     }
 
-    func cancelDepthDownload() {
-        depthDownload?.cancel()
+    func cancelDepthDownload(_ descriptor: ModelDescriptor) {
+        depthDownloads[descriptor.id]?.cancel()
+    }
+
+    /// Deletes one installed depth model. Not allowed while a depth model downloads.
+    func removeDepthModel(_ descriptor: ModelDescriptor) {
+        guard depthDownloads.isEmpty, let store = modelStore else {
+            return
+        }
+        updateDepthState(descriptor.id) { $0.error = nil }
+        Task {
+            do {
+                try await PipelineWork.removePackage(store: store, descriptor: descriptor)
+            } catch {
+                self.updateDepthState(descriptor.id) { $0.error = Self.errorText(error) }
+            }
+            await self.refreshDepthStatus()
+        }
     }
 
     // MARK: - Pose method and Depth Anything 3 model

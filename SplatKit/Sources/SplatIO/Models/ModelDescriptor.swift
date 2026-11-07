@@ -143,7 +143,38 @@ public enum ModelCatalog {
         ]
     )
 
-    public static let all: [ModelDescriptor] = [depthAnythingV2Small]
+    /// MoGe-2 ViT-S (Microsoft, MIT) as an unofficial Core ML conversion, `ebowwa/moge-2-vits-normal-coreml`,
+    /// int8 variant. Pinned to the commit below. Fixed input: multi-array `image` of shape [1, 3, 512, 768]
+    /// (NCHW, RGB 0...1). Outputs used: `points` [1, 512, 768, 3] (camera-space points; z is the depth) and
+    /// `mask` [1, 512, 768] (valid where > 0.5). The model is not bundled: it is downloaded on request.
+    public static let moge2SmallInt8 = ModelDescriptor(
+        id: "moge-2-vits-int8",
+        displayName: "MoGe-2 Small (depth)",
+        version: "e01dfc7",
+        license: "MIT",
+        baseURL: URL(string: "https://huggingface.co/ebowwa/moge-2-vits-normal-coreml/resolve/e01dfc7e5148e57fbad3b72fee832f8e9d6fdbda"),
+        packageName: "moge_vits_normal_int8.mlpackage",
+        files: [
+            ModelFile(
+                relativePath: "Manifest.json",
+                sha256: "a370d9b38cca877bb62ba44ab37d94f751358acd146fbf7a8f7ec23f72ff8e16",
+                sizeBytes: 617
+            ),
+            ModelFile(
+                relativePath: "Data/com.apple.CoreML/model.mlmodel",
+                sha256: "9a117c8978535ea9d9d02d1aa8031cc85b1d5f0e3acb75ee59eb416023bfd937",
+                sizeBytes: 301_577
+            ),
+            ModelFile(
+                relativePath: "Data/com.apple.CoreML/weights/weight.bin",
+                sha256: "b3a01f24323632b5a4e6d41dfefadb69cad505efeb399c736ca0e8c0817cde2b",
+                sizeBytes: 36_128_704
+            ),
+        ]
+    )
+
+    /// Every downloadable depth model, in the order the app lists them.
+    public static let all: [ModelDescriptor] = [depthAnythingV2Small, moge2SmallInt8]
 }
 
 extension ModelDescriptor {

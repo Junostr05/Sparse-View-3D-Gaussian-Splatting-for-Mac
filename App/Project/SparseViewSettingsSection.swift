@@ -21,8 +21,13 @@ struct SparseViewSettingsSection: View {
     var body: some View {
         let contents: ProjectContents = document.wrappedValue.contents
         let configuration: TrainingConfiguration = contents.manifest.training
-        let hasDepthMaps: Bool = contents.files.keys.contains { $0.hasPrefix(ProjectLayout.depthDirectory + "/") }
-        let depthAvailable: Bool = hasDepthMaps || pipeline.depthIsReady
+        // Supplied maps, or the cache of the selected estimator. Another estimator's cache does not count.
+        let depthPrefix: String = ProjectLayout.depthDirectory + "/"
+        let selectedCachePrefix: String = ProjectLayout.estimatedDepthDirectory(for: configuration.depthPrior.estimator) + "/"
+        let hasDepthMaps: Bool = contents.files.keys.contains { key in
+            key.hasPrefix(depthPrefix) && (!key.hasPrefix(depthPrefix + "estimated/") || key.hasPrefix(selectedCachePrefix))
+        }
+        let depthAvailable: Bool = hasDepthMaps || pipeline.isDepthReady(configuration.depthPrior.estimator)
         let depthOn: Bool = configuration.isEnabled(.depthPearson)
         let imageCount: Int = contents.manifest.imageFiles.count
         let minimumViews: Int = configuration.earlyStopping.minimumViews
