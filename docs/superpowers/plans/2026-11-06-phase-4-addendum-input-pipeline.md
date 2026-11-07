@@ -174,7 +174,7 @@ The depth prior is the only component with a clear gain (+0.7 dB, +0.028 SSIM). 
 
 Decision 14 changed. New projects start with the depth prior (Pearson + L1), dense initialisation, anisotropy and isolation pruning **on**; scale cap, pseudo-views and early stopping **off**; all remain switchable in the inspector. `TrainingConfiguration.defaultRegularizers` holds the set, `EarlyStoppingPolicy.offByDefault` the early-stopping default. Stored revision-2 manifests keep what they stored.
 
-Open: the 4-view synthetic regression of the depth prior is unexplained; the benchmark workflow (`.github/workflows/benchmark.yml`) has never run on GitHub.
+Open: none of the earlier open points remain except those listed below; the benchmark workflow (`.github/workflows/benchmark.yml`) has never run on GitHub.
 
 ### Pseudo-view investigation (2026-11-07)
 
@@ -212,3 +212,22 @@ No fit is worse than 10 %. A perfect visibility test would therefore win at most
 ### App check of the held-out readout (2026-11-07)
 
 Verified in the running app (Debug build of the default-settings commit): new project, 13 photos, Estimate Poses (13 of 13, Apple), preset Fast, early stopping switched on, Train. The inspector shows the phase ("Choosing iteration (holding out photo_0003.png)", then "Final training to 2167"), held-out PSNR/SSIM (15.4 dB / 0.401), the best iteration (2000, so the second run stops at round(2000 x 13/12) = 2167) and the depth loss. No crash. The inspector defaults match decision 14: depth prior and artifact regularizers on, scale cap, pseudo-views and early stopping off.
+
+### Multi-seed check of the 4-view result (2026-11-07)
+
+The synthetic benchmark was repeated for seeds 5–9 (release build, `SPLAT_BENCHMARK_SEED`, `SPLAT_BENCHMARK_VIEWS`), novel-view PSNR in dB, delta to the Phase 3 baseline of the same seed (the table's "+ depth prior" row = dense init + depth prior):
+
+| Seed | 3 views: dense init | 3 views: + depth prior | 4 views: dense init | 4 views: + depth prior |
+|---|---|---|---|---|
+| 5 | -1.19 | **+1.62** | -2.07 | -0.67 |
+| 6 | -2.50 | **+0.39** | -2.86 | -1.23 |
+| 7 | +2.71 | **+7.14** | -1.16 | +1.13 |
+| 8 | -2.48 | **+0.19** | -0.77 | -0.21 |
+| 9 | -0.26 | **+2.25** | -1.34 | -1.56 |
+| mean | -0.74 | **+2.32** | -1.64 | -0.51 |
+
+- At 3 views the depth prior is non-negative in 5 of 5 seeds (mean +2.3 dB, one large outlier at seed 7 where the baseline failed with 20 dB).
+- At 4 views it is **not a systematic failure**: mean -0.5 dB, three seeds negative, one positive, one neutral. The baseline is already strong there (27.7–30.5 dB), so there is little to gain and the variance is larger than the effect.
+- Dense initialisation alone hurts at 3 and 4 views in most seeds (mean -0.7 and -1.6 dB); the gain comes from the depth loss. This agrees with the real-photo ablation (depth prior with dense init +0.7 dB).
+- "+ regularizers" in that table still includes the scale cap (off by default now); it is negative at 4 views in all five seeds (mean -1.6 dB), consistent with the decision to switch the scale cap off. The default set (anisotropy + isolation pruning without scale cap) was not benchmarked separately on synthetic data.
+- Lesson: run the benchmark with `swift test -c release`; the debug build is about 10 times slower.
