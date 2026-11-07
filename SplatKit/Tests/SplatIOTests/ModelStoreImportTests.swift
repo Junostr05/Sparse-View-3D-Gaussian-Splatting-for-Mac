@@ -28,7 +28,8 @@ import Testing
         #expect(descriptor.license == "Apache-2.0")
         #expect(descriptor.packageName == "DepthAnything3BaseQ8.mlpackage")
         #expect(descriptor.baseURL == nil)
-        #expect(descriptor.files.isEmpty)
+        // The checksums are recorded, but without a base URL the model is still not configured.
+        #expect(descriptor.files.count == 3)
         #expect(descriptor.isConfigured == false)
         #expect(ModelCatalog.all.contains(descriptor) == false)
     }

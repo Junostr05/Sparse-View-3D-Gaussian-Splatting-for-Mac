@@ -158,6 +158,18 @@ extension ModelDescriptor {
         license: "Apache-2.0",
         baseURL: nil,
         packageName: "DepthAnything3BaseQ8.mlpackage",
-        files: []
+        // Checksums of the package built by Tools/da3/convert_da3.py. They become active once `baseURL`
+        // points at the published copy (Tools/da3/prepare_hf_repo.py prepares it; see docs/models/index.html).
+        files: [
+            ModelFile(relativePath: "Manifest.json",
+                      sha256: "083e08c6080ac35ddc7b91810e9d7cf970fd46d3a23561d467a4cc92595e60fd",
+                      sizeBytes: 617),
+            ModelFile(relativePath: "Data/com.apple.CoreML/model.mlmodel",
+                      sha256: "50faeb905fac1b6fd260872ba1db0f865170d9b53d56d0a6c3ddf1658a34ccab",
+                      sizeBytes: 3_454_932),
+            ModelFile(relativePath: "Data/com.apple.CoreML/weights/weight.bin",
+                      sha256: "326259a56ddbebdd7de59dc3324a99e495cffe5e3c15f11e2431f59f7a39127a",
+                      sizeBytes: 607_552_064),
+        ]
     )
 }

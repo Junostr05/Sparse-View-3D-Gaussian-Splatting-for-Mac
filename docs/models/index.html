@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SparseSplat Models</title>
+<style>
+  :root { --bg:#f6f6f8; --card:#fff; --text:#1c1c1e; --muted:#6b6b73; --line:#e3e3e8; --accent:#4a6cf7; --ok:#1f9d55; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111114; --card:#1b1b20; --text:#f2f2f5; --muted:#9a9aa5; --line:#2c2c34; --accent:#8aa0ff; --ok:#4cc38a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 16px 80px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 32px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 24px; margin-bottom: 20px; }
+  .card h2 { margin: 0 0 4px; font-size: 1.25rem; }
+  .tags { display:flex; flex-wrap:wrap; gap:8px; margin: 8px 0 16px; }
+  .tag { font-size: .8rem; padding: 2px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.ok { color: var(--ok); border-color: var(--ok); }
+  .btn { display:inline-block; padding: 10px 18px; border-radius: 12px; background: var(--accent); color:#fff; text-decoration:none; font-weight:600; }
+  .btn.off { background: var(--line); color: var(--muted); pointer-events:none; }
+  dl { display:grid; grid-template-columns: 9rem 1fr; gap: 6px 16px; margin: 16px 0 0; font-size: .92rem; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
+  code { font: .85rem ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); padding: 1px 6px; border-radius: 6px; }
+  pre { background: var(--bg); padding: 12px 14px; border-radius: 10px; overflow-x:auto; font-size:.85rem; }
+  ol { padding-left: 1.2rem; } li { margin: 4px 0; }
+  .note { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SparseSplat models</h1>
+  <p class="lead">Optional models for the SparseSplat macOS app. Both are Apache-2.0 and run locally through Core ML.</p>
+
+  <section class="card" id="depth-anything-v2-small">
+    <h2>Depth Anything V2 Small</h2>
+    <div class="tags"><span class="tag ok">downloaded by the app</span><span class="tag">Apache-2.0</span><span class="tag">49 MB</span><span class="tag">Core ML Float16</span></div>
+    <p>Monocular depth for the depth prior. The app downloads it on first use and verifies its checksums, so you normally do not need to do anything. The files are Apple's Core ML conversion, pinned to one commit.</p>
+    <p><a class="btn" href="https://huggingface.co/apple/coreml-depth-anything-v2-small">Open on Hugging Face</a></p>
+    <dl>
+      <dt>Package</dt><dd><code>DepthAnythingV2SmallF16.mlpackage</code></dd>
+      <dt>Input</dt><dd>RGB image 518 &times; 392 (<code>image</code>)</dd>
+      <dt>Output</dt><dd>16-bit grayscale depth 518 &times; 392 (<code>depth</code>)</dd>
+      <dt>weight.bin SHA-256</dt><dd><code>fa60d9b6a155734f59029ebb882fd54e549bfaee3539c1a9cbd2cbbab64a0fed</code></dd>
+    </dl>
+  </section>
+
+  <section class="card" id="depth-anything-3-base">
+    <h2>Depth Anything 3 Base (pose-free)</h2>
+    <div class="tags"><span class="tag">Apache-2.0</span><span class="tag">583 MB</span><span class="tag">Core ML int8</span><span class="tag">manual import</span></div>
+    <p>Estimates depth and camera poses without a calibrated camera. SparseSplat uses it as a fallback when Apple Photogrammetry cannot register the photos. It is less accurate than Apple Photogrammetry (about 0.8&nbsp;dB lower PSNR on the reference scene).</p>
+    <p><a id="da3-link" class="btn off" href="#">Not published yet</a></p>
+    <ol>
+      <li>Download the folder <code>DepthAnything3BaseQ8.mlpackage</code>.</li>
+      <li>In SparseSplat open a project, then <em>Pose-Free Model &rarr; Import Package&hellip;</em> and choose the folder.</li>
+    </ol>
+    <dl>
+      <dt>Package</dt><dd><code>DepthAnything3BaseQ8.mlpackage</code>, one function per view count (4, 6, 8, 12, 16) and shape (504&times;378, 378&times;504)</dd>
+      <dt>Input</dt><dd><code>images</code> (1, N, 3, H, W), ImageNet-normalised RGB</dd>
+      <dt>Outputs</dt><dd><code>depth</code>, <code>confidence</code>, <code>pose</code> (T, quaternion xyzw, fov)</dd>
+      <dt>weight.bin SHA-256</dt><dd><code>326259a56ddbebdd7de59dc3324a99e495cffe5e3c15f11e2431f59f7a39127a</code></dd>
+      <dt>model.mlmodel SHA-256</dt><dd><code>50faeb905fac1b6fd260872ba1db0f865170d9b53d56d0a6c3ddf1658a34ccab</code></dd>
+      <dt>Source</dt><dd><a href="https://github.com/ByteDance-Seed/Depth-Anything-3">ByteDance Depth Anything 3</a> (weights <code>depth-anything/DA3-BASE</code>), converted with <code>Tools/da3/convert_da3.py</code></dd>
+    </dl>
+    <p class="note">Build it yourself: <code>python Tools/da3/convert_da3.py base DepthAnything3BaseQ8.mlpackage</code>.</p>
+  </section>
+
+  <p class="note">The page lists nothing else on purpose: non-commercial models (MASt3R, DUSt3R, VGGT) are not offered.</p>
+</main>
+<script>
+  // Set this to the published location of the package (for example the Hugging Face repository page).
+  var DA3_URL = "";
+  if (DA3_URL) {
+    var a = document.getElementById("da3-link");
+    a.href = DA3_URL; a.textContent = "Download"; a.classList.remove("off");
+  }
+</script>
+</body>
+</html>
