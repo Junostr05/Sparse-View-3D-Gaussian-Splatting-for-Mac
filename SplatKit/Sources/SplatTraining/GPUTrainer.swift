@@ -130,6 +130,8 @@ public final class GPUTrainer {
     private let pseudoPriors: [GPUDepthPrior]
     /// The depth loss kernel: slot 0 for the training views (through `depthTerm`), slot 1 for pseudo-views.
     private let depthLoss: GPUDepthLoss?
+    /// Per-view colour compensation (v1.2). Nil unless `configuration.appearance.isEnabled`.
+    let appearance: GPUAppearance?
     /// Grow-only, zero-filled dL/drendered for pseudo-view backward passes. Only read by the GPU, so it stays zero.
     private var zeroImageGradient: MTLBuffer?
     /// True from a pseudo-view encode until the trainer reads its value at a wait point.
@@ -270,6 +272,14 @@ public final class GPUTrainer {
             }
         }
 
+        // Appearance compensation (v1.2): one gain and bias per training view, created only when enabled.
+        var appearanceModel: GPUAppearance?
+        if configuration.appearance.isEnabled {
+            appearanceModel = try metalCall { () throws(MetalError) -> GPUAppearance in
+                try GPUAppearance(context: context, viewCount: dataset.views.count)
+            }
+        }
+
         var phase4Terms: [any AuxiliaryLoss] = []
         var depthTerm: DepthLossTerm?
         if hasDepthTerm, let depthLoss = depthLossObject {
@@ -327,6 +337,7 @@ public final class GPUTrainer {
         self.pseudoPool = pseudoPool
         self.pseudoPriors = pseudoPriors
         self.depthLoss = depthLossObject
+        self.appearance = appearanceModel
         rebuildTermCache()
     }
 
@@ -352,6 +363,17 @@ public final class GPUTrainer {
         try guarded { () throws(TrainingError) -> GaussianCloud in
             _ = try self.synchronize()
             return self.store.snapshot()
+        }
+    }
+
+    /// Learned gain and bias of every training view, in view order. Identity when appearance is off. Waits for the GPU.
+    public func appearanceParameters() throws(TrainingError) -> [AppearanceParameters] {
+        try guarded { () throws(TrainingError) -> [AppearanceParameters] in
+            _ = try self.synchronize()
+            guard let appearance = self.appearance else {
+                return [AppearanceParameters](repeating: .identity, count: self.views.count)
+            }
+            return appearance.readParameters()
         }
     }
 
@@ -389,11 +411,29 @@ public final class GPUTrainer {
         }
 
         // Step 2: image loss, then the pixel-gradient terms (depth loss).
+        // Appearance (v1.2): the loss sees A = R ⊙ gain + bias, and the gradient G = dL/dA is turned into dL/dR in
+        // place before the rasterizer backward (`encodeGradient` also updates the view's gain and bias).
+        let appearanceActive: Bool = appearance != nil && index >= configuration.appearance.startIteration
+        var lossInput: MTLTexture = texture
+        if let appearance, appearanceActive {
+            lossInput = try metalCall { () throws(MetalError) -> MTLTexture in
+                try appearance.encodeCompensation(rendered: texture, viewIndex: viewIndex,
+                                                  commandBuffer: commandBuffer)
+            }
+        }
         try metalCall { () throws(MetalError) -> Void in
-            try self.imageLoss.encode(rendered: texture, target: self.targets[viewIndex],
+            try self.imageLoss.encode(rendered: lossInput, target: self.targets[viewIndex],
                                       width: width, height: height,
                                       lambda: self.configuration.lambdaDSSIM,
                                       imageGradient: gradientImage, commandBuffer: commandBuffer)
+        }
+        if let appearance, appearanceActive {
+            try metalCall { () throws(MetalError) -> Void in
+                try appearance.encodeGradient(rendered: texture, imageGradient: gradientImage, viewIndex: viewIndex,
+                                              learningRate: self.configuration.appearance.learningRate,
+                                              identityWeight: self.configuration.appearance.identityWeight,
+                                              hyper: self.configuration.adam, commandBuffer: commandBuffer)
+            }
         }
         let currentGradients = gradients
         let auxiliary = AuxiliaryContext(
@@ -574,10 +614,16 @@ public final class GPUTrainer {
         // Evaluation uses the full degree of the model, not the schedule's current degree.
         let settings = RasterSettings(shDegreeLimit: configuration.shDegree,
                                       background: configuration.background)
+        // Appearance (v1.2): training views are compared with their learned gain and bias. Identity parameters leave
+        // the render unchanged, so this is exact for views before the appearance start.
+        let compensation: [AppearanceParameters]? = appearance?.readParameters()
         var sum: Double = 0
-        for view in views {
-            let rendered = try metalCall { () throws(MetalError) -> RGBImage in
+        for (index, view) in views.enumerated() {
+            var rendered = try metalCall { () throws(MetalError) -> RGBImage in
                 try self.renderer.renderImage(camera: view.camera, settings: settings)
+            }
+            if let compensation {
+                rendered = AppearanceTransform.apply(rendered, compensation[index])
             }
             sum += ImageMetrics.psnr(rendered, view.image)
         }
