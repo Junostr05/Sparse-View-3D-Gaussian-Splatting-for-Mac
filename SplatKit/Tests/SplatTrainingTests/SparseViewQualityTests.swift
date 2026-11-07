@@ -335,9 +335,10 @@ struct SparseViewBenchmark {
             let prepared = preparedDataset(scene)
             let extent: SceneExtent = sceneExtent(scene)
             for variant in benchmarkVariants {
-                var configuration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
+                var mutableConfiguration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
                 // Early stopping is off in the default configuration, so the leave-one-out rows switch it on.
-                configuration.earlyStopping.isEnabled = variant.leaveOneOut
+                mutableConfiguration.earlyStopping.isEnabled = variant.leaveOneOut
+                let configuration: TrainingConfiguration = mutableConfiguration
                 let dataset: TrainingDataset = variant.prepared ? prepared.dataset : scene.dataset
                 let budget: Int = configuration.maxGaussians
 
