@@ -45,6 +45,13 @@ public enum InputKind: String, Codable, Sendable {
     case arkit
 }
 
+/// The pose provider that registered the frames of a project. Optional: projects without estimated poses
+/// (COLMAP and ARKit imports, Phase 3 projects) keep `nil`.
+public enum PoseMethod: String, Codable, Sendable {
+    case apple
+    case depthAnything3
+}
+
 extension UpAxis {
     /// The up axis a viewer should start with for a project. COLMAP world frames follow the OpenCV convention
     /// (-Y up). Apple Photogrammetry (photos, video) and ARKit keep their gravity-aligned +Y-up world; only the
@@ -55,6 +62,15 @@ extension UpAxis {
         case .photos, .video, .arkit: .positiveY
         case .colmap, nil: .negativeY
         }
+    }
+
+    /// The start up axis of a project. Depth Anything 3 uses the OpenCV frame of its first camera as the world
+    /// frame (y down), so its projects start at -Y up. Other projects follow their input kind.
+    public static func forProject(_ manifest: ProjectManifest) -> UpAxis {
+        if manifest.poseMethod == .depthAnything3 {
+            return .negativeY
+        }
+        return forInputKind(manifest.inputKind)
     }
 }
 
@@ -93,8 +109,8 @@ public struct EditRecord: Codable, Sendable, Equatable {
 
 /// Contents of `manifest.json` in a `.gsproj` package.
 ///
-/// `inputKind`, `frameProvenance` and `edits` are optional additions within format version 1. A manifest
-/// without them (every Phase 3 project) decodes with `nil`, `[]` and `nil`.
+/// `inputKind`, `frameProvenance`, `edits` and `poseMethod` are optional additions within format version 1.
+/// A manifest without them (every Phase 3 project) decodes with `nil`, `[]`, `nil` and `nil`.
 public struct ProjectManifest: Codable, Sendable, Equatable {
     public static let currentFormatVersion = 1
 
@@ -110,6 +126,8 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
     public var frameProvenance: [FrameProvenance]
     /// Non-destructive deletions of the latest checkpoint, if any.
     public var edits: EditRecord?
+    /// The pose provider behind the stored poses, when they were estimated. `nil` for COLMAP and ARKit imports.
+    public var poseMethod: PoseMethod?
 
     /// An empty project at the current format version.
     public init() {
@@ -121,6 +139,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         inputKind = nil
         frameProvenance = []
         edits = nil
+        poseMethod = nil
     }
 
     /// Decodes a manifest. Keys added after format version 1 shipped are optional, so older
@@ -136,6 +155,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         frameProvenance = try container.decodeIfPresent([FrameProvenance].self,
                                                         forKey: .frameProvenance) ?? []
         edits = try container.decodeIfPresent(EditRecord.self, forKey: .edits)
+        poseMethod = try container.decodeIfPresent(PoseMethod.self, forKey: .poseMethod)
     }
 }
 
@@ -295,9 +315,11 @@ public enum ProjectBundle {
     /// Only frames whose name is in `result.registeredImageNames` are kept. They are stored under
     /// `images/`, and their poses are written as COLMAP binaries under `poses/colmap/`. Provenance
     /// is recorded in sorted name order. A point cloud is written only when it is not empty.
+    /// `method` records which provider produced the poses.
     public static func importEstimatedPoses(frames: [CapturedFrame],
                                             result: PoseEstimationResult,
                                             inputKind: InputKind,
+                                            method: PoseMethod = .apple,
                                             into contents: ProjectContents) -> ProjectContents {
         let registered = Set(result.registeredImageNames)
         let kept = frames
@@ -325,6 +347,7 @@ public enum ProjectBundle {
         if !result.points.isEmpty {
             imported.files[directory + "/points3D.bin"] = COLMAPWriter.points3D(result.points)
         }
+        imported.manifest.poseMethod = method
         return imported
     }
 
@@ -520,7 +543,7 @@ public enum ProjectBundle {
     }
 
     /// Drops everything an import replaces, then records the new source, input kind, provenance
-    /// and image names.
+    /// and image names. The pose method is reset; `importEstimatedPoses` sets it again afterwards.
     private static func clearedForImport(_ contents: ProjectContents,
                                          source: PoseSource,
                                          inputKind: InputKind,
@@ -543,6 +566,7 @@ public enum ProjectBundle {
         result.manifest.imageFiles = imageFiles.keys.sorted()
         result.manifest.checkpoints = []
         result.manifest.edits = nil
+        result.manifest.poseMethod = nil
         for (name, data) in imageFiles {
             result.files[ProjectLayout.imagesDirectory + "/" + name] = data
         }

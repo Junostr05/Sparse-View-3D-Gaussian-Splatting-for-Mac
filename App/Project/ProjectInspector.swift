@@ -20,6 +20,7 @@ struct ProjectInspector: View {
                 captureSection(manifest: manifest)
             }
             DepthModelSection(pipeline: pipeline)
+            PoseFreeModelSection(pipeline: pipeline)
             if !manifest.imageFiles.isEmpty {
                 SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)
                 trainingSection
@@ -58,6 +59,11 @@ struct ProjectInspector: View {
             LabeledContent("Source", value: sourceName(manifest))
             if let summary = pipeline.poseSummary {
                 LabeledContent("Poses", value: summary)
+            }
+            if manifest.poseMethod == .depthAnything3 {
+                Text("Poses are pose-free estimates (Depth Anything 3). Novel views will be less sharp than with Apple Photogrammetry.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
     }

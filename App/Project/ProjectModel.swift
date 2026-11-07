@@ -293,7 +293,7 @@ final class ProjectModel {
                             baseIsCheckpoint: Bool) -> ViewerModel {
         editsTargetCheckpoint = baseIsCheckpoint
         let model = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
-                                upAxis: UpAxis.forInputKind(contents.manifest.inputKind),
+                                upAxis: UpAxis.forProject(contents.manifest),
                                 cameras: (try? ProjectBundle.cameraPoses(contents)) ?? [])
         // Editing is locked while a run is in progress; `runTraining` unlocks it at the end.
         model.isEditingAllowed = !isTraining

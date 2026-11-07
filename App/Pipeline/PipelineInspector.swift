@@ -1,6 +1,8 @@
+import AppKit
 import SwiftUI
 import SplatCore
 import SplatIO
+import UniformTypeIdentifiers
 
 /// Sections of the inspector for the input stage: the entry points while nothing is pending, then the frame
 /// selection and the pose estimation. Shown while the project has no images.
@@ -104,6 +106,14 @@ struct PipelineInspector: View {
 
     private var posesSection: some View {
         Section("Poses") {
+            Picker("Method", selection: methodBinding) {
+                ForEach(PoseMethodPreference.allCases, id: \.self) { preference in
+                    Text(preference.title)
+                        .disabled(preference == .depthAnything3 && pipeline.da3PackageURL == nil)
+                        .tag(preference)
+                }
+            }
+            .disabled(pipeline.isEstimating)
             if pipeline.isEstimating {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -117,13 +127,18 @@ struct PipelineInspector: View {
                 .buttonStyle(.glassProminent)
                 .disabled(!pipeline.canEstimatePoses)
             }
-            Text("Apple Photogrammetry registers the selected frames on this Mac. If it cannot, import a COLMAP folder instead.")
+            Text("Apple Photogrammetry registers the selected frames on this Mac. Automatic falls back to Depth Anything 3 when its package is installed. If the frames still cannot be registered, import a COLMAP folder instead.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
     }
 
     // MARK: - Bindings and text
+
+    private var methodBinding: Binding<PoseMethodPreference> {
+        Binding(get: { pipeline.poseMethodPreference },
+                set: { pipeline.setPoseMethodPreference($0) })
+    }
 
     private var usesAllBinding: Binding<Bool> {
         Binding(get: { pipeline.usesAllFrames },
@@ -385,5 +400,74 @@ struct DepthModelSection: View {
             return "Download Again (\(size))"
         }
         return "Download (\(size))"
+    }
+}
+
+/// Pose-free model row: whether the converted Depth Anything 3 package is installed, import from a folder chosen
+/// by the user, and removal. The model is not published, so it can only be imported.
+struct PoseFreeModelSection: View {
+    let pipeline: PipelineModel
+    @State private var isConfirmingRemoval = false
+
+    /// `.mlpackage` directory packages. Falls back to the generic package type when the extension is not registered.
+    private static let packageType: UTType = UTType(filenameExtension: "mlpackage") ?? .package
+
+    var body: some View {
+        let descriptor: ModelDescriptor = PipelineModel.da3Descriptor
+        Section("Pose-Free Model") {
+            LabeledContent(descriptor.displayName, value: statusText)
+            Text("Fallback when Apple Photogrammetry cannot register the photos. It estimates poses without a calibrated camera and is less accurate than Apple Photogrammetry. It is not published yet: convert it with Tools/da3/convert_da3.py and import the package.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button("Import Package\u{2026}") {
+                chooseAndImport()
+            }
+            .buttonStyle(.bordered)
+            .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
+            if pipeline.da3PackageURL != nil {
+                Button("Remove", role: .destructive) {
+                    isConfirmingRemoval = true
+                }
+                .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
+            }
+            if let error = pipeline.da3Error {
+                Text(error)
+                    .foregroundStyle(.red)
+            }
+        }
+        .task {
+            await pipeline.refreshDA3Package()
+        }
+        .confirmationDialog("Remove the Pose-Free Model?", isPresented: $isConfirmingRemoval) {
+            Button("Remove", role: .destructive) {
+                pipeline.removeDA3Model()
+            }
+        } message: {
+            Text("The imported package is deleted. Import it again to use Depth Anything 3 poses.")
+        }
+    }
+
+    private var statusText: String {
+        if pipeline.isImportingDA3 {
+            return "Importing\u{2026}"
+        }
+        return pipeline.da3PackageURL == nil ? "Not installed" : "Installed"
+    }
+
+    /// Opens a panel that accepts both package directories and files, so the `.mlpackage` can be selected.
+    /// `runModal` keeps the panel on the main actor.
+    private func chooseAndImport() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose the converted Depth Anything 3 package (.mlpackage)."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [Self.packageType]
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+        Task {
+            await pipeline.importDA3Package(from: url)
+        }
     }
 }

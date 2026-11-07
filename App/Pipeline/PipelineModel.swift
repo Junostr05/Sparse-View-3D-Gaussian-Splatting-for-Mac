@@ -4,6 +4,7 @@ import ImageIO
 import Observation
 import SwiftUI
 import SplatCore
+import SplatDepth
 import SplatIO
 
 /// Blocking work of the input pipeline. Every function runs off the main actor (`@concurrent`) and
@@ -55,21 +56,52 @@ nonisolated enum PipelineWork {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
-    /// Runs Apple Photogrammetry on the frames and, on success, writes the poses into a copy of `base`.
+    /// Runs the pose stage on the frames and, on success, writes the poses into a copy of `base`.
+    ///
+    /// The chain follows `preference`: automatic is Apple Photogrammetry, then Depth Anything 3 when its package
+    /// is installed; the other choices use one provider only. The provider that succeeded decides the pose method.
     @concurrent
-    static func estimatePoses(frames: [CapturedFrame], base: ProjectContents, inputKind: InputKind) async -> PoseRun {
-        let chain = PoseProviderChain(providers: [ApplePhotogrammetryPoseProvider()])
+    static func estimatePoses(frames: [CapturedFrame],
+                              base: ProjectContents,
+                              inputKind: InputKind,
+                              preference: PoseMethodPreference,
+                              da3Package: URL?) async -> PoseRun {
+        let apple: ApplePhotogrammetryPoseProvider = ApplePhotogrammetryPoseProvider()
+        let depthAnything: DepthAnything3PoseProvider? = da3Package.map { DepthAnything3PoseProvider(packageURL: $0) }
+        var providers: [any PoseProvider] = []
+        switch preference {
+        case .automatic:
+            providers.append(apple)
+            if let depthAnything {
+                providers.append(depthAnything)
+            }
+        case .apple:
+            providers.append(apple)
+        case .depthAnything3:
+            guard let depthAnything else {
+                return .failed("The Depth Anything 3 model is not installed. Import it in the Pose-Free Model section.")
+            }
+            providers.append(depthAnything)
+        }
+
+        let chain = PoseProviderChain(providers: providers)
         let outcome: PoseChainOutcome = await chain.estimate(for: frames)
         if Task.isCancelled {
             return .cancelled
         }
         switch outcome {
-        case .success(let result, let providerName, _):
+        case .success(let result, let providerName, let attempts):
+            let method: PoseMethod = providerName == depthAnything?.name ? .depthAnything3 : .apple
             let contents: ProjectContents = ProjectBundle.importEstimatedPoses(frames: frames,
                                                                                result: result,
                                                                                inputKind: inputKind,
+                                                                               method: method,
                                                                                into: base)
-            let summary: String = "\(result.registeredImageNames.count) of \(frames.count) images registered (\(providerName))"
+            var summary: String = "\(result.registeredImageNames.count) of \(frames.count) images registered (\(providerName))"
+            // Depth Anything 3 only runs after Apple Photogrammetry in the automatic chain, so a second attempt is a fallback.
+            if method == .depthAnything3, attempts.count > 1 {
+                summary += " after Apple Photogrammetry failed"
+            }
             return .imported(contents, summary: summary)
         case .failure(let attempts):
             if case .failure(.cancelled)? = attempts.last?.outcome {
@@ -91,6 +123,26 @@ nonisolated enum PipelineWork {
                               descriptor: ModelDescriptor,
                               progress: @escaping @Sendable (Double) -> Void) async throws {
         try await URLSessionModelDownloader().download(descriptor, to: store, progress: progress)
+    }
+
+    /// The imported package of `descriptor`, if one is stored. Checks files, hence off the main actor.
+    @concurrent
+    static func importedPackage(store: ModelStore, descriptor: ModelDescriptor) async -> URL? {
+        store.importedPackageURL(for: descriptor)
+    }
+
+    /// Copies a user-chosen package into the store. The security scope of `url` is held for the copy.
+    @concurrent
+    static func importPackage(from url: URL, store: ModelStore, descriptor: ModelDescriptor) async throws {
+        try ProjectImport.withSecurityScope(url) { () throws in
+            try store.importPackage(from: url, for: descriptor)
+        }
+    }
+
+    /// Deletes the stored version directory of `descriptor`.
+    @concurrent
+    static func removePackage(store: ModelStore, descriptor: ModelDescriptor) async throws {
+        try store.remove(descriptor)
     }
 
     /// Readable sentence for a pose failure.
@@ -116,6 +168,22 @@ nonisolated enum PipelineWork {
             reason = describe(failure)
         }
         return reason + " Import a COLMAP folder instead."
+    }
+}
+
+/// The pose method picked in the Poses section. `automatic` tries Apple Photogrammetry first and Depth Anything 3
+/// after it, when its package is installed.
+nonisolated enum PoseMethodPreference: String, CaseIterable, Sendable {
+    case automatic
+    case apple
+    case depthAnything3
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .apple: "Apple Photogrammetry"
+        case .depthAnything3: "Depth Anything 3"
+        }
     }
 }
 
@@ -155,6 +223,9 @@ final class PipelineModel {
     static let sampleIntervals: [Double] = [0.1, 0.25, 0.5, 1.0]
     static let defaultSampleInterval: Double = 0.25
     static let depthDescriptor: ModelDescriptor = ModelCatalog.depthAnythingV2Small
+    static let da3Descriptor: ModelDescriptor = ModelDescriptor.depthAnything3Base
+    /// `UserDefaults` key of the pose method preference.
+    static let poseMethodDefaultsKey: String = "SparseSplat.poseMethodPreference"
 
     private(set) var source: Source?
     private(set) var candidates: [PipelineCandidate] = []
@@ -178,6 +249,13 @@ final class PipelineModel {
     private(set) var depthProgress: Double?
     private(set) var depthError: String?
 
+    /// The method the user picked. Kept even while its model is missing.
+    private(set) var poseMethodPreference: PoseMethodPreference
+    /// The installed Depth Anything 3 package, or `nil` when none is imported.
+    private(set) var da3PackageURL: URL?
+    private(set) var isImportingDA3: Bool = false
+    private(set) var da3Error: String?
+
     @ObservationIgnored private var photoFrames: [CapturedFrame] = []
     @ObservationIgnored private var videoCandidates: [VideoCandidate] = []
     @ObservationIgnored private var videoURL: URL?
@@ -191,6 +269,7 @@ final class PipelineModel {
 
     init() {
         modelStore = Self.makeModelStore()
+        poseMethodPreference = Self.storedPoseMethodPreference()
     }
 
     deinit {
@@ -358,6 +437,8 @@ final class PipelineModel {
         }
         let selected: [Int] = plan.selectedInOrder
         let base: ProjectContents = document.wrappedValue.contents
+        let preference: PoseMethodPreference = poseMethodPreference
+        let da3Package: URL? = da3PackageURL
         let gen: Int = beginGeneration()
         estimationFailed = false
         errorMessage = nil
@@ -388,8 +469,12 @@ final class PipelineModel {
                     frames = try await PipelineWork.decodeVideoFrames(url: url, times: times)
                 }
                 guard gen == self.generation else { return }
-                self.estimationStatus = "Estimating poses with Apple Photogrammetry. This can take several minutes."
-                let run: PoseRun = await PipelineWork.estimatePoses(frames: frames, base: base, inputKind: inputKind)
+                self.estimationStatus = "Estimating poses. This can take several minutes."
+                let run: PoseRun = await PipelineWork.estimatePoses(frames: frames,
+                                                                    base: base,
+                                                                    inputKind: inputKind,
+                                                                    preference: preference,
+                                                                    da3Package: da3Package)
                 guard gen == self.generation else { return }
                 self.finishEstimate(run, document: document, project: project)
             } catch {
@@ -457,6 +542,60 @@ final class PipelineModel {
 
     func cancelDepthDownload() {
         depthDownload?.cancel()
+    }
+
+    // MARK: - Pose method and Depth Anything 3 model
+
+    /// Stores the pose method preference in `UserDefaults`.
+    func setPoseMethodPreference(_ preference: PoseMethodPreference) {
+        poseMethodPreference = preference
+        UserDefaults.standard.set(preference.rawValue, forKey: Self.poseMethodDefaultsKey)
+    }
+
+    /// Reads the Depth Anything 3 package state from the store.
+    func refreshDA3Package() async {
+        guard let store = modelStore else {
+            da3PackageURL = nil
+            return
+        }
+        da3PackageURL = await PipelineWork.importedPackage(store: store, descriptor: Self.da3Descriptor)
+    }
+
+    /// Copies a converted Depth Anything 3 package into the store, replacing any earlier one.
+    /// Failures are reported in `da3Error`.
+    func importDA3Package(from url: URL) async {
+        guard !isImportingDA3, !isEstimating else {
+            return
+        }
+        guard let store = modelStore else {
+            da3Error = "The model folder is not available."
+            return
+        }
+        isImportingDA3 = true
+        da3Error = nil
+        do {
+            try await PipelineWork.importPackage(from: url, store: store, descriptor: Self.da3Descriptor)
+        } catch {
+            da3Error = Self.errorText(error)
+        }
+        isImportingDA3 = false
+        await refreshDA3Package()
+    }
+
+    /// Deletes the imported Depth Anything 3 package. Not allowed while poses are being estimated.
+    func removeDA3Model() {
+        guard !isImportingDA3, !isEstimating, let store = modelStore else {
+            return
+        }
+        da3Error = nil
+        Task {
+            do {
+                try await PipelineWork.removePackage(store: store, descriptor: Self.da3Descriptor)
+            } catch {
+                self.da3Error = Self.errorText(error)
+            }
+            await self.refreshDA3Package()
+        }
     }
 
     // MARK: - Messages
@@ -600,6 +739,15 @@ final class PipelineModel {
                                            caption: timeText(candidate.time)))
         }
         return items
+    }
+
+    /// The preference stored in `UserDefaults`, or `automatic` when none is stored or it is unknown.
+    static func storedPoseMethodPreference() -> PoseMethodPreference {
+        guard let raw = UserDefaults.standard.string(forKey: poseMethodDefaultsKey),
+              let preference = PoseMethodPreference(rawValue: raw) else {
+            return .automatic
+        }
+        return preference
     }
 
     /// `Application Support/SparseSplat/Models` inside the app container.
