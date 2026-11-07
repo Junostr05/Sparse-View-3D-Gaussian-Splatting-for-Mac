@@ -78,10 +78,23 @@ public struct FrameProvenance: Codable, Sendable, Equatable {
     }
 }
 
+/// Summary of the deletions stored in `edits/deleted.bin`. The indices themselves live in that file.
+public struct EditRecord: Codable, Sendable, Equatable {
+    /// Gaussian count of the checkpoint the deletions refer to.
+    public var baseGaussianCount: Int
+    /// Number of deleted indices in the file.
+    public var deletedCount: Int
+
+    public init(baseGaussianCount: Int, deletedCount: Int) {
+        self.baseGaussianCount = baseGaussianCount
+        self.deletedCount = deletedCount
+    }
+}
+
 /// Contents of `manifest.json` in a `.gsproj` package.
 ///
-/// `inputKind` and `frameProvenance` are optional additions within format version 1. A manifest
-/// without them (every Phase 3 project) decodes with `nil` and `[]`.
+/// `inputKind`, `frameProvenance` and `edits` are optional additions within format version 1. A manifest
+/// without them (every Phase 3 project) decodes with `nil`, `[]` and `nil`.
 public struct ProjectManifest: Codable, Sendable, Equatable {
     public static let currentFormatVersion = 1
 
@@ -95,6 +108,8 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
     public var inputKind: InputKind?
     /// Per-image origin, in the order the images were stored. Empty when not recorded.
     public var frameProvenance: [FrameProvenance]
+    /// Non-destructive deletions of the latest checkpoint, if any.
+    public var edits: EditRecord?
 
     /// An empty project at the current format version.
     public init() {
@@ -105,6 +120,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         checkpoints = []
         inputKind = nil
         frameProvenance = []
+        edits = nil
     }
 
     /// Decodes a manifest. Keys added after format version 1 shipped are optional, so older
@@ -119,6 +135,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         inputKind = try container.decodeIfPresent(InputKind.self, forKey: .inputKind)
         frameProvenance = try container.decodeIfPresent([FrameProvenance].self,
                                                         forKey: .frameProvenance) ?? []
+        edits = try container.decodeIfPresent(EditRecord.self, forKey: .edits)
     }
 }
 
@@ -137,6 +154,8 @@ public enum ProjectLayout {
     public static let arkitCapture = "poses/arkit.json"
     public static let latestCheckpoint = "checkpoints/latest.ply"
     public static let depthDirectory = "depth"
+    /// Deleted Gaussian indices of the latest checkpoint, as `DeletionListCodec` data.
+    public static let deletedIndices = "edits/deleted.bin"
 
     /// `depth/<name>.sdpt` for the image stored as `name`.
     public static func depthPath(forImage name: String) -> String {
@@ -413,13 +432,70 @@ public enum ProjectBundle {
     }
 
     /// Stores `cloud` as the latest checkpoint and appends `record` to the manifest.
+    /// Deletions of the previous checkpoint are dropped, because they refer to its Gaussians.
     public static func withCheckpoint(_ contents: ProjectContents,
                                       cloud: GaussianCloud,
                                       record: CheckpointRecord) -> ProjectContents {
         var result = contents
         result.files[ProjectLayout.latestCheckpoint] = PLYWriter.write(cloud)
+        result.files[ProjectLayout.deletedIndices] = nil
+        result.manifest.edits = nil
         result.manifest.checkpoints.append(record)
         return result
+    }
+
+    // MARK: - Deletions
+
+    /// Stores the deleted Gaussian indices of the latest checkpoint. Duplicates are removed and the
+    /// indices are sorted. An empty list removes the file and the `edits` record.
+    /// `baseGaussianCount` is the Gaussian count of that checkpoint.
+    public static func withDeletions(_ contents: ProjectContents,
+                                     baseGaussianCount: Int,
+                                     deleted: [UInt32]) -> ProjectContents {
+        var result = contents
+        let sorted = Array(Set(deleted)).sorted()
+        if sorted.isEmpty {
+            result.files[ProjectLayout.deletedIndices] = nil
+            result.manifest.edits = nil
+        } else {
+            result.files[ProjectLayout.deletedIndices] = DeletionListCodec.encode(sorted)
+            result.manifest.edits = EditRecord(baseGaussianCount: baseGaussianCount,
+                                               deletedCount: sorted.count)
+        }
+        return result
+    }
+
+    /// The stored deletions, or `nil` when there are none or they do not belong to the latest checkpoint.
+    ///
+    /// - `nil` when there is no `edits` record, or when the latest checkpoint's Gaussian count (from the
+    ///   manifest, no PLY is decoded) differs from the record's `baseGaussianCount`. Stale deletions are
+    ///   ignored, not reported.
+    /// - Throws `ProjectError.corruptManifest` when the record exists but `edits/deleted.bin` is missing
+    ///   or holds a different number of indices than the record says.
+    /// - Throws `ProjectError.corruptCheckpoint` when the file does not decode, including an index at or
+    ///   beyond the base Gaussian count.
+    public static func deletions(_ contents: ProjectContents)
+        throws(ProjectError) -> (baseGaussianCount: Int, deleted: [UInt32])? {
+        guard let record = contents.manifest.edits else {
+            return nil
+        }
+        guard let latest = contents.manifest.checkpoints.last,
+              latest.gaussianCount == record.baseGaussianCount else {
+            return nil
+        }
+        guard let data = contents.files[ProjectLayout.deletedIndices] else {
+            throw .corruptManifest("edits record without \(ProjectLayout.deletedIndices)")
+        }
+        let deleted: [UInt32]
+        do throws(DeletionListError) {
+            deleted = try DeletionListCodec.decode(data, maxIndex: record.baseGaussianCount)
+        } catch {
+            throw .corruptCheckpoint("deleted indices: \(error)")
+        }
+        guard deleted.count == record.deletedCount else {
+            throw .corruptManifest("edits record says \(record.deletedCount) deletions, file holds \(deleted.count)")
+        }
+        return (record.baseGaussianCount, deleted)
     }
 
     // MARK: - Helpers
@@ -455,6 +531,7 @@ public enum ProjectBundle {
             ProjectLayout.depthDirectory + "/",
             "poses/",
             "checkpoints/",
+            "edits/",
         ]
         var result = contents
         result.files = contents.files.filter { path, _ in
@@ -465,6 +542,7 @@ public enum ProjectBundle {
         result.manifest.frameProvenance = frameProvenance
         result.manifest.imageFiles = imageFiles.keys.sorted()
         result.manifest.checkpoints = []
+        result.manifest.edits = nil
         for (name, data) in imageFiles {
             result.files[ProjectLayout.imagesDirectory + "/" + name] = data
         }

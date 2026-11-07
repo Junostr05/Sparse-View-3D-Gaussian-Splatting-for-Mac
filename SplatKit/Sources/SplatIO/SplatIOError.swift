@@ -14,4 +14,13 @@ public enum SplatIOError: Error, Equatable {
     case invalidSize(Int)
     /// The file declares zero vertices.
     case empty
+    /// The stream uses a compression method this build cannot decode (for example a compressed
+    /// deflate block on a platform without the `Compression` framework).
+    case unsupportedCompression
+    /// A gzip or SPZ container is malformed: bad magic, bad checksum, truncated or inconsistent data.
+    case corrupt(String)
+    /// A value that the format cannot represent (NaN or infinity) was passed to a writer.
+    case nonFinite
+    /// A value lies outside the range the format can store, for example an SPZ position beyond ±2048.
+    case outOfRange(String)
 }

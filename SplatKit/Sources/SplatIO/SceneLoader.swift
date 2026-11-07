@@ -15,7 +15,7 @@ public struct LoadedScene: Sendable {
 
 /// Dispatches a file's bytes to the matching reader by extension.
 public enum SceneLoader {
-    /// `fileExtension` is matched case-insensitively against `ply` and `splat`.
+    /// `fileExtension` is matched case-insensitively against `ply`, `splat` and `spz`.
     public static func load(_ data: Data, fileExtension: String) throws(SplatIOError) -> LoadedScene {
         let lowercasedExtension = fileExtension.lowercased()
         let parsed: GaussianCloud
@@ -24,6 +24,8 @@ public enum SceneLoader {
             parsed = try PLYReader.read(data)
         case "splat":
             parsed = try AntimatterSplatReader.read(data)
+        case "spz":
+            parsed = try SPZReader.read(data)
         default:
             throw .unsupportedFormat(lowercasedExtension)
         }
