@@ -216,7 +216,8 @@ final class ProjectModel {
     private(set) var viewer: ViewerModel?
 
     @ObservationIgnored private var session: TrainingSession?
-    @ObservationIgnored private var runTask: Task<Void, Never>?
+    /// The task running the current session. Its value is the session's outcome, nil when the run threw.
+    @ObservationIgnored private var runTask: Task<TrainingOutcome?, Never>?
     /// The held-out view of the current leave-one-out run. Named only in the `.selection` phase, so the
     /// final-phase events and the checkpoint take it from here.
     @ObservationIgnored private var heldOutViewName: String?
@@ -324,7 +325,7 @@ final class ProjectModel {
         editsTargetCheckpoint = baseIsCheckpoint
         let model = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
                                 upAxis: UpAxis.forProject(contents.manifest),
-                                cameras: (try? ProjectBundle.cameraPoses(contents)) ?? [])
+                                cameras: (try? ProjectBundle.cameraPoses(contents, useRefinedPoses: true)) ?? [])
         // Editing is locked while a run is in progress; `runTraining` unlocks it at the end.
         model.isEditingAllowed = !isTraining
         model.onDeletionsChanged = { [weak self] baseCount, deleted in
@@ -340,11 +341,13 @@ final class ProjectModel {
 
     func startTraining(document: Binding<ProjectDocument>) {
         guard !isTraining else { return }
-        let contents: ProjectContents = document.wrappedValue.contents
-        guard !contents.manifest.imageFiles.isEmpty else {
+        guard !document.wrappedValue.contents.manifest.imageFiles.isEmpty else {
             errorMessage = "Import a capture before training."
             return
         }
+        // A run from scratch trains on the original poses, so the refined poses of earlier runs are dropped.
+        document.wrappedValue.contents = ProjectBundle.withoutRefinedPoses(document.wrappedValue.contents)
+        let contents: ProjectContents = document.wrappedValue.contents
         errorMessage = nil
         progress = nil
         heldOutViewName = nil
@@ -389,7 +392,9 @@ final class ProjectModel {
 
     private func runTraining(contents: ProjectContents, document: Binding<ProjectDocument>) async {
         do {
-            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document)
+            // A run from scratch starts from the original poses.
+            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document,
+                                                                 useRefinedPoses: false)
             if viewer == nil {
                 let cloud: GaussianCloud = await DepthPipeline.previewCloud(depth)
                 if viewer == nil {
@@ -400,7 +405,7 @@ final class ProjectModel {
             let trainingSession = TrainingSession(dataset: depth.dataset,
                                                   configuration: depth.configuration,
                                                   initializer: depth.initializer)
-            _ = await consume(trainingSession, document: document)
+            _ = await consume(trainingSession, viewNames: depth.dataset.views.map(\.name), document: document)
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -416,8 +421,10 @@ final class ProjectModel {
     private func runContinuation(contents: ProjectContents, document: Binding<ProjectDocument>) async {
         do {
             var cloud: GaussianCloud = try await ProjectImport.continuationStart(contents)
-            // Depth is prepared once for all rounds, as in `runTraining`.
-            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document)
+            // Depth is prepared once for all rounds, as in `runTraining`. The continuation starts from the refined poses,
+            // so its rounds refine them further and its checkpoint matches them.
+            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document,
+                                                                 useRefinedPoses: true)
             iterationOffset = contents.manifest.checkpoints.last?.iteration ?? 0
             totalIterations = iterationOffset
             round = 0
@@ -434,8 +441,9 @@ final class ProjectModel {
                 let roundSession = TrainingSession(dataset: depth.dataset,
                                                    initialCloud: cloud,
                                                    configuration: roundConfiguration)
-                // `consume` has already stored this round's checkpoint when it returns.
-                guard let terminal = await consume(roundSession, document: document),
+                // `consume` has already stored this round's checkpoint and refined poses when it returns.
+                guard let terminal = await consume(roundSession, viewNames: depth.dataset.views.map(\.name),
+                                                   document: document).terminal,
                       terminal.state == .finished,
                       let finalCloud = terminal.preview else {
                     break
@@ -461,9 +469,11 @@ final class ProjectModel {
     /// Depth preparation shared by a run and a continuation. Depth problems never fail it: they only appear in
     /// the status and the warning. Maps the monocular model produced are cached in the project.
     private func prepareDepth(contents: ProjectContents,
-                              document: Binding<ProjectDocument>) async throws -> DepthPreparedRun {
+                              document: Binding<ProjectDocument>,
+                              useRefinedPoses: Bool) async throws -> DepthPreparedRun {
         let depth: DepthPreparedRun = try await DepthPipeline.prepare(contents: contents,
-                                                                      store: PipelineModel.makeModelStore())
+                                                                      store: PipelineModel.makeModelStore(),
+                                                                      useRefinedPoses: useRefinedPoses)
         depthStatuses = depth.statuses
         warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
         if !depth.estimatedMaps.isEmpty {
@@ -475,21 +485,26 @@ final class ProjectModel {
     }
 
     /// Runs one session as a separate task, so `stop()` and `togglePause()` can reach it, and applies its
-    /// progress. Returns the session's last terminal event (`finished`, `cancelled` or `failed`), if any.
+    /// progress. Returns the session's last terminal event (`finished`, `cancelled` or `failed`), if any, and the
+    /// outcome of its run (nil when the run threw). A finished or cancelled run stores its checkpoint and, when
+    /// training refined the poses, those poses in the same update. `viewNames` are the dataset's view names in order.
     private func consume(_ trainingSession: TrainingSession,
-                         document: Binding<ProjectDocument>) async -> TrainingProgress? {
+                         viewNames: [String],
+                         document: Binding<ProjectDocument>) async -> (terminal: TrainingProgress?, outcome: TrainingOutcome?) {
         session = trainingSession
         // The run is a separate task so that `stop()` can cancel it. The stream ends when it returns.
-        runTask = Task {
+        let task: Task<TrainingOutcome?, Never> = Task {
             do {
-                _ = try await trainingSession.run()
+                return try await trainingSession.runWithOutcome()
             } catch {
                 // Reported as a `.failed` progress event, which `apply` shows.
+                return nil
             }
         }
+        runTask = task
         // A stop requested before this task existed (depth preparation, the gap between rounds) must not be lost.
         if stopRequested {
-            runTask?.cancel()
+            task.cancel()
         }
         var terminal: TrainingProgress?
         for await event in trainingSession.progress {
@@ -501,16 +516,21 @@ final class ProjectModel {
                 break
             }
         }
+        // The stream ends when the run returns, so its outcome (the refined cameras) is ready here.
+        let outcome: TrainingOutcome? = await task.value
+        if let terminal {
+            storeCheckpoint(for: terminal, outcome: outcome, viewNames: viewNames, document: document)
+        }
         session = nil
         runTask = nil
-        return terminal
+        return (terminal, outcome)
     }
 
-    /// Shows one progress event. Previews update the viewer; the terminal states store a checkpoint.
+    /// Shows one progress event. Previews update the viewer. The checkpoint of a terminal state is stored by
+    /// `storeCheckpoint`, once the run's outcome is known.
     private func apply(_ event: TrainingProgress, document: Binding<ProjectDocument>) {
         // Cumulative over the stored checkpoint and the finished rounds; equal to `event.iteration` for a run from scratch.
-        let iteration: Int = iterationOffset + event.iteration
-        totalIterations = iteration
+        totalIterations = iterationOffset + event.iteration
         if case .failed(let message) = event.state {
             errorMessage = message
         }
@@ -525,25 +545,42 @@ final class ProjectModel {
             viewer?.replaceCloud(cloud)
             editsTargetCheckpoint = false
         }
+    }
 
+    /// Stores the checkpoint of a finished or cancelled run, and the refined poses of its outcome with it.
+    /// Refined poses are stored only when the run produced one for each dataset view; otherwise the stored poses stay.
+    private func storeCheckpoint(for event: TrainingProgress,
+                                 outcome: TrainingOutcome?,
+                                 viewNames: [String],
+                                 document: Binding<ProjectDocument>) {
         switch event.state {
         case .finished, .cancelled:
-            if let cloud = event.preview {
-                // The checkpoint stored below is this cloud, so the viewer's base is the stored checkpoint again.
-                editsTargetCheckpoint = true
-                // A single run has no held-out fields; leave-one-out carries them on the terminal event.
-                let record = CheckpointRecord(iteration: iteration,
-                                              gaussianCount: cloud.count,
-                                              psnr: event.psnr,
-                                              date: Date(),
-                                              heldOutView: heldOutView(for: event.phase),
-                                              heldOutPSNR: event.heldOut?.psnr,
-                                              heldOutSSIM: event.heldOut?.ssim,
-                                              bestIteration: event.bestIteration)
-                document.wrappedValue.contents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
-                                                                              cloud: cloud,
-                                                                              record: record)
+            guard let cloud = event.preview else {
+                return
             }
+            // Cumulative over the stored checkpoint and the finished rounds; equal to `event.iteration` for a run from scratch.
+            let iteration: Int = iterationOffset + event.iteration
+            // The checkpoint stored below is this cloud, so the viewer's base is the stored checkpoint again.
+            editsTargetCheckpoint = true
+            // A single run has no held-out fields; leave-one-out carries them on the terminal event.
+            let record = CheckpointRecord(iteration: iteration,
+                                          gaussianCount: cloud.count,
+                                          psnr: event.psnr,
+                                          date: Date(),
+                                          heldOutView: heldOutView(for: event.phase),
+                                          heldOutPSNR: event.heldOut?.psnr,
+                                          heldOutSSIM: event.heldOut?.ssim,
+                                          bestIteration: event.bestIteration)
+            var contents: ProjectContents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
+                                                                         cloud: cloud,
+                                                                         record: record)
+            if let refined = outcome?.refinedCameras, refined.count == viewNames.count {
+                let named: [NamedCamera] = zip(viewNames, refined).map { NamedCamera(name: $0.0, camera: $0.1) }
+                contents = ProjectBundle.withRefinedPoses(contents, cameras: named)
+                // The open viewer lists the cameras the model was trained with.
+                viewer?.replaceCameras(named)
+            }
+            document.wrappedValue.contents = contents
         case .running, .paused, .failed:
             break
         }

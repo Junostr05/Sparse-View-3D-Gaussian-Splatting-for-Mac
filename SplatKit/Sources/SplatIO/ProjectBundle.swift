@@ -164,6 +164,18 @@ public enum ProjectError: Error, Equatable {
     case unsupportedFormatVersion(Int)
     case corruptManifest(String)
     case corruptCheckpoint(String)
+    case corruptRefinedPoses(String)
+}
+
+/// A camera pose after training-time refinement: the world→camera rotation and translation of one view.
+public struct RefinedPose: Sendable, Equatable {
+    public var rotation: Matrix3
+    public var translation: SIMD3<Float>
+
+    public init(rotation: Matrix3, translation: SIMD3<Float>) {
+        self.rotation = rotation
+        self.translation = translation
+    }
 }
 
 /// Relative paths inside a `.gsproj` package.
@@ -176,6 +188,9 @@ public enum ProjectLayout {
     public static let depthDirectory = "depth"
     /// Deleted Gaussian indices of the latest checkpoint, as `DeletionListCodec` data.
     public static let deletedIndices = "edits/deleted.bin"
+    /// Camera poses refined by training, as `RefinedPoseFile` JSON. Lives under `poses/`, so every import
+    /// (which replaces that directory) removes it.
+    public static let refinedPoses = "poses/refined.json"
 
     /// `depth/<name>.sdpt` for the image stored as `name`.
     public static func depthPath(forImage name: String) -> String {
@@ -390,18 +405,23 @@ public enum ProjectBundle {
 
     /// Builds the training dataset from the stored poses and images. A project without a pose
     /// source has no views. Missing pose files surface as the reader's own errors.
+    /// With `useRefinedPoses`, each view's rotation and translation come from the stored refined poses
+    /// (see `withRefinedPoses`); views without an entry keep their original pose.
     public static func loadDataset(_ contents: ProjectContents,
-                                   decode: TrainingDatasetLoader.ImageDecoder) throws(DatasetError) -> TrainingDataset {
+                                   decode: TrainingDatasetLoader.ImageDecoder,
+                                   useRefinedPoses: Bool = false) throws(DatasetError) -> TrainingDataset {
         let files = contents.files
         let imageData: (String) -> Data? = { name in
             files[ProjectLayout.imagesDirectory + "/" + name]
         }
         let maxImageSide = contents.manifest.training.maxImageSide
+        let overrides = try refinedOverrides(contents, enabled: useRefinedPoses)
 
+        var dataset: TrainingDataset
         switch contents.manifest.source {
         case .colmap?:
             let directory = ProjectLayout.colmapDirectory
-            return try TrainingDatasetLoader.loadCOLMAP(
+            dataset = try TrainingDatasetLoader.loadCOLMAP(
                 cameras: files[directory + "/cameras.bin"] ?? Data(),
                 images: files[directory + "/images.bin"] ?? Data(),
                 points3D: files[directory + "/points3D.bin"],
@@ -410,7 +430,7 @@ public enum ProjectBundle {
                 decode: decode
             )
         case .arkit?:
-            return try TrainingDatasetLoader.loadARKit(
+            dataset = try TrainingDatasetLoader.loadARKit(
                 capture: files[ProjectLayout.arkitCapture] ?? Data(),
                 imageData: imageData,
                 maxImageSide: maxImageSide,
@@ -419,27 +439,133 @@ public enum ProjectBundle {
         case nil:
             throw .noViews
         }
+        if !overrides.isEmpty {
+            for index in dataset.views.indices {
+                if let pose = overrides[dataset.views[index].name] {
+                    dataset.views[index].camera = applying(pose, to: dataset.views[index].camera)
+                }
+            }
+        }
+        return dataset
     }
 
     /// Camera poses of the project without decoding any image. Uses the same pose files as
     /// `loadDataset`. A project without a pose source has no cameras, so the result is `[]`.
-    public static func cameraPoses(_ contents: ProjectContents) throws(DatasetError) -> [NamedCamera] {
+    /// With `useRefinedPoses`, the stored refined poses replace the rotation and translation of their cameras.
+    public static func cameraPoses(_ contents: ProjectContents,
+                                   useRefinedPoses: Bool = false) throws(DatasetError) -> [NamedCamera] {
         let files = contents.files
+        let overrides = try refinedOverrides(contents, enabled: useRefinedPoses)
 
+        var cameras: [NamedCamera]
         switch contents.manifest.source {
         case .colmap?:
             let directory = ProjectLayout.colmapDirectory
-            return try TrainingDatasetLoader.cameras(
+            cameras = try TrainingDatasetLoader.cameras(
                 colmapCameras: files[directory + "/cameras.bin"] ?? Data(),
                 colmapImages: files[directory + "/images.bin"] ?? Data()
             )
         case .arkit?:
-            return try TrainingDatasetLoader.cameras(
+            cameras = try TrainingDatasetLoader.cameras(
                 arkitCapture: files[ProjectLayout.arkitCapture] ?? Data()
             )
         case nil:
             return []
         }
+        if !overrides.isEmpty {
+            for index in cameras.indices {
+                if let pose = overrides[cameras[index].name] {
+                    cameras[index].camera = applying(pose, to: cameras[index].camera)
+                }
+            }
+        }
+        return cameras
+    }
+
+    // MARK: - Refined poses
+
+    /// Stores the poses training refined, keyed by image name, in place of any earlier refined poses.
+    /// `cameras` are the training cameras of the run, each named after its image. Non-finite cameras are
+    /// skipped. When nothing is left, the file is removed.
+    public static func withRefinedPoses(_ contents: ProjectContents, cameras: [NamedCamera]) -> ProjectContents {
+        var poses: [String: RefinedPoseRecord] = [:]
+        for named in cameras where isFinite(named.camera) {
+            poses[named.name] = RefinedPoseRecord(pose: RefinedPose(rotation: named.camera.rotation,
+                                                                     translation: named.camera.translation))
+        }
+        var result = contents
+        if poses.isEmpty {
+            result.files[ProjectLayout.refinedPoses] = nil
+        } else {
+            // Finite values always encode. A failure would drop the stale file, never keep it.
+            result.files[ProjectLayout.refinedPoses] = try? encodeRefinedPoses(RefinedPoseFile(poses: poses))
+        }
+        return result
+    }
+
+    /// Removes the stored refined poses, so the project's cameras are the original ones again.
+    public static func withoutRefinedPoses(_ contents: ProjectContents) -> ProjectContents {
+        var result = contents
+        result.files[ProjectLayout.refinedPoses] = nil
+        return result
+    }
+
+    /// The stored refined poses by image name. Empty when the project has none.
+    /// Throws `ProjectError.corruptRefinedPoses` when the file does not decode or holds an invalid pose.
+    public static func refinedPoses(_ contents: ProjectContents) throws(ProjectError) -> [String: RefinedPose] {
+        guard let data = contents.files[ProjectLayout.refinedPoses] else {
+            return [:]
+        }
+        let file: RefinedPoseFile
+        do {
+            file = try JSONDecoder().decode(RefinedPoseFile.self, from: data)
+        } catch {
+            throw .corruptRefinedPoses(String(describing: error))
+        }
+        guard file.version == RefinedPoseFile.currentVersion else {
+            throw .corruptRefinedPoses("unsupported version \(file.version)")
+        }
+        var poses: [String: RefinedPose] = [:]
+        for (name, record) in file.poses {
+            guard let pose = record.pose else {
+                throw .corruptRefinedPoses("invalid pose for \(name)")
+            }
+            poses[name] = pose
+        }
+        return poses
+    }
+
+    /// Stored refined poses to apply, or none when `enabled` is false. Maps a decoding failure to `DatasetError`.
+    private static func refinedOverrides(_ contents: ProjectContents,
+                                         enabled: Bool) throws(DatasetError) -> [String: RefinedPose] {
+        guard enabled else {
+            return [:]
+        }
+        do throws(ProjectError) {
+            return try refinedPoses(contents)
+        } catch {
+            throw .invalidRefinedPoses(String(describing: error))
+        }
+    }
+
+    /// The camera with the refined rotation and translation. Intrinsics and size are unchanged.
+    private static func applying(_ pose: RefinedPose, to camera: Camera) -> Camera {
+        var result = camera
+        result.rotation = pose.rotation
+        result.translation = pose.translation
+        return result
+    }
+
+    private static func isFinite(_ camera: Camera) -> Bool {
+        let r = camera.rotation
+        let values: [SIMD3<Float>] = [r.c0, r.c1, r.c2, camera.translation]
+        return values.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }
+    }
+
+    private static func encodeRefinedPoses(_ file: RefinedPoseFile) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(file)
     }
 
     /// The stored checkpoint, or `nil` when the project has none.
@@ -544,6 +670,8 @@ public enum ProjectBundle {
 
     /// Drops everything an import replaces, then records the new source, input kind, provenance
     /// and image names. The pose method is reset; `importEstimatedPoses` sets it again afterwards.
+    /// Everything under `poses/` goes, which includes `ProjectLayout.refinedPoses`: refined poses
+    /// belong to the poses they refined and are stale after any import.
     private static func clearedForImport(_ contents: ProjectContents,
                                          source: PoseSource,
                                          inputKind: InputKind,
@@ -571,5 +699,42 @@ public enum ProjectBundle {
             result.files[ProjectLayout.imagesDirectory + "/" + name] = data
         }
         return result
+    }
+}
+
+/// `poses/refined.json`: the refined pose of each image, by image name.
+private struct RefinedPoseFile: Codable {
+    static let currentVersion = 1
+
+    var version: Int
+    var poses: [String: RefinedPoseRecord]
+
+    init(poses: [String: RefinedPoseRecord]) {
+        self.version = Self.currentVersion
+        self.poses = poses
+    }
+}
+
+/// One refined pose as stored. The rotation is column-major (c0, c1, c2 as x, y, z triples) and the
+/// translation is (x, y, z). Both map world to camera, as in `Camera`.
+private struct RefinedPoseRecord: Codable {
+    var rotation: [Float]
+    var translation: [Float]
+
+    init(pose: RefinedPose) {
+        let r = pose.rotation
+        rotation = [r.c0.x, r.c0.y, r.c0.z, r.c1.x, r.c1.y, r.c1.z, r.c2.x, r.c2.y, r.c2.z]
+        translation = [pose.translation.x, pose.translation.y, pose.translation.z]
+    }
+
+    /// The pose, or `nil` when an array has the wrong size or a value is not finite.
+    var pose: RefinedPose? {
+        guard rotation.count == 9, translation.count == 3, (rotation + translation).allSatisfy(\.isFinite) else {
+            return nil
+        }
+        let matrix = Matrix3(c0: SIMD3(rotation[0], rotation[1], rotation[2]),
+                             c1: SIMD3(rotation[3], rotation[4], rotation[5]),
+                             c2: SIMD3(rotation[6], rotation[7], rotation[8]))
+        return RefinedPose(rotation: matrix, translation: SIMD3(translation[0], translation[1], translation[2]))
     }
 }

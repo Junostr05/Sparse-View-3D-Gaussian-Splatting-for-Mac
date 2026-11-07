@@ -56,10 +56,15 @@ nonisolated final class EstimatedDepthRecorder: DepthProvider, Sendable {
 /// Depth preparation for a training run: supplied maps first, then the depth model when enabled, then
 /// alignment, then the dense initial cloud. Blocking work runs off the main actor (`@concurrent`).
 nonisolated enum DepthPipeline {
+    /// `useRefinedPoses` starts the run from the stored refined poses (a continuation); `false` uses the original poses.
     @concurrent
-    static func prepare(contents: ProjectContents, store: ModelStore?) async throws -> DepthPreparedRun {
+    static func prepare(contents: ProjectContents,
+                        store: ModelStore?,
+                        useRefinedPoses: Bool = false) async throws -> DepthPreparedRun {
         let configuration: TrainingConfiguration = contents.manifest.training
-        let dataset: TrainingDataset = try ProjectBundle.loadDataset(contents, decode: ImageIODecoder.decode)
+        let dataset: TrainingDataset = try ProjectBundle.loadDataset(contents,
+                                                                     decode: ImageIODecoder.decode,
+                                                                     useRefinedPoses: useRefinedPoses)
 
         var warnings: [String] = []
         let supplied = ProjectBundle.depthMaps(contents)

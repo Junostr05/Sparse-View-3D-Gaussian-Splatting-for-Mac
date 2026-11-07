@@ -21,4 +21,6 @@ public enum DatasetError: Error, Equatable {
     case invalidARKitCapture(String)
     /// The dataset contains no views.
     case noViews
+    /// The stored refined poses (`poses/refined.json`) could not be read. The payload describes the problem.
+    case invalidRefinedPoses(String)
 }

@@ -103,7 +103,7 @@ final class ViewerModel {
     @ObservationIgnored var onDeletionsChanged: ((_ baseCount: Int, _ deleted: [UInt32]) -> Void)?
 
     /// Estimated cameras of the project, in the order the viewer lists them. Empty for a plain .ply scene.
-    let cameras: [NamedCamera]
+    private(set) var cameras: [NamedCamera]
     /// The camera last selected or reached by a flight. `nil` when there are no cameras.
     private(set) var activeCameraIndex: Int?
     /// Fractional position along the camera flight, `0...(cameras.count − 1)`.
@@ -205,6 +205,17 @@ final class ViewerModel {
     private func rebuildCameraViews() {
         cameraViews = cameras.indices.map { cameraView(at: $0) }
         flight = cameraViews.isEmpty ? nil : ViewFlight(keyframes: cameraViews)
+    }
+
+    /// Replaces the camera list, for example with the refined poses a training run stored. Stops any flight
+    /// or playback still running through the old cameras.
+    func replaceCameras(_ cameras: [NamedCamera]) {
+        stopMotion()
+        self.cameras = cameras
+        if let index = activeCameraIndex, index >= cameras.count {
+            activeCameraIndex = nil
+        }
+        rebuildCameraViews()
     }
 
     /// Flies to camera `index`, wrapping around the list.

@@ -102,6 +102,8 @@ nonisolated struct ProjectDocument: FileDocument {
                 return "The project manifest is corrupt: \(detail)."
             case .corruptCheckpoint(let detail):
                 return "The saved checkpoint is corrupt: \(detail)."
+            case .corruptRefinedPoses(let detail):
+                return "The saved refined poses are corrupt: \(detail)."
             }
         }
         return "The project could not be read."
