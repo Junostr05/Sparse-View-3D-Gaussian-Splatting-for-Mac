@@ -45,6 +45,19 @@ public enum InputKind: String, Codable, Sendable {
     case arkit
 }
 
+extension UpAxis {
+    /// The up axis a viewer should start with for a project. COLMAP world frames follow the OpenCV convention
+    /// (-Y up). Apple Photogrammetry (photos, video) and ARKit keep their gravity-aligned +Y-up world; only the
+    /// camera axes are converted on import. Measured on the 13 table photos: the mean camera up vector in the
+    /// world frame is +Y and the cameras sit above the point cloud.
+    public static func forInputKind(_ kind: InputKind?) -> UpAxis {
+        switch kind {
+        case .photos, .video, .arkit: .positiveY
+        case .colmap, nil: .negativeY
+        }
+    }
+}
+
 /// Where one stored image came from. Only written for projects built from frames.
 public struct FrameProvenance: Codable, Sendable, Equatable {
     /// Name of the image under `images/`.

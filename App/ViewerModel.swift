@@ -73,12 +73,12 @@ final class ViewerModel {
     @ObservationIgnored private let bounds: Bounds
     @ObservationIgnored private var lastStatsTime: ContinuousClock.Instant?
 
-    init(scene: LoadedScene) {
+    init(scene: LoadedScene, upAxis: UpAxis = .negativeY) {
         self.scene = scene
         let bounds = scene.cloud.robustBounds()
         self.bounds = bounds
-        self.upAxis = .negativeY
-        self.orbit = OrbitCamera.framing(bounds, upAxis: .negativeY)
+        self.upAxis = upAxis
+        self.orbit = OrbitCamera.framing(bounds, upAxis: upAxis)
         self.shDegreeLimit = scene.cloud.shDegree
     }
 

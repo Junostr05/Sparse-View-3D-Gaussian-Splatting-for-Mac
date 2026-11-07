@@ -264,7 +264,8 @@ final class ProjectModel {
         do {
             guard let cloud = try await ProjectImport.loadCheckpoint(contents) else { return }
             guard viewer == nil else { return }
-            viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0))
+            viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
+                                 upAxis: UpAxis.forInputKind(contents.manifest.inputKind))
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -303,7 +304,8 @@ final class ProjectModel {
             if viewer == nil {
                 let cloud: GaussianCloud = await DepthPipeline.previewCloud(depth)
                 if viewer == nil {
-                    viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0))
+                    viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
+                                         upAxis: UpAxis.forInputKind(contents.manifest.inputKind))
                 }
             }
             // Each run builds its own initial cloud from its own dataset (see `DepthPreparedRun.initializer`).

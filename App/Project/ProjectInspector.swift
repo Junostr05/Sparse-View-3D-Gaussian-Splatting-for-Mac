@@ -24,6 +24,9 @@ struct ProjectInspector: View {
                 SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)
                 trainingSection
             }
+            if let viewer = model.viewer {
+                viewportSection(viewer)
+            }
             if let message = model.errorMessage {
                 Section {
                     Text(message)
@@ -55,6 +58,18 @@ struct ProjectInspector: View {
             LabeledContent("Source", value: sourceName(manifest))
             if let summary = pipeline.poseSummary {
                 LabeledContent("Poses", value: summary)
+            }
+        }
+    }
+
+    /// Which world axis points up in the viewport. The start value follows the capture source.
+    private func viewportSection(_ viewer: ViewerModel) -> some View {
+        let selection = Binding<UpAxis>(get: { viewer.upAxis }, set: { viewer.upAxis = $0 })
+        return Section("Viewport") {
+            Picker("Up Axis", selection: selection) {
+                ForEach(UpAxis.allCases, id: \.self) { axis in
+                    Text(axis.displayName).tag(axis)
+                }
             }
         }
     }
