@@ -14,8 +14,9 @@ struct SparseViewSettingsSection: View {
 
     @State private var isImportingDepth: Bool = false
 
-    /// Anisotropy, scale cap and isolation pruning switch on and off together.
-    private static let artifactKinds: [RegularizerKind] = [.anisotropy, .scaleCap, .isolationPrune]
+    /// Anisotropy and isolation pruning switch on and off together. The scale cap is its own toggle
+    /// and off by default: it hurt reconstruction quality in the measurements.
+    private static let artifactKinds: [RegularizerKind] = [.anisotropy, .isolationPrune]
 
     var body: some View {
         let contents: ProjectContents = document.wrappedValue.contents
@@ -48,7 +49,13 @@ struct SparseViewSettingsSection: View {
 
             Toggle("Artifact regularizers", isOn: artifactBinding)
                 .disabled(model.isTraining)
-            Text("Limits needle-like, oversized and isolated Gaussians.")
+            Text("Limits needle-like and isolated Gaussians.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Toggle("Scale cap", isOn: kindBinding(.scaleCap))
+                .disabled(model.isTraining)
+            Text("Caps oversized Gaussians. Can cost sharpness.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

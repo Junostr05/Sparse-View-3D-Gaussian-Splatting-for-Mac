@@ -38,3 +38,7 @@ Read first, in this order: `CLAUDE.md` (rules, routing, German replies), `docs/A
 - Licensing: never port code from `graphdeco-inria/gaussian-splatting`; only permissive components in the bundle; no new third-party dependencies without asking.
 - Changing a recorded decision requires asking the user (use `anthropic-skills:grill-me`).
 - The cloud session may still push to the same branch (it has CI checks scheduled, e.g. the spike 2 re-run). `git pull --rebase` before pushing.
+
+## Update 2026-11-07 (end of the Mac session)
+
+Items 1–7 above are done: the pose stage is Apple Photogrammetry plus the existing COLMAP import (decision of 2026-11-06), the pipeline UI (P9) and Phase 4 tasks 1–22b are merged, CI is green. Measurements and the decision on training defaults (depth prior, dense init, anisotropy, isolation pruning on; scale cap, pseudo-views, early stopping off) are in `docs/superpowers/plans/2026-11-06-phase-4-addendum-input-pipeline.md`. Still open: click-verify the held-out readout in the app (screen was locked), why pseudo-views and the depth prior lose at 4 synthetic views, a per-view visibility test for the depth alignment, the viewer's default up-axis for Apple-pose projects, and the first run of the benchmark workflow on GitHub.

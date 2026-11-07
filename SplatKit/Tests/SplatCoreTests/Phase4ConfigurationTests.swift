@@ -6,7 +6,7 @@ import SplatCore
 
     @Test func defaultsMatchArchitecture() {
         let config = TrainingConfiguration()
-        #expect(config.regularizers == Set(RegularizerKind.allCases))
+        #expect(config.regularizers == [.depthPearson, .depthL1, .anisotropy, .isolationPrune])
         #expect(RegularizerKind.allCases.count == 6)
         #expect(config.artifacts.maxAxisRatio == 10)
         #expect(config.earlyStopping.minimumViews == 4)
@@ -15,7 +15,10 @@ import SplatCore
         #expect(config.densification.opacityResetInterval == 0)
         #expect(config.configurationRevision == TrainingConfiguration.currentRevision)
         #expect(TrainingConfiguration.currentRevision == 2)
-        #expect(config.isEnabled(.pseudoViews))
+        #expect(!config.isEnabled(.pseudoViews))
+        #expect(!config.isEnabled(.scaleCap))
+        #expect(!config.earlyStopping.isEnabled)
+        #expect(config.denseInit.isEnabled)
     }
 
     @Test func phase3ManifestGetsNewDefaults() throws {
@@ -23,7 +26,7 @@ import SplatCore
             TrainingConfiguration.self,
             from: Data("{\"regularizers\": [], \"iterations\": 50}".utf8)
         )
-        #expect(config.regularizers == Set(RegularizerKind.allCases))
+        #expect(config.regularizers == TrainingConfiguration.defaultRegularizers)
         #expect(config.iterations == 50)
         #expect(config.configurationRevision == 2)
     }

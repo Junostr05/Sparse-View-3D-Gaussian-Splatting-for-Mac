@@ -135,3 +135,43 @@ Consequence for A3/A4 (decision pending, not made here): the built-in Apple prov
 1. **COLMAP delivery (A3/A4 changed):** Apple Photogrammetry is the built-in pose stage; COLMAP is only used through the existing "Import COLMAP…". No bundling, no download, no XPC, no signing work; P6 is dropped. The sandbox stays.
 2. **Depth alignment lives in `SplatDepth`** (as `docs/ARCHITECTURE.md` says), not in `SplatCore` as main-plan decision P13 proposed. Consequence: alignment, depth providers and depth preparation are macOS-only code with macOS tests; `SplatCore` keeps the depth types, the loss, dense init, pseudo-views and the trainer integration, which take already prepared `DepthPrior`s.
 3. **Isolation pruning runs on the CPU** at a wait point, as in main-plan P10.
+
+## Phase 4 measurements and default decision (2026-11-07, Mac session)
+
+Held-out metrics are the only quality signal used. Two data sets: (a) the synthetic scene of `SparseViewQualityTests` (160x120, 3000 iterations, 1200 sphere Gaussians, 200 SfM points, 4 novel views, Metal training); (b) the 13 table photos with Apple poses, 3 held-out views, 5000 iterations, 2 seeds (the seed spread is about 0.3 dB, so differences below 0.3 dB are noise).
+
+### Depth alignment finding (fixed)
+
+The first benchmark showed dense init and the depth prior *hurting*. Cause: the per-view scale/shift fit of the monocular depth to the SfM points used a median-based fit, which fails when more than half of the SfM points are occluded in a view (half the points are on the far side of the object). Raw depth lay on the surface for 93 % of pixels, the aligned depth for only 40 %. The fit now picks the scale/shift with the largest consensus among the points (tolerance 0.05) and refines only on those inliers; afterwards 95 % lie on the surface and the real photos report "10 of 10 views aligned". Tolerance 0.05 was tuned on one scene (53 inliers against 48 required); a per-view visibility test would be the stronger fix and is not done.
+
+### Synthetic benchmark (after the alignment fix), novel-view PSNR in dB, delta to the Phase 3 baseline
+
+| Views | baseline | dense init | + depth prior | + regularizers | + pseudo-views | all | all + leave-one-out |
+|---|---|---|---|---|---|---|---|
+| 3 | 25.47 | -1.19 | **+1.62** | +0.68 | -1.22 | -1.24 | -1.36 |
+| 4 | 29.10 | -2.07 | -0.67 | -1.84 | -1.57 | -1.69 | -1.57 |
+| 6 | 28.47 | +4.07 | **+5.23** | +4.72 | +4.47 | +5.27 | +4.42 |
+
+Axis ratio > 10 drops from 33–46 % of the Gaussians (baseline) to 0–4 %, far floaters are 0 % everywhere. The plan target (every "all" row at least baseline + 1 dB at 3 and 4 views) is **not met**: at 4 views no configuration beats the baseline, and pseudo-views lose 1–3 dB against the depth prior alone at 3 and 4 views. The 6-view result is large because the baseline itself is poor there (random SfM subset), so it says less than it seems.
+
+### Real photos (Apple poses, 3 held-out views, mean of 2 seeds, held-out PSNR / SSIM)
+
+| Configuration | PSNR | SSIM |
+|---|---|---|
+| none (Phase 3) | 14.20 | 0.343 |
+| depth prior + dense init | 14.92 | 0.371 |
+| depth + anisotropy | 14.84 | 0.369 |
+| depth + anisotropy + isolation pruning | 14.70 | 0.367 |
+| depth + anisotropy + isolation + scale cap 0.2 | 14.63 | 0.367 |
+| anisotropy only | 14.77 | 0.353 |
+| isolation pruning only | 14.02 | 0.324 |
+| scale cap only | 13.95 | 0.317 |
+| everything (old default) | 14.57 | 0.358 |
+
+The depth prior is the only component with a clear gain (+0.7 dB, +0.028 SSIM). Anisotropy and isolation pruning are neutral next to the depth prior, but they remove needles and floaters. Scale cap and pseudo-views cost quality on both data sets. Leave-one-out costs twice the training time and gave +0.13 dB at 4 views and -0.85 dB at 6 views in the benchmark.
+
+### Decision (user, 2026-11-07): "measured defaults"
+
+Decision 14 changed. New projects start with the depth prior (Pearson + L1), dense initialisation, anisotropy and isolation pruning **on**; scale cap, pseudo-views and early stopping **off**; all remain switchable in the inspector. `TrainingConfiguration.defaultRegularizers` holds the set, `EarlyStoppingPolicy.offByDefault` the early-stopping default. Stored revision-2 manifests keep what they stored.
+
+Open: pseudo-views losing against the depth prior alone is unexplained (design weakness or a bug, not investigated); the 4-view synthetic regression of the depth prior is unexplained; the benchmark workflow (`.github/workflows/benchmark.yml`) has never run on GitHub.

@@ -214,6 +214,14 @@ public struct EarlyStoppingPolicy: Codable, Sendable, Equatable {
 
     public init() {}
 
+    /// The policy a new `TrainingConfiguration` starts with: switched off, because the Mac-session
+    /// measurements (2026-11-07) showed no reliable gain for twice the training time.
+    public static var offByDefault: EarlyStoppingPolicy {
+        var policy = EarlyStoppingPolicy()
+        policy.isEnabled = false
+        return policy
+    }
+
     /// Every key is optional; missing keys fall back to the defaults above.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -252,15 +260,19 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var logInterval = 10
     public var evalInterval = 500
     public var previewInterval = 200
-    /// Phase 4 features switched on. Defaults to all of them (decision 14).
-    public var regularizers: Set<RegularizerKind> = Set(RegularizerKind.allCases)
+    /// Phase 4 features switched on. Defaults to the set that measured positive or neutral
+    /// (decision 14 revised 2026-11-07): scale cap and pseudo-views are off.
+    public static let defaultRegularizers: Set<RegularizerKind> = [
+        .depthPearson, .depthL1, .anisotropy, .isolationPrune
+    ]
+    public var regularizers: Set<RegularizerKind> = TrainingConfiguration.defaultRegularizers
     /// Leave-one-out: names of views excluded from training and used for evaluation.
     public var heldOutViews: [String] = []
     public var depthPrior = DepthPriorSettings()
     public var pseudoViews = PseudoViewSettings()
     public var artifacts = ArtifactRegularizerSettings()
     public var denseInit = DenseInitSettings()
-    public var earlyStopping = EarlyStoppingPolicy()
+    public var earlyStopping = EarlyStoppingPolicy.offByDefault
 
     public init() {}
 

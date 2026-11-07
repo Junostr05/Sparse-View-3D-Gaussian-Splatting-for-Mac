@@ -23,7 +23,7 @@ A native macOS app that reconstructs a high-quality 3D Gaussian Splatting scene 
 | 11 | Delivery order | **Viewer first** (see *Phases*). |
 | 12 | App model | **Document-based** (`DocumentGroup`) with a `.gsproj` package; one window per project: sidebar, viewport, inspector. |
 | 13 | Distribution | **Open source (Apache-2.0)**, notarized DMG via GitHub Releases. Only commercially usable models in the bundle. |
-| 14 | Artifacts | **Full set on by default**: anisotropy loss, scale cap, opacity + k-NN isolation pruning, pseudo-views with depth regularization. |
+| 14 | Artifacts | **Measured defaults (revised 2026-11-07, user):** on by default are the depth prior with dense initialisation, the anisotropy loss and opacity + k-NN isolation pruning. **Off by default, switchable in the inspector:** scale cap and pseudo-views (both cost 0.5–3 dB in the measurements), and leave-one-out early stopping (decision 5; twice the training time, no reliable gain). Measurements: `docs/superpowers/plans/2026-11-06-phase-4-addendum-input-pipeline.md`. |
 | 15 | SH / opacity | SH degree **1** by default (inspector allows 0–3, warning ≥ 2). Periodic opacity reset **off** (`opacity_reset_interval = 0`). |
 | 16 | Export | `.ply` (standard 3DGS layout), `.splat`, `.spz` — all implemented natively in Swift (`.spz` via Apple's Compression framework). |
 | 17 | Viewer | Uses the **same tile-based forward rasterizer** as training, so preview and result are identical. |

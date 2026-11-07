@@ -45,6 +45,7 @@ struct LeaveOneOutSessionTests {
         configuration.evalInterval = 0
         configuration.densification.startIteration = 0
         configuration.densification.stopIteration = 0
+        configuration.earlyStopping.isEnabled = true
         configuration.earlyStopping.evalInterval = 100
         configuration.earlyStopping.patience = 2
         configuration.earlyStopping.minimumIterations = minimumIterations
