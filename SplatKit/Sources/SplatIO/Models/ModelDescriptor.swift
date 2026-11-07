@@ -145,3 +145,19 @@ public enum ModelCatalog {
 
     public static let all: [ModelDescriptor] = [depthAnythingV2Small]
 }
+
+extension ModelDescriptor {
+    /// Depth Anything 3 Base as a multi-function Core ML package for pose-free estimation (Apache-2.0).
+    /// Not published yet: `baseURL` is `nil`, so the model is never downloaded. The user imports a converted
+    /// package with `ModelStore.importPackage(from:for:)`, and it is found with `ModelStore.importedPackageURL(for:)`.
+    /// Kept out of `ModelCatalog.all` until a download source exists.
+    public static let depthAnything3Base = ModelDescriptor(
+        id: "depth-anything-3-base",
+        displayName: "Depth Anything 3 Base (pose-free)",
+        version: "1",
+        license: "Apache-2.0",
+        baseURL: nil,
+        packageName: "DepthAnything3BaseQ8.mlpackage",
+        files: []
+    )
+}

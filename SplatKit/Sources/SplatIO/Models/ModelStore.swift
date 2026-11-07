@@ -163,6 +163,62 @@ public struct ModelStore: Sendable {
         }
     }
 
+    /// Copies a user-chosen `.mlpackage` directory into the store as the package of `descriptor`.
+    ///
+    /// Only `Manifest.json` is checked, because a user-converted package differs byte-wise from any
+    /// published one. An existing copy is replaced atomically: the copy goes to a temporary sibling first.
+    /// On failure nothing is left behind and any existing copy is kept.
+    public func importPackage(from source: URL, for descriptor: ModelDescriptor) throws {
+        guard isSafeRelativePath(descriptor.packageName) else {
+            throw ModelStoreError.notConfigured
+        }
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: source.appendingPathComponent("Manifest.json").path) else {
+            throw ModelStoreError.io("\(source.lastPathComponent) is not a Core ML package (Manifest.json is missing)")
+        }
+
+        let destination = packageURL(for: descriptor)
+        let parent = destination.deletingLastPathComponent()
+        let temporary = parent.appendingPathComponent(
+            ".\(destination.lastPathComponent).import-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        do {
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            try fileManager.copyItem(at: source, to: temporary)
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw ModelStoreError.io("could not copy the package: \(error.localizedDescription)")
+        }
+
+        do {
+            if fileManager.fileExists(atPath: destination.path) {
+                #if canImport(Darwin)
+                _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+                #else
+                try fileManager.removeItem(at: destination)
+                try fileManager.moveItem(at: temporary, to: destination)
+                #endif
+            } else {
+                try fileManager.moveItem(at: temporary, to: destination)
+            }
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw ModelStoreError.io("could not move the package into place: \(error.localizedDescription)")
+        }
+    }
+
+    /// The imported package of `descriptor`, or `nil` when none is stored. Checks only for `Manifest.json`.
+    /// Unlike `status(for:)`, this works for descriptors without a download source.
+    public func importedPackageURL(for descriptor: ModelDescriptor) -> URL? {
+        guard isSafeRelativePath(descriptor.packageName) else {
+            return nil
+        }
+        let package = packageURL(for: descriptor)
+        let manifest = package.appendingPathComponent("Manifest.json")
+        return FileManager.default.fileExists(atPath: manifest.path) ? package : nil
+    }
+
     /// Streams a file through SHA-256 in 1 MiB chunks and returns the lower-case hex digest.
     static func hashFile(at url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)

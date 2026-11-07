@@ -126,8 +126,10 @@ public final class MonocularDepthEstimator: DepthProvider, @unchecked Sendable {
             .appendingPathComponent(packageURL.deletingPathExtension().lastPathComponent + ".mlmodelc", isDirectory: true)
     }
 
-    private static func loadModel(packageURL: URL,
-                                  configuration: MLModelConfiguration) throws(MonocularDepthError) -> MLModel {
+    /// Loads a `.mlpackage` through the compiled-model cache next to it. Shared with the Depth Anything 3
+    /// pose provider, which sets `configuration.functionName` for its multi-function package.
+    static func loadModel(packageURL: URL,
+                          configuration: MLModelConfiguration) throws(MonocularDepthError) -> MLModel {
         let fileManager: FileManager = FileManager.default
         let cacheURL: URL = compiledCacheURL(for: packageURL)
 
