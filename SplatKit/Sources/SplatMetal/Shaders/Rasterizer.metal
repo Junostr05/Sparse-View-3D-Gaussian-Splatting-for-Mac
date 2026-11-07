@@ -12,10 +12,15 @@ kernel void projectGaussians(
     device int4* outTileRect [[buffer(8)]],
     device uint* outTilesTouched [[buffer(9)]],
     constant ProjectUniforms& u [[buffer(10)]],
+    constant MipFilterUniforms& mip [[buffer(11)]],
+    device const float* samplingRates [[buffer(12)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= u.counts.x) return;
     outTilesTouched[gid] = 0u;
+    // Mip mode (Mip-Splatting): 3D filter on the scales, 2D filter with compensation. The mip 2D variance v2 is
+    // passed in limits.z, in place of eps2D.
+    const bool mipOn = mip.info.x > 0.5f;
 
     float3 pw = float3(positions[3 * gid], positions[3 * gid + 1], positions[3 * gid + 2]);
     float3 pc = float3(dot(u.rotRow0.xyz, pw) + u.rotRow0.w,
@@ -41,6 +46,14 @@ kernel void projectGaussians(
         float3(2.0f * (qx * qy - qw * qz), 1.0f - 2.0f * (qx * qx + qz * qz), 2.0f * (qy * qz + qw * qx)),
         float3(2.0f * (qx * qz + qw * qy), 2.0f * (qy * qz - qw * qx), 1.0f - 2.0f * (qx * qx + qy * qy)));
     float3 s = float3(exp(logScales[3 * gid]), exp(logScales[3 * gid + 1]), exp(logScales[3 * gid + 2]));
+    float opacityFactor = 1.0f;
+    if (mipOn) {
+        // 3D filter: s' = sqrt(s² + v3/ν²), opacity × Π s/s'.
+        float filterVariance = mip.info.y / (samplingRates[gid] * samplingRates[gid]);
+        float3 sRaw = s;
+        s = sqrt(sRaw * sRaw + filterVariance);
+        opacityFactor = (sRaw.x / s.x) * (sRaw.y / s.y) * (sRaw.z / s.z);
+    }
     float3x3 M = float3x3(Rq[0] * s.x, Rq[1] * s.y, Rq[2] * s.z);
     float3x3 sigma3 = M * transpose(M);
 
@@ -62,9 +75,22 @@ kernel void projectGaussians(
                            float3(u.rotRow0.z, u.rotRow1.z, u.rotRow2.z));
     float3 r0 = float3(dot(j0, Rc[0]), dot(j0, Rc[1]), dot(j0, Rc[2]));
     float3 r1 = float3(dot(j1, Rc[0]), dot(j1, Rc[1]), dot(j1, Rc[2]));
-    float a = dot(r0, sigma3 * r0) + u.limits.z;
+    float a = dot(r0, sigma3 * r0);
     float b = dot(r0, sigma3 * r1);
-    float c = dot(r1, sigma3 * r1) + u.limits.z;
+    float c = dot(r1, sigma3 * r1);
+    float compensation = 1.0f;
+    if (mipOn) {
+        // 2D filter: Σ' = Σ + v2·I, opacity × sqrt(det Σ / det Σ') with det Σ clamped below.
+        float rawDet = max(a * c - b * b, 1.0e-12f);
+        a += u.limits.z;
+        c += u.limits.z;
+        float filteredDet = a * c - b * b;
+        if (!(filteredDet > 0.0f)) return;
+        compensation = sqrt(rawDet / filteredDet);
+    } else {
+        a += u.limits.z;
+        c += u.limits.z;
+    }
 
     float det = a * c - b * b;
     if (det <= 0.0f) return;
@@ -92,6 +118,9 @@ kernel void projectGaussians(
     float3 color = max(raw + 0.5f, float3(0.0f));
 
     float opacity = 1.0f / (1.0f + exp(-opacityLogits[gid]));
+    if (mipOn) {
+        opacity *= opacityFactor * compensation;
+    }
 
     outMeanDepth[gid] = float4(mean.x, mean.y, z, radius);
     outConicOpacity[gid] = float4(conic.x, conic.y, conic.z, opacity);

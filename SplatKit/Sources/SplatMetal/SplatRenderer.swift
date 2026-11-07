@@ -72,6 +72,10 @@ public final class SplatRenderer {
     /// Bound to the depth slots of the forward and backward kernels when no depth buffer is given.
     private var dummyDepth: MTLBuffer?
 
+    /// Per Gaussian: sampling rate ν of the Mip-Splatting 3D filter (`GPUSamplingRate`). Read only when the
+    /// settings' `mipFilter` is on; the trainer keeps it current. Must hold at least `gaussians.count` floats.
+    public var samplingRateBuffer: MTLBuffer?
+
     /// What the backward pass needs from the most recent successful forward pass.
     private struct LastFrame {
         var camera: Camera
@@ -190,6 +194,8 @@ public final class SplatRenderer {
                 throw .commandFailed("cannot create command buffer")
             }
             var uniforms = makeProjectUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY)
+            var mipUniforms = makeMipUniforms(settings: settings)
+            let ratesBinding = try samplingRatesBinding(settings: settings)
 
             let encoder = try context.makeComputeEncoder(commandBufferA)
             encoder.setComputePipelineState(projectPipeline)
@@ -204,6 +210,8 @@ public final class SplatRenderer {
             encoder.setBuffer(rectBuffer, offset: 0, index: 8)
             encoder.setBuffer(touchedBuffer, offset: 0, index: 9)
             encoder.setBytes(&uniforms, length: MemoryLayout<ProjectUniforms>.size, index: 10)
+            encoder.setBytes(&mipUniforms, length: MemoryLayout<MipFilterUniforms>.size, index: 11)
+            encoder.setBuffer(ratesBinding, offset: 0, index: 12)
             MetalContext.dispatch1D(encoder, pipeline: projectPipeline, count: n)
             encoder.endEncoding()
 
@@ -342,17 +350,36 @@ public final class SplatRenderer {
         let rot = camera.rotation
         let t = camera.translation
         let c = camera.center
+        // In mip mode the kernels take the 2D filter variance v2 in the eps2D slot.
+        let eps2D = settings.mipFilter.isEnabled ? settings.mipFilter.filter2DVariance : settings.eps2D
         return ProjectUniforms(
             rotRow0: SIMD4(rot.c0.x, rot.c1.x, rot.c2.x, t.x),
             rotRow1: SIMD4(rot.c0.y, rot.c1.y, rot.c2.y, t.y),
             rotRow2: SIMD4(rot.c0.z, rot.c1.z, rot.c2.z, t.z),
             camCenter: SIMD4(c.x, c.y, c.z, 0),
             intrinsics: SIMD4(camera.fx, camera.fy, camera.cx, camera.cy),
-            limits: SIMD4(settings.nearPlane, settings.farPlane, settings.eps2D, 0),
+            limits: SIMD4(settings.nearPlane, settings.farPlane, eps2D, 0),
             counts: SIMD4(UInt32(store.count), UInt32(camera.width), UInt32(camera.height), UInt32(tilesX)),
             shInfo: SIMD4(UInt32(tilesY), UInt32(evalDegree),
                           UInt32(GaussianCloud.coefficientCount(degree: store.shDegree)),
                           accumulate ? 1 : 0))
+    }
+
+    private func makeMipUniforms(settings: RasterSettings) -> MipFilterUniforms {
+        let mip = settings.mipFilter
+        return MipFilterUniforms(info: SIMD4(mip.isEnabled ? 1 : 0, mip.filter3DVariance, 0, 0))
+    }
+
+    /// The sampling-rate buffer when the mip filters are on (an error if it is missing), else any valid buffer,
+    /// which the kernels do not read.
+    private func samplingRatesBinding(settings: RasterSettings) throws(MetalError) -> MTLBuffer {
+        if settings.mipFilter.isEnabled {
+            guard let buffer = samplingRateBuffer else {
+                throw .commandFailed("mip filter needs samplingRateBuffer")
+            }
+            return buffer
+        }
+        return gaussians.positions
     }
 
     private func makeRasterUniforms(camera: Camera, settings: RasterSettings,
@@ -476,6 +503,8 @@ extension SplatRenderer {
         var projectUniforms = makeProjectUniforms(camera: frame.camera, settings: frame.settings,
                                                   tilesX: frame.tilesX, tilesY: frame.tilesY,
                                                   accumulate: accumulate)
+        var mipUniforms = makeMipUniforms(settings: frame.settings)
+        let ratesBinding = try samplingRatesBinding(settings: frame.settings)
         let projectEncoder = try context.makeComputeEncoder(commandBuffer)
         projectEncoder.setComputePipelineState(projectBackwardPipeline)
         projectEncoder.setBuffer(store.positions, offset: 0, index: 0)
@@ -491,6 +520,8 @@ extension SplatRenderer {
         projectEncoder.setBuffer(gradients.opacityLogits, offset: 0, index: 10)
         projectEncoder.setBuffer(gradients.sh, offset: 0, index: 11)
         projectEncoder.setBytes(&projectUniforms, length: MemoryLayout<ProjectUniforms>.size, index: 12)
+        projectEncoder.setBytes(&mipUniforms, length: MemoryLayout<MipFilterUniforms>.size, index: 13)
+        projectEncoder.setBuffer(ratesBinding, offset: 0, index: 14)
         MetalContext.dispatch1D(projectEncoder, pipeline: projectBackwardPipeline, count: n)
         projectEncoder.endEncoding()
     }

@@ -26,6 +26,11 @@ struct ProjectUniforms {
                          // w: 1 = accumulate parameter gradients (add) instead of overwriting them (Phase 4)
 };
 
+// Mirrors `MipFilterUniforms` in ShaderTypes.swift (16 bytes). Read by the projection kernels only in mip mode.
+struct MipFilterUniforms {
+    float4 info;         // x: 1 = mip filters on (Mip-Splatting 2D filter and 3D filter), 0 = classic; y: v3 (3D variance)
+};
+
 // Mirrors `DuplicateUniforms` in ShaderTypes.swift (16 bytes).
 struct DuplicateUniforms {
     uint4 info;          // gaussian count, tilesX, tilesY, unused

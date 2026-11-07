@@ -20,6 +20,31 @@ struct ProjectUniforms {
     var shInfo: SIMD4<UInt32>
 }
 
+/// MSL `MipFilterUniforms`, 16 bytes. `info.x`: 1 = mip filters on, `info.y`: v3 (3D filter variance).
+struct MipFilterUniforms {
+    var info: SIMD4<Float>
+}
+
+/// MSL `SamplingCamera`, 80 bytes: one training camera for the sampling-rate kernel.
+struct SamplingCameraUniforms {
+    /// xyz: row 0 of the camera rotation, w: t.x.
+    var rotRow0: SIMD4<Float>
+    /// xyz: row 1 of the camera rotation, w: t.y.
+    var rotRow1: SIMD4<Float>
+    /// xyz: row 2 of the camera rotation, w: t.z.
+    var rotRow2: SIMD4<Float>
+    /// fx, fy, cx, cy.
+    var intrinsics: SIMD4<Float>
+    /// width, height, near, unused.
+    var size: SIMD4<Float>
+}
+
+/// MSL `SamplingUniforms`, 16 bytes.
+struct SamplingUniforms {
+    /// Gaussian count, camera count, unused, unused.
+    var counts: SIMD4<UInt32>
+}
+
 /// MSL `DuplicateUniforms`, 16 bytes.
 struct DuplicateUniforms {
     /// gaussian count, tilesX, tilesY, unused.

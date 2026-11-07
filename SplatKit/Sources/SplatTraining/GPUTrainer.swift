@@ -145,6 +145,12 @@ public final class GPUTrainer {
     /// with a depth prior.
     private var renderedDepthBuffer: MTLBuffer?
     private var depthGradientBuffer: MTLBuffer?
+    /// Anti-aliasing (Mip-Splatting). The sampling-rate kernel exists only when `antiAliasing.isEnabled`; the
+    /// buffer holds ν per Gaussian and is shared with `renderer.samplingRateBuffer`.
+    private let samplingRateKernel: GPUSamplingRate?
+    private var samplingRateBuffer: MTLBuffer?
+    /// True when ν must be recomputed before the next forward pass (start, after densification and pruning).
+    private var samplingRatesStale = true
     /// Command buffers committed since the last wait point.
     private var pending: [MTLCommandBuffer] = []
     /// 0-based index of the most recent step whose losses have not been validated yet.
@@ -242,6 +248,12 @@ public final class GPUTrainer {
         let regularizers = try metalCall { () throws(MetalError) -> GPURegularizers in
             try GPURegularizers(context: context)
         }
+        var samplingRateKernel: GPUSamplingRate?
+        if configuration.antiAliasing.isEnabled {
+            samplingRateKernel = try metalCall { () throws(MetalError) -> GPUSamplingRate in
+                try GPUSamplingRate(context: context)
+            }
+        }
         var targets: [MTLBuffer] = []
         targets.reserveCapacity(dataset.views.count)
         for view in dataset.views {
@@ -318,6 +330,7 @@ public final class GPUTrainer {
         self.imageLoss = imageLoss
         self.adam = adam
         self.densifier = densifier
+        self.samplingRateKernel = samplingRateKernel
         self.phase4Terms = phase4Terms
         self.depthTerm = depthTerm
         self.maxGaussians = budget
@@ -348,10 +361,13 @@ public final class GPUTrainer {
 
     /// The first `gaussianCount` Gaussians as a CPU cloud. Waits for the GPU first, and throws if the
     /// most recent step's loss is non-finite.
+    /// With anti-aliasing on, the 3D filter is baked into the returned scales and opacities (logScale = log s',
+    /// opacity = o · Π s/s'), using the current sampling rates, so exporters and the viewer see one consistent model.
     public func snapshot() throws(TrainingError) -> GaussianCloud {
         try guarded { () throws(TrainingError) -> GaussianCloud in
             _ = try self.synchronize()
-            return self.store.snapshot()
+            let cloud = self.store.snapshot()
+            return try self.bakedSnapshot(cloud)
         }
     }
 
@@ -364,8 +380,10 @@ public final class GPUTrainer {
         let camera = view.camera
         let width = camera.width
         let height = camera.height
-        let settings = RasterSettings(shDegreeLimit: configuration.activeSHDegree(iteration: index),
+        var settings = RasterSettings(shDegreeLimit: configuration.activeSHDegree(iteration: index),
                                       background: configuration.background)
+        settings.mipFilter = trainingMipFilter
+        try refreshSamplingRatesIfDue(iteration: index)
         let texture = try renderTarget(width: width, height: height)
         let gradientImage = try imageGradientBuffer(pixelCount: width * height)
 
@@ -467,12 +485,14 @@ public final class GPUTrainer {
                 gradients = try makeGradients()
             }
             summary = result
+            samplingRatesStale = true
         }
 
         // Step 10: isolation pruning at its boundaries. Runs after densification, which has waited.
         var isolationPruned: Int?
         if isIsolationStep {
             isolationPruned = try pruneIsolated(iteration: completed)
+            samplingRatesStale = true
         }
 
         return StepReport(iteration: completed, loss: readout.image, visibleGaussians: pass.visibleGaussians,
@@ -632,6 +652,71 @@ public final class GPUTrainer {
             throw .metal(resetBuffer.error?.localizedDescription ?? "unknown GPU error")
         }
         return pruned
+    }
+
+    // MARK: - Anti-aliasing (Mip-Splatting)
+
+    /// Mip filter of the training passes; classic when anti-aliasing is off. The CPU sampling-rate array is not
+    /// used here: the Metal path reads `samplingRateBuffer`.
+    private var trainingMipFilter: MipFilter {
+        let aa = configuration.antiAliasing
+        return MipFilter(isEnabled: aa.isEnabled, filter2DVariance: aa.filter2DVariance,
+                         filter3DVariance: aa.filter3DVariance)
+    }
+
+    /// Recomputes ν when it is stale or when the sampling-rate interval falls on this iteration. The command buffer
+    /// is committed here and runs before the forward pass that follows on the same queue, so no wait is needed.
+    private func refreshSamplingRatesIfDue(iteration index: Int) throws(TrainingError) {
+        guard let kernel = samplingRateKernel else { return }
+        let interval = configuration.antiAliasing.samplingRateInterval
+        let scheduled = interval > 0 && index % interval == 0
+        guard samplingRatesStale || scheduled else { return }
+        try encodeSamplingRates(kernel)
+    }
+
+    /// Encodes ν for the current cloud into the shared buffer, commits it and returns it.
+    @discardableResult
+    private func encodeSamplingRates(_ kernel: GPUSamplingRate) throws(TrainingError) -> MTLCommandBuffer {
+        let buffer = try growableBuffer(&samplingRateBuffer, bytes: store.capacity * MemoryLayout<Float>.size)
+        guard let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw .metal("cannot create command buffer")
+        }
+        let cameras = views.map { $0.camera }
+        try metalCall { () throws(MetalError) -> Void in
+            try kernel.encode(positions: self.store.positions, count: self.store.count, cameras: cameras,
+                              near: GPUTrainer.depthNearPlane, into: buffer, commandBuffer: commandBuffer)
+        }
+        commandBuffer.commit()
+        pending.append(commandBuffer)
+        renderer.samplingRateBuffer = buffer
+        samplingRatesStale = false
+        return commandBuffer
+    }
+
+    /// `cloud` with the 3D filter baked in (`GaussianCloud.bakingSmoothing3D`) when anti-aliasing is on, using the
+    /// current sampling rates. Waits for a sampling-rate pass that is still pending.
+    private func bakedSnapshot(_ cloud: GaussianCloud) throws(TrainingError) -> GaussianCloud {
+        guard configuration.antiAliasing.isEnabled, let kernel = samplingRateKernel else {
+            return cloud
+        }
+        if samplingRatesStale {
+            let commandBuffer = try encodeSamplingRates(kernel)
+            commandBuffer.waitUntilCompleted()
+            if commandBuffer.status == .error {
+                throw .metal(commandBuffer.error?.localizedDescription ?? "unknown GPU error")
+            }
+        }
+        guard let buffer = samplingRateBuffer, cloud.count > 0 else {
+            return cloud
+        }
+        let rates = buffer.contents().bindMemory(to: Float.self, capacity: cloud.count)
+        let v3 = configuration.antiAliasing.filter3DVariance
+        var filterVariances = [Float](repeating: 0, count: cloud.count)
+        for i in 0..<cloud.count {
+            let nu = rates[i]
+            filterVariances[i] = v3 / (nu * nu)
+        }
+        return cloud.bakingSmoothing3D(filterVariances: filterVariances)
     }
 
     // MARK: - Resources
