@@ -3,6 +3,11 @@ name: Sparse-view benchmark
 # Manual only: trains every sparse-view configuration on the macOS runner (paravirtual GPU) and uploads the table.
 on:
   workflow_dispatch:
+    inputs:
+      perturb:
+        description: "Perturb the training views (exposure, camera error) for the v1.2 feature rows"
+        type: boolean
+        default: false
 
 jobs:
   benchmark:
@@ -16,6 +21,7 @@ jobs:
         working-directory: SplatKit
         env:
           SPLAT_BENCHMARK: "1"
+          SPLAT_BENCHMARK_PERTURB: ${{ inputs.perturb && '1' || '0' }}
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/benchmark"

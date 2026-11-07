@@ -281,6 +281,8 @@ private struct BenchmarkVariant {
     let prepared: Bool
     let regularizers: Set<RegularizerKind>
     let leaveOneOut: Bool
+    /// Extra settings (the v1.2 features) applied to the configuration before training. Nil for the Phase 4 rows.
+    var configure: (@Sendable (inout TrainingConfiguration) -> Void)? = nil
 }
 
 private struct BenchmarkRow {
@@ -312,7 +314,101 @@ private let benchmarkVariants: [BenchmarkVariant] = [
                      regularizers: Set(RegularizerKind.allCases), leaveOneOut: false),
     BenchmarkVariant(name: "all + leave-one-out", denseInit: true, prepared: true,
                      regularizers: Set(RegularizerKind.allCases), leaveOneOut: true),
+    // v1.2 features (default off), each on top of the "defaults" row.
+    BenchmarkVariant(name: "defaults + exposure compensation", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.appearance.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "defaults + anti-aliasing", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.antiAliasing.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "defaults + MCMC densification", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.mcmc.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "defaults + pose refinement", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.poseRefinement.isEnabled = true
+                     }),
+    BenchmarkVariant(name: "defaults + all four", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.appearance.isEnabled = true
+                         configuration.antiAliasing.isEnabled = true
+                         configuration.mcmc.isEnabled = true
+                         configuration.poseRefinement.isEnabled = true
+                     }),
 ]
+
+/// `SPLAT_BENCHMARK_PERTURB=1`: training views get a realistic error the v1.2 features are meant to absorb.
+enum SparseViewBenchmarkPerturbation {
+    static var isEnabled: Bool {
+        ProcessInfo.processInfo.environment["SPLAT_BENCHMARK_PERTURB"] == "1"
+    }
+}
+
+/// Perturbed copy of `scene` for the benchmark. Every training view gets a seeded gain in [0.8, 1.25] and bias in
+/// [-0.04, 0.04] (result clamped to 0…1), and its camera is rotated by 0.5° about a random axis and shifted by 1 %
+/// of the scene radius in a random direction. Novel views, ground truth, depth maps and points stay exact.
+/// `SyntheticScene` itself is untouched; the depth priors are then prepared from this copy like the clean path.
+private func perturbedTrainingViews(_ scene: SyntheticScene, radius: Float, seed: UInt64) -> SyntheticScene {
+    var generator = SeededGenerator(seed: seed &+ 0xB0B5)
+    var perturbed: SyntheticScene = scene
+    perturbed.train = scene.train.map { (view: TrainingView) -> TrainingView in
+        let gain: Float = Float.random(in: 0.8...1.25, using: &generator)
+        let bias: Float = Float.random(in: -0.04...0.04, using: &generator)
+        let rotationAxis: SIMD3<Float> = randomUnitVector(&generator)
+        let shiftDirection: SIMD3<Float> = randomUnitVector(&generator)
+        let rotationError: Matrix3 = rotationMatrix(axis: rotationAxis, angle: 0.5 * Float.pi / 180)
+        let shift: SIMD3<Float> = shiftDirection * (0.01 * radius)
+
+        var changed: TrainingView = view
+        let biasVector: SIMD3<Float> = SIMD3<Float>(repeating: bias)
+        let lower: SIMD3<Float> = SIMD3<Float>(repeating: 0)
+        let upper: SIMD3<Float> = SIMD3<Float>(repeating: 1)
+        changed.image.pixels = view.image.pixels.map { (pixel: SIMD3<Float>) -> SIMD3<Float> in
+            let scaled: SIMD3<Float> = pixel * gain + biasVector
+            return pointwiseMin(pointwiseMax(scaled, lower), upper)
+        }
+        changed.camera.rotation = rotationError * view.camera.rotation
+        changed.camera.translation = view.camera.translation + shift
+        return changed
+    }
+    return perturbed
+}
+
+/// Uniform direction on the unit sphere (rejection sampling in the cube, seeded).
+private func randomUnitVector(_ generator: inout SeededGenerator) -> SIMD3<Float> {
+    while true {
+        let x: Float = Float.random(in: -1...1, using: &generator)
+        let y: Float = Float.random(in: -1...1, using: &generator)
+        let z: Float = Float.random(in: -1...1, using: &generator)
+        let vector: SIMD3<Float> = SIMD3<Float>(x, y, z)
+        let squared: Float = (vector * vector).sum()
+        if squared > 1e-4 && squared <= 1 {
+            return vector / squared.squareRoot()
+        }
+    }
+}
+
+/// Rodrigues rotation matrix for a unit `axis` and `angle` in radians (row-major rows).
+private func rotationMatrix(axis: SIMD3<Float>, angle: Float) -> Matrix3 {
+    let c: Float = cos(angle)
+    let s: Float = sin(angle)
+    let t: Float = 1 - c
+    let x: Float = axis.x
+    let y: Float = axis.y
+    let z: Float = axis.z
+    let row0: SIMD3<Float> = SIMD3<Float>(c + x * x * t, x * y * t - z * s, x * z * t + y * s)
+    let row1: SIMD3<Float> = SIMD3<Float>(y * x * t + z * s, c + y * y * t, y * z * t - x * s)
+    let row2: SIMD3<Float> = SIMD3<Float>(z * x * t - y * s, z * y * t + x * s, c + z * z * t)
+    return Matrix3(rows: [row0, row1, row2])
+}
 
 @Suite(.serialized, .enabled(if: SparseViewBenchmarkGate.isEnabled), .enabled(if: TrainingTestEnvironment.hasMetal))
 struct SparseViewBenchmark {
@@ -325,17 +421,24 @@ struct SparseViewBenchmark {
         var rows: [BenchmarkRow] = []
 
         // SPLAT_BENCHMARK_SEED (default 5) and SPLAT_BENCHMARK_VIEWS (e.g. "4", default "3,4,6") narrow the run.
+        // SPLAT_BENCHMARK_PERTURB=1 perturbs the training views (see `perturbedTrainingViews`).
         let environment = ProcessInfo.processInfo.environment
         let seed: UInt64 = environment["SPLAT_BENCHMARK_SEED"].flatMap { UInt64($0) } ?? 5
+        let perturbed: Bool = SparseViewBenchmarkPerturbation.isEnabled
         let viewCounts: [Int] = environment["SPLAT_BENCHMARK_VIEWS"]
             .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [3, 4, 6]
         for views in viewCounts {
-            let scene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
-                                            gaussians: 1_200, sparsePoints: 200, seed: seed)
+            let cleanScene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
+                                                 gaussians: 1_200, sparsePoints: 200, seed: seed)
+            // Metrics use the clean scene's extent so that perturbed and clean tables share the same shape thresholds.
+            let extent: SceneExtent = sceneExtent(cleanScene)
+            let scene: SyntheticScene = perturbed
+                ? perturbedTrainingViews(cleanScene, radius: extent.radius, seed: seed)
+                : cleanScene
             let prepared = preparedDataset(scene)
-            let extent: SceneExtent = sceneExtent(scene)
             for variant in benchmarkVariants {
                 var mutableConfiguration = makeConfiguration(iterations: iterations, regularizers: variant.regularizers)
+                variant.configure?(&mutableConfiguration)
                 // Early stopping is off in the default configuration, so the leave-one-out rows switch it on.
                 mutableConfiguration.earlyStopping.isEnabled = variant.leaveOneOut
                 let configuration: TrainingConfiguration = mutableConfiguration
@@ -375,13 +478,16 @@ struct SparseViewBenchmark {
             }
         }
 
-        printTable(rows, iterations: iterations)
+        printTable(rows, iterations: iterations, perturbed: perturbed)
     }
 
-    private func printTable(_ rows: [BenchmarkRow], iterations: Int) {
+    private func printTable(_ rows: [BenchmarkRow], iterations: Int, perturbed: Bool) {
         print("")
-        print("Sparse-view benchmark (SPLAT_BENCHMARK=1)")
-        print("Parameters: 160×120 images, \(iterations) iterations, 4 novel views, synthetic scene with 1200 sphere Gaussians and 200 SfM points, seed 5, SH degree 0, default schedules, Metal training, CPU novel-view rendering.")
+        print(perturbed ? "Sparse-view benchmark (SPLAT_BENCHMARK=1, perturbed)" : "Sparse-view benchmark (SPLAT_BENCHMARK=1)")
+        let perturbation: String = perturbed
+            ? " Training views perturbed: gain 0.8–1.25, bias ±0.04, camera rotation 0.5°, shift 1 % of the scene radius; novel views exact."
+            : ""
+        print("Parameters: 160×120 images, \(iterations) iterations, 4 novel views, synthetic scene with 1200 sphere Gaussians and 200 SfM points, seed 5, SH degree 0, default schedules, Metal training, CPU novel-view rendering.\(perturbation)")
         print("")
         print("| Configuration | Views | Novel PSNR (dB) | Δ PSNR vs baseline | Novel SSIM | Depth Pearson | Axis ratio > 10 (%) | Beyond 2R (%) | Gaussians | Iterations | Target |")
         print("|---|---|---|---|---|---|---|---|---|---|---|")
