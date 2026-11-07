@@ -287,4 +287,126 @@ private let vtBounds = Bounds(min: SIMD3(-1, -2, -3), max: SIMD3(2, 1, 0.5))
         camera.zoom(factor: 1e-12)
         #expect(camera.distance == camera.minDistance)
     }
+
+    @Test func setDepthKeepsEyeAndForwardAndClamps() {
+        var camera = ViewCamera.framing(vtBounds, upAxis: .negativeY)
+        camera.orbit(deltaYaw: 0.4, deltaPitch: 0.15)
+        let eye = camera.eye
+        let forward = camera.forward
+        camera.setDepth(3.5)
+        #expect(approxEqual(camera.eye, eye, tol: 1e-5))
+        #expect(approxEqual(camera.forward, forward, tol: 1e-6))
+        #expect(abs(camera.distance - 3.5) < 1e-5)
+        #expect(approxEqual(camera.pivot, eye + forward * 3.5, tol: 1e-4))
+
+        camera.setDepth(1e9)
+        #expect(camera.distance == camera.maxDistance)
+        camera.setDepth(-4)
+        #expect(camera.distance == camera.minDistance)
+        #expect(approxEqual(camera.eye, eye, tol: 1e-4))
+    }
+
+    @Test func lookAroundKeepsEyeAndOrthonormality() {
+        for upAxis in UpAxis.allCases {
+            var camera = vtRolled(ViewCamera.framing(vtBounds, upAxis: upAxis), by: 0.3)
+            var rng = SeededGenerator(seed: 23)
+            for _ in 0..<500 {
+                let eye = camera.eye
+                let distance = camera.distance
+                camera.lookAround(deltaYaw: Float.random(in: -0.5...0.5, using: &rng),
+                                  deltaPitch: Float.random(in: -0.5...0.5, using: &rng))
+                #expect(approxEqual(camera.eye, eye, tol: 1e-4), "\(upAxis) eye moved")
+                #expect(abs(camera.distance - distance) < 1e-6)
+                #expect(vtIsOrthonormal(camera), "\(upAxis) lost orthonormality")
+                #expect(abs(vtDot(camera.forward, upAxis.vector)) <= ViewCamera.maxUpAlignment + 1e-5)
+            }
+        }
+    }
+
+    @Test func lookAroundKeepsRoll() {
+        let camera = vtRolled(ViewCamera.framing(vtBounds, upAxis: .negativeY), by: Float.pi / 8)
+        let up = SIMD3<Float>(0, -1, 0)
+        let rollBefore = asin(vtDot(camera.right, up))
+        var looking = camera
+        looking.lookAround(deltaYaw: 0.6, deltaPitch: 0.2)
+        #expect(abs(asin(vtDot(looking.right, up)) - rollBefore) < 1e-4)
+    }
+
+    @Test func moveEyeTranslatesByExactAmounts() {
+        for upAxis in UpAxis.allCases {
+            var camera = vtRolled(ViewCamera.framing(vtBounds, upAxis: upAxis), by: 0.2)
+            camera.orbit(deltaYaw: 0.3, deltaPitch: 0.1)
+            let eye = camera.eye
+            let pivot = camera.pivot
+            let right = camera.right
+            let forward = camera.forward
+            let up = upAxis.vector
+            let expected: SIMD3<Float> = right * 1.5 + up * -0.75 + forward * 2.0
+            camera.moveEye(right: 1.5, up: -0.75, forward: 2)
+            #expect(approxEqual(camera.eye, eye + expected, tol: 1e-4), "\(upAxis) eye")
+            #expect(approxEqual(camera.pivot, pivot + expected, tol: 1e-4), "\(upAxis) pivot")
+            #expect(approxEqual(camera.right, right, tol: 1e-6))
+            #expect(approxEqual(camera.forward, forward, tol: 1e-6))
+            #expect(vtIsOrthonormal(camera))
+        }
+    }
+
+    @Test func orbitAroundPivotEqualsOrbit() {
+        for upAxis in UpAxis.allCases {
+            var reference = vtRolled(ViewCamera.framing(vtBounds, upAxis: upAxis), by: 0.4)
+            var anchored = reference
+            var rng = SeededGenerator(seed: 31)
+            for _ in 0..<200 {
+                let yaw = Float.random(in: -0.6...0.6, using: &rng)
+                let pitch = Float.random(in: -0.6...0.6, using: &rng)
+                reference.orbit(deltaYaw: yaw, deltaPitch: pitch)
+                anchored.orbit(around: anchored.pivot, deltaYaw: yaw, deltaPitch: pitch)
+                #expect(approxEqual(anchored.pivot, reference.pivot, tol: 1e-4), "\(upAxis) pivot")
+                #expect(approxEqual(anchored.eye, reference.eye, tol: 1e-4), "\(upAxis) eye")
+                #expect(approxEqual(anchored.forward, reference.forward, tol: 1e-5))
+                #expect(approxEqual(anchored.right, reference.right, tol: 1e-5))
+            }
+        }
+    }
+
+    @Test func orbitAroundPointKeepsPointUnderPixelAndRoll() {
+        for upAxis in UpAxis.allCases {
+            var camera = vtRolled(ViewCamera.framing(vtBounds, upAxis: upAxis), by: 0.35)
+            let point = SIMD3<Float>(0.3, -0.4, 0.2)
+            let up = upAxis.vector
+            let rollBefore = asin(vtDot(camera.right, up))
+            let distance = camera.distance
+            var rng = SeededGenerator(seed: 41)
+            let startCamera: Camera = camera.camera(width: 640, height: 480)
+            let before: SIMD3<Float> = startCamera.rotation * point + startCamera.translation
+            for _ in 0..<300 {
+                camera.orbit(around: point,
+                             deltaYaw: Float.random(in: -0.4...0.4, using: &rng),
+                             deltaPitch: Float.random(in: -0.4...0.4, using: &rng))
+                let cam = camera.camera(width: 640, height: 480)
+                let after: SIMD3<Float> = cam.rotation * point + cam.translation
+                #expect(approxEqual(after, before, tol: 1e-3), "\(upAxis) point moved in camera space")
+                #expect(vtIsOrthonormal(camera), "\(upAxis) lost orthonormality")
+                #expect(abs(vtDot(camera.forward, up)) <= ViewCamera.maxUpAlignment + 1e-5)
+                #expect(abs(camera.distance - distance) < 1e-6)
+            }
+            // Roll is kept by the rotation about the point, as for orbit.
+            camera.orbit(around: point, deltaYaw: 0.5, deltaPitch: 0)
+            #expect(abs(asin(vtDot(camera.right, up)) - rollBefore) < 1e-4)
+        }
+    }
+
+    @Test func orbitAroundPointFromAPivotThatIsNotThePoint() {
+        // The eye is unchanged by a pure orbit about the eye, but a point off the view axis moves on an arc
+        // while staying at the same camera coordinates.
+        var camera = ViewCamera.framing(vtBounds, upAxis: .negativeY)
+        let point = camera.eye + camera.right * 1.2 + camera.forward * 3
+        let before: SIMD3<Float> = camera.camera(width: 640, height: 480).rotation * point
+            + camera.camera(width: 640, height: 480).translation
+        let eyeBefore = camera.eye
+        camera.orbit(around: point, deltaYaw: 0.5, deltaPitch: -0.2)
+        let cam = camera.camera(width: 640, height: 480)
+        #expect(approxEqual(cam.rotation * point + cam.translation, before, tol: 1e-4))
+        #expect(!approxEqual(camera.eye, eyeBefore, tol: 1e-3), "the eye must move on the arc")
+    }
 }

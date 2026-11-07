@@ -23,6 +23,7 @@ struct ViewerShortcutsView: View {
             Entry(keys: "\u{2303} + wheel / \u{21E7} + wheel", action: "Pan horizontally / vertically"),
             Entry(keys: "Left drag", action: "Orbit (\u{2325} pans)"),
             Entry(keys: "Right drag", action: "Pan"),
+            Entry(keys: "Press or first scroll", action: "Pivot at the surface under the cursor"),
         ]),
         Group(title: "Trackpad", entries: [
             Entry(keys: "Two-finger scroll", action: "Orbit"),
@@ -42,6 +43,15 @@ struct ViewerShortcutsView: View {
             Entry(keys: "A / \u{2325} + A / \u{2303} + I", action: "Select all / clear / invert"),
             Entry(keys: "F", action: "Front-only brush on / off"),
             Entry(keys: "\u{2318} + Z / \u{21E7}\u{2318} + Z", action: "Undo / redo"),
+        ]),
+        Group(title: "Fly Mode", entries: [
+            Entry(keys: "\u{21E7} + `", action: "Fly mode on / off"),
+            Entry(keys: "W / A / S / D", action: "Forward / left / back / right"),
+            Entry(keys: "Q / E", action: "Down / up"),
+            Entry(keys: "Mouse", action: "Look around"),
+            Entry(keys: "\u{21E7} / \u{2325}", action: "4\u{00D7} faster / 4\u{00D7} slower"),
+            Entry(keys: "Wheel", action: "Fly speed"),
+            Entry(keys: "Esc, Return or click", action: "Leave fly mode"),
         ]),
         Group(title: "Cameras", entries: [
             Entry(keys: "0", action: "View from the current camera"),

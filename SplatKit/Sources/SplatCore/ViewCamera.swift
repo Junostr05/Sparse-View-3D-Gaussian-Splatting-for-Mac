@@ -137,6 +137,55 @@ public struct ViewCamera: Sendable, Equatable {
         return copy
     }
 
+    /// Turntable rotation about a world point instead of the pivot. The camera rotates rigidly about `point`:
+    /// the eye moves on the same arc, so `point` keeps its camera-space coordinates and stays under the same
+    /// pixel. Yaw, the pitch limit and the roll handling are those of `orbit`. The distance is kept and the
+    /// pivot becomes `eye + forward · distance`. With `point == pivot` this equals `orbit`.
+    public mutating func orbit(around point: SIMD3<Float>, deltaYaw: Float, deltaPitch: Float) {
+        let up: SIMD3<Float> = upAxis.vector
+        var offset: SIMD3<Float> = eye - point
+        right = ViewMath.rotate(right, around: up, by: deltaYaw)
+        down = ViewMath.rotate(down, around: up, by: deltaYaw)
+        forward = ViewMath.rotate(forward, around: up, by: deltaYaw)
+        offset = ViewMath.rotate(offset, around: up, by: deltaYaw)
+
+        let axis: SIMD3<Float> = right
+        let limit: Float = Swift.max(ViewCamera.maxUpAlignment, Swift.abs(ViewMath.dot(forward, up))) + 1e-6
+        let angle: Float = ViewMath.allowedPitch(forward: forward, axis: axis, up: up,
+                                                 angle: -deltaPitch, limit: limit)
+        forward = ViewMath.rotate(forward, around: axis, by: angle)
+        down = ViewMath.rotate(down, around: axis, by: angle)
+        offset = ViewMath.rotate(offset, around: axis, by: angle)
+        orthonormalize()
+
+        let newEye: SIMD3<Float> = point + offset
+        pivot = newEye + forward * distance
+    }
+
+    /// Turns the view about the eye, so the eye stays exactly where it is. Yaw and pitch follow `orbit`:
+    /// a positive `deltaPitch` looks down. The roll is kept.
+    public mutating func lookAround(deltaYaw: Float, deltaPitch: Float) {
+        let fixedEye: SIMD3<Float> = eye
+        orbit(around: fixedEye, deltaYaw: deltaYaw, deltaPitch: deltaPitch)
+    }
+
+    /// Sets the distance to the pivot to `depth`, clamped to `minDistance...maxDistance`. The eye and the
+    /// orientation are kept; the pivot moves along the view direction.
+    public mutating func setDepth(_ depth: Float) {
+        let fixedEye: SIMD3<Float> = eye
+        distance = Swift.min(Swift.max(depth, minDistance), maxDistance)
+        pivot = fixedEye + forward * distance
+    }
+
+    /// Translates the eye and the pivot together, so the orientation and the distance are unchanged. The
+    /// amounts are along the camera right axis, the world up axis (`upAxis`) and the camera forward axis.
+    public mutating func moveEye(right amountRight: Float, up amountUp: Float, forward amountForward: Float) {
+        let step: SIMD3<Float> = self.right * amountRight
+            + upAxis.vector * amountUp
+            + self.forward * amountForward
+        pivot += step
+    }
+
     /// Multiplies the distance by `factor`, clamped to `minDistance...maxDistance`.
     public mutating func zoom(factor: Float) {
         distance = Swift.min(Swift.max(distance * factor, minDistance), maxDistance)

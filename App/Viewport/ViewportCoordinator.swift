@@ -6,7 +6,8 @@ import SplatMetal
 private let logger = Logger(subsystem: "io.github.junostr05.SparseSplat", category: "Viewport")
 
 final class ViewportCoordinator: NSObject, MTKViewDelegate {
-    private let model: ViewerModel
+    /// Read by `ViewportView` when the view is removed, to end fly mode.
+    let model: ViewerModel
     private let session: MetalSession
     private var offscreen: MTLTexture?
     private var hasLoggedRenderError = false
@@ -21,7 +22,25 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         let model = self.model
         view.onOrbit = { delta in
             // Dragging right turns the scene right; dragging down views it from above.
-            model.orbit(deltaYaw: -delta.x * 0.01, deltaPitch: delta.y * 0.01)
+            model.orbitGesture(deltaYaw: -delta.x * 0.01, deltaPitch: delta.y * 0.01)
+        }
+        view.onBeginInteraction = { point, size in
+            model.beginInteraction(atViewPoint: point, viewSize: size)
+        }
+        view.onFlyToggle = {
+            model.toggleFlying()
+        }
+        view.onFlyExit = {
+            model.setFlying(false)
+        }
+        view.onFlyLook = { delta in
+            model.look(deltaX: delta.x, deltaY: delta.y)
+        }
+        view.onFlySpeed = { amount in
+            model.changeFlySpeed(scrollAmount: amount)
+        }
+        view.onFlyStep = { movement, boost, seconds in
+            model.flyStep(movement: movement, boost: boost, seconds: seconds)
         }
         view.onPan = { [weak view] delta in
             guard let view else { return }

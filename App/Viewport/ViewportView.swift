@@ -24,6 +24,15 @@ struct ViewportView: NSViewRepresentable {
         _ = model.cloudRevision
         // Edit mode changes how the mouse and the keys are read, so it is part of the update too.
         nsView.isEditing = model.isEditingActive
+        // Fly mode is owned by the model (menu, inspector, Shift + `); the view starts or stops the capture.
+        _ = model.isFlying
+        nsView.isFlying = model.isFlying
         nsView.needsDisplay = true
+    }
+
+    static func dismantleNSView(_ nsView: SplatMTKView, coordinator: ViewportCoordinator) {
+        // Restore the cursor if the view goes away in fly mode, and keep the model in step.
+        nsView.stopFlyingForRemoval()
+        coordinator.model.setFlying(false)
     }
 }

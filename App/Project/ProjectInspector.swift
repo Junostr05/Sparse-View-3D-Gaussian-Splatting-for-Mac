@@ -91,7 +91,13 @@ struct ProjectInspector: View {
                 Button("Left") { viewer.apply(.preset(.left)) }
                 Button("Top") { viewer.apply(.preset(.top)) }
                 Button("Bottom") { viewer.apply(.preset(.bottom)) }
+                Divider()
+                Button(viewer.isFlying ? "Leave Fly Mode" : "Fly Mode") { viewer.toggleFlying() }
             }
+            Toggle("Pivot at cursor depth", isOn: Binding(
+                get: { viewer.anchorsToCursorDepth },
+                set: { viewer.anchorsToCursorDepth = $0 }
+            ))
             ViewerShortcutsButton()
             if !viewer.cameras.isEmpty {
                 Picker("Camera", selection: cameraSelection) {
