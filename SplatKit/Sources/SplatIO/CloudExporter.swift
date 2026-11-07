@@ -23,15 +23,21 @@ public enum ExportFormat: String, CaseIterable, Sendable {
 
 /// Encodes a cloud in any `ExportFormat`. Dispatches to `PLYWriter`, `SplatWriter` and `SPZWriter`.
 public enum CloudExporter {
-    /// Throws only for SPZ, see `SPZWriter.write`. The other two formats write any cloud.
+    /// Gaussians with a NaN or infinite value are dropped first, in every format (a stored checkpoint can
+    /// contain a few; the viewer window removes them on load, the project window keeps them so that its
+    /// deletion indices match the file). Throws `.empty` when nothing is left to export.
     public static func export(_ cloud: GaussianCloud, as format: ExportFormat) throws(SplatIOError) -> Data {
+        let clean: GaussianCloud = cloud.removingNonFinite().cloud
+        guard clean.count > 0 else {
+            throw .empty
+        }
         switch format {
         case .ply:
-            return PLYWriter.write(cloud)
+            return PLYWriter.write(clean)
         case .splat:
-            return SplatWriter.write(cloud)
+            return SplatWriter.write(clean)
         case .spz:
-            return try SPZWriter.write(cloud)
+            return try SPZWriter.write(clean)
         }
     }
 }

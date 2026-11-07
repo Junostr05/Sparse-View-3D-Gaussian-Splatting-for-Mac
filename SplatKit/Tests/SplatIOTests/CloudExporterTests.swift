@@ -66,4 +66,40 @@ private func exporterCloud(count: Int, degree: Int) throws -> GaussianCloud {
             try CloudExporter.export(empty, as: .spz)
         }
     }
+
+    @Test func everyFormatOfAnEmptyCloudThrows() throws {
+        let empty = try GaussianCloud(shDegree: 0, positions: [], logScales: [], rotations: [],
+                                      opacityLogits: [], sh: [])
+        for format in ExportFormat.allCases {
+            #expect(throws: SplatIOError.empty, "format \(format.rawValue)") {
+                try CloudExporter.export(empty, as: format)
+            }
+        }
+    }
+
+    @Test func nonFiniteGaussiansAreDroppedInEveryFormat() throws {
+        let base = try exporterCloud(count: 6, degree: 1)
+        var positions = base.positions
+        var opacity = base.opacityLogits
+        positions[3 * 2 + 1] = Float.nan        // Gaussian 2: NaN position
+        opacity[4] = Float.infinity             // Gaussian 4: infinite opacity
+        let dirty = try GaussianCloud(shDegree: base.shDegree, positions: positions, logScales: base.logScales,
+                                      rotations: base.rotations, opacityLogits: opacity, sh: base.sh)
+        for format in ExportFormat.allCases {
+            let data = try CloudExporter.export(dirty, as: format)
+            let scene = try SceneLoader.load(data, fileExtension: format.fileExtension)
+            #expect(scene.cloud.count == 4, "format \(format.rawValue)")
+            #expect(scene.removedNonFinite == 0, "format \(format.rawValue)")
+        }
+    }
+
+    @Test func allNonFiniteCloudThrowsEmpty() throws {
+        let base = try exporterCloud(count: 2, degree: 0)
+        let allNaN = [Float](repeating: Float.nan, count: base.positions.count)
+        let dirty = try GaussianCloud(shDegree: 0, positions: allNaN, logScales: base.logScales,
+                                      rotations: base.rotations, opacityLogits: base.opacityLogits, sh: base.sh)
+        #expect(throws: SplatIOError.empty) {
+            try CloudExporter.export(dirty, as: .ply)
+        }
+    }
 }
