@@ -142,7 +142,7 @@ Held-out metrics are the only quality signal used. Two data sets: (a) the synthe
 
 ### Depth alignment finding (fixed)
 
-The first benchmark showed dense init and the depth prior *hurting*. Cause: the per-view scale/shift fit of the monocular depth to the SfM points used a median-based fit, which fails when more than half of the SfM points are occluded in a view (half the points are on the far side of the object). Raw depth lay on the surface for 93 % of pixels, the aligned depth for only 40 %. The fit now picks the scale/shift with the largest consensus among the points (tolerance 0.05) and refines only on those inliers; afterwards 95 % lie on the surface and the real photos report "10 of 10 views aligned". Tolerance 0.05 was tuned on one scene (53 inliers against 48 required); a per-view visibility test would be the stronger fix and is not done.
+The first benchmark showed dense init and the depth prior *hurting*. Cause: the per-view scale/shift fit of the monocular depth to the SfM points used a median-based fit, which fails when more than half of the SfM points are occluded in a view (half the points are on the far side of the object). Raw depth lay on the surface for 93 % of pixels, the aligned depth for only 40 %. The fit now picks the scale/shift with the largest consensus among the points (tolerance 0.05) and refines only on those inliers; afterwards 95 % lie on the surface and the real photos report "10 of 10 views aligned". Tolerance 0.05 was tuned on one scene (53 inliers against 48 required); a per-view visibility test was evaluated afterwards and not built (see "Alignment robustness" below).
 
 ### Synthetic benchmark (after the alignment fix), novel-view PSNR in dB, delta to the Phase 3 baseline
 
@@ -196,3 +196,19 @@ Every variant is worse than the depth prior alone, and the effect is monotonic: 
 Cause, as far as measured: the warp code is correct (warping a parent into its own camera gives Pearson 1.0000 to the ground truth, `interpolate` at t = 0 reproduces the camera). The forward-warped target of two parents is a poor depth target at the interpolated camera: Pearson against the ground-truth depth is 0.45–0.64 at 3 views and 0.75–0.92 at 4 views, worst at t = 0.25 and 0.75, best at t = 0.5. With the Pearson loss at its normal strength this pulls the model toward a noisy target. The synthetic scene's soft Gaussian "surface" may exaggerate this; the real-photo result (also negative) points the same way. Not understood: why targets near a parent (t = 0.25) are worse than the middle one.
 
 Consequence: pseudo-views stay off. A redesign would be needed (e.g. use only pixels where both parents agree after warping, or a lower-confidence weight per pixel); not planned.
+
+### Alignment robustness and the visibility test (2026-11-07)
+
+Diagnostic `AlignmentRobustnessSweep` (`SPLAT_ALIGNMENT_SWEEP=1`, `SplatDepthTests`): 54 view fits (3 and 6 views, seeds 1–6) on the synthetic scene with a relative inverse-depth map `a/z + b`, which is the path the real depth model takes. (The synthetic benchmark itself feeds metric maps, so it only exercises the scale-only fit.) About 155 SfM points project into a view, only about 21 are truly visible.
+
+| Samples used | Median relative depth error |
+|---|---|
+| all projected points + current consensus fit | 8.6 % |
+| only truly visible points (oracle from the ground-truth depth) | 4.9 % |
+| visible points with exact z | 0.0 % |
+
+No fit is worse than 10 %. A perfect visibility test would therefore win at most about 4 percentage points, and the remaining error is mostly the noise of the sample positions and the soft synthetic surface, not occlusion. Larger cells in the existing 8x8 occlusion filter (16 and 32 pixels) change nothing measurable. A real visibility test (hidden point removal needs a 3D convex hull) is not worth its complexity; **not built**. If depth accuracy ever limits quality, the lever is the conditioning of scale and shift when the visible points cover a narrow depth range, not visibility.
+
+### App check of the held-out readout (2026-11-07)
+
+Verified in the running app (Debug build of the default-settings commit): new project, 13 photos, Estimate Poses (13 of 13, Apple), preset Fast, early stopping switched on, Train. The inspector shows the phase ("Choosing iteration (holding out photo_0003.png)", then "Final training to 2167"), held-out PSNR/SSIM (15.4 dB / 0.401), the best iteration (2000, so the second run stops at round(2000 x 13/12) = 2167) and the depth loss. No crash. The inspector defaults match decision 14: depth prior and artifact regularizers on, scale cap, pseudo-views and early stopping off.
