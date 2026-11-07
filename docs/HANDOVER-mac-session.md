@@ -53,4 +53,5 @@ The viewer uses `ViewCamera` (SplatCore: turntable camera with roll, Blender vie
 - Trackpad: two-finger scroll orbits, Shift pans, Ctrl or Command zooms, pinch zooms.
 - Keys (top row or numpad): 1/3/7 front/right/top, Ctrl+1/3/7 back/left/bottom (the whole scene is framed, unlike Blender, because a camera view's pivot can lie inside the scene); 4/6/8/2 orbit by 15 degrees, with Ctrl they pan; 0 returns to the camera view; `[` and `]` previous/next camera; `.` or Home frames the scene; Space plays or pauses the camera flight.
 - Inspector "Viewport": Up Axis, View menu, Camera picker, "Fly through" slider and Play/Pause. Reduce Motion makes flights jump.
-- Not done: orthographic view (key 5; the rasterizer is perspective only), a help overlay for the shortcuts, selection-based framing.
+- A keyboard button (toolbar of the .ply window, "Viewport" section of the project inspector) opens a popover with all shortcuts (`ViewerShortcutsView`).
+- Not done: orthographic view (key 5; the rasterizer is perspective only), selection-based framing.

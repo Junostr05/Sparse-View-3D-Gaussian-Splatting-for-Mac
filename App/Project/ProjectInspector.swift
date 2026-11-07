@@ -85,6 +85,7 @@ struct ProjectInspector: View {
                 Button("Top") { viewer.apply(.preset(.top)) }
                 Button("Bottom") { viewer.apply(.preset(.bottom)) }
             }
+            ViewerShortcutsButton()
             if !viewer.cameras.isEmpty {
                 Picker("Camera", selection: cameraSelection) {
                     ForEach(viewer.cameras.indices, id: \.self) { index in

@@ -33,6 +33,9 @@ struct SceneWindow: View {
                     }
                 }
                 ToolbarItem {
+                    ViewerShortcutsButton()
+                }
+                ToolbarItem {
                     Toggle(isOn: $model.isInspectorPresented) {
                         Label("Inspector", systemImage: "sidebar.trailing")
                     }
