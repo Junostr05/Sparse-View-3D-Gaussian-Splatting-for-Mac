@@ -23,6 +23,7 @@ struct ProjectInspector: View {
             PoseFreeModelSection(pipeline: pipeline)
             if !manifest.imageFiles.isEmpty {
                 SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)
+                QualitySettingsSection(document: document, model: model)
                 trainingSection
             }
             if let viewer = model.viewer {
