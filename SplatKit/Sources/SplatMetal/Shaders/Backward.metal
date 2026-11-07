@@ -311,6 +311,8 @@ kernel void projectBackward(
     device float* gradOpacityLogits [[buffer(10)]],
     device float* gradSH [[buffer(11)]],
     constant ProjectUniforms& u [[buffer(12)]],
+    constant MipFilterUniforms& mip [[buffer(13)]],
+    device const float* samplingRates [[buffer(14)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= u.counts.x) return;
@@ -372,10 +374,24 @@ kernel void projectBackward(
         float3(2.0f * (qx * qy - qw * qz), 1.0f - 2.0f * (qx * qx + qz * qz), 2.0f * (qy * qz + qw * qx)),
         float3(2.0f * (qx * qz + qw * qy), 2.0f * (qy * qz - qw * qx), 1.0f - 2.0f * (qx * qx + qy * qy)));
 
+    // Mip mode (Mip-Splatting), as in the forward kernel: s' = sqrt(s² + v3/ν²) and the opacity factor κ = Π s/s'.
+    // `chain` is ∂s'/∂logScale per axis (s² / s' in mip mode, s otherwise).
+    const bool mipOn = mip.info.x > 0.5f;
     float3 logS = float3(logScales[3u * gid], logScales[3u * gid + 1u], logScales[3u * gid + 2u]);
-    float3 s = exp(logS);
+    float3 rawS = exp(logS);
+    float3 s = rawS;
+    float opacityFactor = 1.0f;
+    if (mipOn) {
+        float filterVariance = mip.info.y / (samplingRates[gid] * samplingRates[gid]);
+        s = sqrt(rawS * rawS + filterVariance);
+        opacityFactor = (rawS.x / s.x) * (rawS.y / s.y) * (rawS.z / s.z);
+    }
+    float3 chain = mipOn ? (rawS * rawS / s) : s;
     float3x3 M = float3x3(Rq[0] * s.x, Rq[1] * s.y, Rq[2] * s.z);     // R_q · diag(s)
     float3x3 Sigma3 = M * transpose(M);
+
+    // Opacity: sigmoid of the raw logit. In mip mode the used opacity is o·κ·c2.
+    float opacityRaw = 1.0f / (1.0f + exp(-opacityLogits[gid]));
 
     // Projection with the clamped Jacobian (same limits as the forward kernel).
     float fx = u.intrinsics.x;
@@ -421,17 +437,36 @@ kernel void projectBackward(
     float3 T0 = float3(dot(J0, cam0), dot(J0, cam1), dot(J0, cam2));
     float3 T1 = float3(dot(J1, cam0), dot(J1, cam1), dot(J1, cam2));
 
-    // Σ2D = T Σ3 Tᵀ + eps·I, and its inverse (the conic).
+    // Σ2D = T Σ3 Tᵀ + eps·I (classic), or + v2·I with the compensation c2 (mip), and its inverse (the conic).
     float3 U0 = Sigma3 * T0;
     float3 U1 = Sigma3 * T1;
-    float a = dot(T0, U0) + eps2D;
+    float a0 = dot(T0, U0);
     float b = dot(T0, U1);
-    float c = dot(T1, U1) + eps2D;
+    float c0 = dot(T1, U1);
+    float a = a0 + eps2D;
+    float c = c0 + eps2D;
     float det = a * c - b * b;
     if (!(det > 0.0f)) {
         zeroParameterGradient(gid, K, shBase, accumulate, gradPositions, gradLogScales, gradRotations,
                               gradOpacityLogits, gradSH);
         return;
+    }
+    // Mip 2D compensation c2 = sqrt(D0 / D1) and its derivatives with respect to the raw entries (a0, b, c0):
+    // ∂log c2 = −½ ∂log D1 + ½ ∂log D0 (the second term only when D0 is not clamped).
+    float compensation = 1.0f;
+    float dC2a = 0.0f;
+    float dC2b = 0.0f;
+    float dC2c = 0.0f;
+    if (mipOn) {
+        float rawDet = a0 * c0 - b * b;
+        bool clampedDet = rawDet < 1.0e-12f;
+        float d0 = clampedDet ? 1.0e-12f : rawDet;
+        float ratio0 = clampedDet ? 0.0f : 1.0f;
+        float invD1 = 1.0f / det;
+        compensation = sqrt(d0 / det);
+        dC2a = compensation * (-0.5f * c * invD1 + ratio0 * 0.5f * c0 / d0);
+        dC2b = compensation * (b * invD1 - ratio0 * b / d0);
+        dC2c = compensation * (-0.5f * a * invD1 + ratio0 * 0.5f * a0 / d0);
     }
     // Conic matrix K = Σ2D⁻¹ = [[k00, k01], [k01, k11]].
     float k00 = c / det;
@@ -453,6 +488,13 @@ kernel void projectBackward(
     float g2a = -q00;
     float g2b = -0.5f * (q01 + q10);
     float g2c = -q11;
+    if (mipOn) {
+        // Compensation path: ∂L/∂c2 = gOpacity·o·κ, into the Σ2D entries (off-diagonal with ½, as dL = tr(g2·dΣ)).
+        float gCompensation = slot[3] * opacityRaw * opacityFactor;
+        g2a += gCompensation * dC2a;
+        g2b += 0.5f * gCompensation * dC2b;
+        g2c += gCompensation * dC2c;
+    }
 
     // dL/dT = 2·g2·T·Σ3, rows dT0, dT1.
     float3 dT0 = 2.0f * (g2a * U0 + g2b * U1);
@@ -470,9 +512,17 @@ kernel void projectBackward(
     float3x3 dM = 2.0f * (G3 * M);
 
     // M = R_q·diag(s): scale gradient and dL/dR_q.
-    float dLogS0 = s.x * dot(Rq[0], dM[0]);
-    float dLogS1 = s.y * dot(Rq[1], dM[1]);
-    float dLogS2 = s.z * dot(Rq[2], dM[2]);
+    float dLogS0 = chain.x * dot(Rq[0], dM[0]);
+    float dLogS1 = chain.y * dot(Rq[1], dM[1]);
+    float dLogS2 = chain.z * dot(Rq[2], dM[2]);
+    if (mipOn) {
+        // Opacity through κ: ∂o_used/∂logScaleⱼ = o_used · (1 − sⱼ²/s'ⱼ²), with o_used = o·κ·c2.
+        float usedOpacity = opacityRaw * opacityFactor * compensation;
+        float3 ratio2 = (rawS * rawS) / (s * s);
+        dLogS0 += slot[3] * usedOpacity * (1.0f - ratio2.x);
+        dLogS1 += slot[3] * usedOpacity * (1.0f - ratio2.y);
+        dLogS2 += slot[3] * usedOpacity * (1.0f - ratio2.z);
+    }
     float3 dRc0 = dM[0] * s.x;
     float3 dRc1 = dM[1] * s.y;
     float3 dRc2 = dM[2] * s.z;
@@ -580,6 +630,9 @@ kernel void projectBackward(
         storeGradient(&gradRotations[4u * gid + 2u], 0.0f, accumulate);
         storeGradient(&gradRotations[4u * gid + 3u], 0.0f, accumulate);
     }
-    float opacity = 1.0f / (1.0f + exp(-opacityLogits[gid]));
-    storeGradient(&gradOpacityLogits[gid], gOpacity * opacity * (1.0f - opacity), accumulate);
+    float opacityGradient = gOpacity * opacityRaw * (1.0f - opacityRaw);
+    if (mipOn) {
+        opacityGradient *= compensation * opacityFactor;
+    }
+    storeGradient(&gradOpacityLogits[gid], opacityGradient, accumulate);
 }

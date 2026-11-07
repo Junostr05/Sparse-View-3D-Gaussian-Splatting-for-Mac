@@ -8,19 +8,23 @@ public struct RasterSettings: Sendable, Equatable {
     public var eps2D: Float
     public var shDegreeLimit: Int
     public var background: SIMD3<Float>
+    /// Training-time anti-aliasing (Mip-Splatting). `.classic` (the default) leaves every path unchanged.
+    public var mipFilter: MipFilter
 
     public init(tileSize: Int = 16,
                 nearPlane: Float = 0.01,
                 farPlane: Float = 1e10,
                 eps2D: Float = 0.3,
                 shDegreeLimit: Int = 3,
-                background: SIMD3<Float> = .zero) {
+                background: SIMD3<Float> = .zero,
+                mipFilter: MipFilter = .classic) {
         self.tileSize = tileSize
         self.nearPlane = nearPlane
         self.farPlane = farPlane
         self.eps2D = eps2D
         self.shDegreeLimit = shDegreeLimit
         self.background = background
+        self.mipFilter = mipFilter
     }
 }
 
@@ -78,9 +82,21 @@ public enum Projection {
                                                     cloud.rotations[4 * index + 1],
                                                     cloud.rotations[4 * index + 2],
                                                     cloud.rotations[4 * index + 3]))
-        let scale = SIMD3<Float>(exp(cloud.logScales[3 * index]),
+        let mip = settings.mipFilter.isEnabled
+        let scale: SIMD3<Float>
+        var opacityFactor: Float = 1
+        if mip {
+            let rawScale = SIMD3<Double>(exp(Double(cloud.logScales[3 * index])),
+                                         exp(Double(cloud.logScales[3 * index + 1])),
+                                         exp(Double(cloud.logScales[3 * index + 2])))
+            let smoothed = settings.mipFilter.smoothing(index: index, rawScale: rawScale)
+            scale = SIMD3<Float>(Float(smoothed.scale.x), Float(smoothed.scale.y), Float(smoothed.scale.z))
+            opacityFactor = Float(smoothed.opacityFactor)
+        } else {
+            scale = SIMD3<Float>(exp(cloud.logScales[3 * index]),
                                  exp(cloud.logScales[3 * index + 1]),
                                  exp(cloud.logScales[3 * index + 2]))
+        }
         let m = Matrix3(c0: rq.c0 * scale.x, c1: rq.c1 * scale.y, c2: rq.c2 * scale.z)
         let sigma3D = m * m.transposed
 
@@ -112,8 +128,20 @@ public enum Projection {
         var a = simdDot(t0, sigmaT0)
         let b = simdDot(t0, sigmaT1)
         var c = simdDot(t1, sigmaT1)
-        a += settings.eps2D
-        c += settings.eps2D
+        var compensation: Float = 1
+        if mip {
+            // Mip-Splatting 2D filter: Σ' = Σ + v2·I, opacity × sqrt(det Σ / det Σ') (det Σ clamped below).
+            let v2 = settings.mipFilter.filter2DVariance
+            let rawDet = max(a * c - b * b, 1e-12)
+            a += v2
+            c += v2
+            let filteredDet = a * c - b * b
+            guard filteredDet > 0 else { return nil }
+            compensation = (rawDet / filteredDet).squareRoot()
+        } else {
+            a += settings.eps2D
+            c += settings.eps2D
+        }
 
         let det = a * c - b * b
         guard det > 0 else { return nil }
@@ -156,7 +184,10 @@ public enum Projection {
         let shifted = raw + SIMD3<Float>(repeating: 0.5)
         let color = SIMD3<Float>(max(shifted.x, 0), max(shifted.y, 0), max(shifted.z, 0))
 
-        let opacity = 1 / (1 + exp(-cloud.opacityLogits[index]))
+        var opacity = 1 / (1 + exp(-cloud.opacityLogits[index]))
+        if mip {
+            opacity *= opacityFactor * compensation
+        }
 
         return ProjectedGaussian(
             mean2D: mean2D,

@@ -309,8 +309,22 @@ private struct GaussianChain {
     let rawQuaternion: SIMD4<Double>   // (w, x, y, z)
     let quaternionNorm: Double
     let unitQuaternion: SIMD4<Double>
+    /// Effective scales s' (equal to the raw scales unless the mip 3D filter is on).
     let scale: SIMD3<Double>
+    /// ∂s'ⱼ/∂logScaleⱼ: sⱼ for the classic path, sⱼ²/s'ⱼ in mip mode.
+    let scaleChain: SIMD3<Double>
+    /// Raw scales s.
+    let rawScale: SIMD3<Double>
+    /// Raw sigmoid opacity o.
     let opacity: Double
+    /// Mip 3D filter factor κ = Π sⱼ/s'ⱼ (1 when classic).
+    let opacityFactor: Double
+    /// Mip 2D compensation c2 (1 when classic).
+    let compensation: Double
+    /// ∂c2/∂(Σ_a, Σ_b, Σ_c) of the raw 2D covariance entries (a, b, c) (zero when classic).
+    let compensationGradient: SIMD3<Double>
+    /// True when the mip filters are on.
+    let isMip: Bool
 
     // Camera.
     let w: Mat                         // world → camera rotation
@@ -344,9 +358,22 @@ private struct GaussianChain {
         let norm = (q * q).sum().squareRoot()
         quaternionNorm = norm
         unitQuaternion = norm > 0 ? q / norm : SIMD4(1, 0, 0, 0)
-        scale = SIMD3(exp(Double(cloud.logScales[3 * index])),
-                      exp(Double(cloud.logScales[3 * index + 1])),
-                      exp(Double(cloud.logScales[3 * index + 2])))
+        let mip = settings.mipFilter.isEnabled
+        let rawScaleValue = SIMD3(exp(Double(cloud.logScales[3 * index])),
+                                  exp(Double(cloud.logScales[3 * index + 1])),
+                                  exp(Double(cloud.logScales[3 * index + 2])))
+        var effectiveScale = rawScaleValue
+        var kappa: Double = 1
+        if mip {
+            let smoothed = settings.mipFilter.smoothing(index: index, rawScale: rawScaleValue)
+            effectiveScale = smoothed.scale
+            kappa = smoothed.opacityFactor
+        }
+        rawScale = rawScaleValue
+        scale = effectiveScale
+        isMip = mip
+        opacityFactor = kappa
+        scaleChain = mip ? rawScaleValue * rawScaleValue / effectiveScale : effectiveScale
         opacity = 1 / (1 + exp(-Double(cloud.opacityLogits[index])))
 
         let wm = matrix(camera.rotation)
@@ -398,10 +425,34 @@ private struct GaussianChain {
         let tm = matmul(j, wm)
         t = tm
 
-        // Σ2D (+eps) and its inverse.
+        // Σ2D (+eps, or the mip 2D filter) and its inverse.
         var s2 = matmul(matmul(tm, sigma3D), transpose(tm))
-        s2[0][0] += Double(settings.eps2D)
-        s2[1][1] += Double(settings.eps2D)
+        var compensationValue: Double = 1
+        var compensationDerivative = SIMD3<Double>.zero
+        if mip {
+            // c2 = sqrt(D0 / D1), D0 = max(a0·c0 − b², 1e-12) on the raw entries, D1 = det of Σ + v2·I.
+            // ∂log c2 = −½ ∂log D1 + ½ ∂log D0 (the second term only when D0 is not clamped).
+            let v2 = Double(settings.mipFilter.filter2DVariance)
+            let a0 = s2[0][0], b = s2[0][1], c0 = s2[1][1]
+            let rawDet = a0 * c0 - b * b
+            let clamped = rawDet < 1e-12
+            let d0 = clamped ? 1e-12 : rawDet
+            s2[0][0] += v2
+            s2[1][1] += v2
+            let a = s2[0][0], c = s2[1][1]
+            let d1 = a * c - b * b
+            compensationValue = (d0 / d1).squareRoot()
+            let ratio0 = clamped ? 0.0 : 1.0
+            compensationDerivative = SIMD3(
+                compensationValue * (-0.5 * c / d1 + ratio0 * 0.5 * c0 / d0),
+                compensationValue * (b / d1 - ratio0 * b / d0),
+                compensationValue * (-0.5 * a / d1 + ratio0 * 0.5 * a0 / d0))
+        } else {
+            s2[0][0] += Double(settings.eps2D)
+            s2[1][1] += Double(settings.eps2D)
+        }
+        compensation = compensationValue
+        compensationGradient = compensationDerivative
         let det = s2[0][0] * s2[1][1] - s2[0][1] * s2[0][1]
         conicMatrix = [[s2[1][1] / det, -s2[0][1] / det],
                        [-s2[0][1] / det, s2[0][0] / det]]
@@ -419,13 +470,30 @@ private struct GaussianChain {
     func propagate(_ g: ScreenSpaceGradient, into out: inout GaussianGradients) {
         let fx = Double(camera.fx), fy = Double(camera.fy)
 
+        // Mip mode: the used opacity is o·κ·c2, so ∂L/∂o_used = g.opacity, and the factors below apply.
+        let effectiveOpacity = opacity * opacityFactor       // o·κ
+        let usedOpacity = effectiveOpacity * compensation    // o·κ·c2
+
         // --- opacity: o = sigmoid(logit)
-        out.opacityLogits[index] += Float(g.opacity * opacity * (1 - opacity))
+        if isMip {
+            out.opacityLogits[index] += Float(g.opacity * compensation * opacityFactor * opacity * (1 - opacity))
+        } else {
+            out.opacityLogits[index] += Float(g.opacity * opacity * (1 - opacity))
+        }
 
         // --- conic → Σ2D:  dΣ = −C·G·C, G symmetric with off-diagonals g_y/2.
         let gm: Mat = [[g.conic.x, 0.5 * g.conic.y], [0.5 * g.conic.y, g.conic.z]]
         var g2 = matmul(matmul(conicMatrix, gm), conicMatrix)
         for i in 0..<2 { for j in 0..<2 { g2[i][j] = -g2[i][j] } }
+        if isMip {
+            // Compensation path: ∂L/∂c2 = g.opacity·o·κ, added to the entries of Σ2D (off-diagonal with factor ½,
+            // matching dL = tr(g2·dΣ2D)).
+            let gCompensation = g.opacity * effectiveOpacity
+            g2[0][0] += gCompensation * compensationGradient.x
+            g2[0][1] += 0.5 * gCompensation * compensationGradient.y
+            g2[1][0] += 0.5 * gCompensation * compensationGradient.y
+            g2[1][1] += gCompensation * compensationGradient.z
+        }
 
         // --- Σ2D = T·Σ3D·Tᵀ
         let g3 = matmul(matmul(transpose(t), g2), t)                       // dL/dΣ3D
@@ -468,7 +536,14 @@ private struct GaussianChain {
                 ds += rq[i][j] * dM[i][j]
                 dRq[i][j] = dM[i][j] * scale[j]
             }
-            dLogScale[j] = scale[j] * ds
+            dLogScale[j] = scaleChain[j] * ds
+        }
+        if isMip {
+            // Opacity through κ: ∂o_used/∂logScaleⱼ = o_used · (1 − sⱼ²/s'ⱼ²).
+            for j in 0..<3 {
+                let ratio = rawScale[j] * rawScale[j] / (scale[j] * scale[j])
+                dLogScale[j] += g.opacity * usedOpacity * (1 - ratio)
+            }
         }
         for j in 0..<3 { out.logScales[3 * index + j] += Float(dLogScale[j]) }
 
