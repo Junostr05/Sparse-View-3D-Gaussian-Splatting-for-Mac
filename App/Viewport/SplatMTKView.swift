@@ -7,6 +7,9 @@ import SplatCore
 ///
 /// In edit mode a left drag paints the brush selection instead of orbiting. The brush works in
 /// drawable pixels with a top-left origin, the pixel space that the renderer draws in.
+///
+/// Fly mode captures the cursor, reads W A S D Q E from the keys and integrates the movement with a 60 Hz
+/// timer on the main run loop. It ends with Escape, Return, a click, Shift + ` again, or when the window loses key status.
 final class SplatMTKView: MTKView {
     /// Drag delta in points; positive y is downward.
     var onOrbit: ((SIMD2<Float>) -> Void)?
@@ -25,6 +28,31 @@ final class SplatMTKView: MTKView {
     var onBrushCursor: ((CGPoint?) -> Void)?
     /// A selection or history command from an edit key.
     var onEditCommand: ((EditCommand) -> Void)?
+    /// Start of a gesture at a point (view points, top-left origin) in a view of the given size. Called on every
+    /// press and on the first event of a drag or scroll after 0.3 s without one.
+    var onBeginInteraction: ((CGPoint, CGSize) -> Void)?
+    /// Shift + ` pressed outside fly mode.
+    var onFlyToggle: (() -> Void)?
+    /// Fly mode was left from the view (Escape, Return, click, window lost key status or view removed).
+    var onFlyExit: (() -> Void)?
+    /// Mouse movement in fly mode, in points, y downward.
+    var onFlyLook: ((SIMD2<Float>) -> Void)?
+    /// Scroll amount in fly mode, used to change the base fly speed.
+    var onFlySpeed: ((Float) -> Void)?
+    /// Movement in fly mode: right, up and forward components in -1...1 (normalised), boost and elapsed seconds.
+    var onFlyStep: ((SIMD3<Float>, Float, Double) -> Void)?
+
+    /// Fly mode state. Set from the model before each update. Setting it starts or stops the cursor capture and the timer.
+    var isFlying = false {
+        didSet {
+            guard isFlying != oldValue else { return }
+            if isFlying {
+                startFlying()
+            } else {
+                stopFlying()
+            }
+        }
+    }
 
     /// Key code of the Home key.
     private static let homeKeyCode: UInt16 = 115
@@ -32,13 +60,40 @@ final class SplatMTKView: MTKView {
     private static let deleteKeyCode: UInt16 = 51
     /// Key code of the forward Delete key.
     private static let forwardDeleteKeyCode: UInt16 = 117
+    /// Key code of the ` (grave) key on an ANSI keyboard. Shift + this key toggles fly mode.
+    private static let graveKeyCode: UInt16 = 50
+    /// Keys that leave fly mode: Escape, Return and the keypad Enter.
+    private static let flyExitKeyCodes: Set<UInt16> = [53, 36, 76]
+    /// Physical keys for fly movement (ANSI positions, so WASD stay in place on any layout).
+    private static let keyA: UInt16 = 0
+    private static let keyS: UInt16 = 1
+    private static let keyD: UInt16 = 2
+    private static let keyQ: UInt16 = 12
+    private static let keyW: UInt16 = 13
+    private static let keyE: UInt16 = 14
     /// Distance in drawable pixels between the brush samples of one stroke segment.
     private static let strokeSampleSpacing: Float = 4
     /// Upper bound on the samples of one stroke segment, so one fast drag cannot flood the selector.
     private static let maximumSamplesPerSegment: Int = 256
+    /// After this much time without a gesture event, the next one picks the cursor anchor again.
+    private static let gestureIdleLimit: Duration = .milliseconds(300)
 
     /// Last brush point of the stroke in progress. `nil` when no stroke is in progress.
     private var strokeLast: SIMD2<Float>?
+    /// Time of the last gesture event (press, drag or scroll) that reached the model.
+    private var lastInteractionTime: ContinuousClock.Instant?
+    /// Fly mode: keys currently held, by key code.
+    private var pressedKeys: Set<UInt16> = []
+    /// Fly mode: the 60 Hz movement timer on the main run loop.
+    private var flyTimer: Timer?
+    /// Fly mode: time of the last movement tick.
+    private var lastFlyTick: ContinuousClock.Instant?
+    /// Fly mode: true while the cursor is hidden and disassociated, so it must be restored.
+    private var isCursorCaptured = false
+    /// Fly mode: observer for the window losing key status.
+    private var resignKeyObserver: NSObjectProtocol?
+    /// Fly mode: the window's `acceptsMouseMovedEvents` before fly mode changed it.
+    private var previousAcceptsMouseMoved: Bool?
 
     init(device: MTLDevice) {
         super.init(frame: .zero, device: device)
@@ -57,6 +112,20 @@ final class SplatMTKView: MTKView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, isFlying {
+            exitFlyFromView()
+        }
+    }
+
+    /// Called when SwiftUI removes the view: restores the cursor and leaves fly mode in the model.
+    func stopFlyingForRemoval() {
+        if isFlying {
+            exitFlyFromView()
+        }
     }
 
     override func updateTrackingAreas() {
@@ -95,6 +164,27 @@ final class SplatMTKView: MTKView {
         return SIMD2(pixelX, pixelY)
     }
 
+    /// The event location in view points with a top-left origin, for the cursor depth pick.
+    private func topLeftPoint(of event: NSEvent) -> CGPoint {
+        let point: NSPoint = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: point.x, y: bounds.height - point.y)
+    }
+
+    /// Reports a gesture event to the model. A press always picks the anchor. Other events pick only when
+    /// no gesture event came within the last 0.3 s, so a drag or a trackpad gesture keeps one anchor.
+    private func noteInteraction(_ event: NSEvent, isPress: Bool) {
+        let now: ContinuousClock.Instant = ContinuousClock.now
+        let isIdle: Bool
+        if let last = lastInteractionTime {
+            isIdle = now - last > Self.gestureIdleLimit
+        } else {
+            isIdle = true
+        }
+        lastInteractionTime = now
+        guard isPress || isIdle else { return }
+        onBeginInteraction?(topLeftPoint(of: event), bounds.size)
+    }
+
     /// Points from `start` (exclusive) to `end` (inclusive), evenly spaced, so a fast drag leaves no gaps.
     private static func segment(from start: SIMD2<Float>, to end: SIMD2<Float>) -> [SIMD2<Float>] {
         let delta: SIMD2<Float> = end - start
@@ -114,6 +204,10 @@ final class SplatMTKView: MTKView {
     // MARK: - Mouse
 
     override func mouseDown(with event: NSEvent) {
+        if isFlying {
+            exitFlyFromView()
+            return
+        }
         window?.makeFirstResponder(self)
         if isEditing, !event.modifierFlags.contains(.option) {
             let point: SIMD2<Float> = drawablePoint(of: event)
@@ -121,6 +215,7 @@ final class SplatMTKView: MTKView {
             onBrushStroke?([point], event.modifierFlags.contains(.shift))
             return
         }
+        noteInteraction(event, isPress: true)
         super.mouseDown(with: event)
     }
 
@@ -130,8 +225,10 @@ final class SplatMTKView: MTKView {
             strokeLast = point
             onBrushStroke?(Self.segment(from: last, to: point), event.modifierFlags.contains(.shift))
         } else if event.modifierFlags.contains(.option) {
+            noteInteraction(event, isPress: false)
             onPan?(delta(of: event))
         } else {
+            noteInteraction(event, isPress: false)
             onOrbit?(delta(of: event))
         }
     }
@@ -142,6 +239,10 @@ final class SplatMTKView: MTKView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        if isFlying {
+            onFlyLook?(delta(of: event))
+            return
+        }
         guard isEditing else { return }
         let point: NSPoint = convert(event.locationInWindow, from: nil)
         onBrushCursor?(CGPoint(x: point.x, y: bounds.height - point.y))
@@ -154,16 +255,27 @@ final class SplatMTKView: MTKView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        if isFlying {
+            exitFlyFromView()
+            return
+        }
         window?.makeFirstResponder(self)
+        noteInteraction(event, isPress: true)
         super.rightMouseDown(with: event)
     }
 
     override func rightMouseDragged(with event: NSEvent) {
+        noteInteraction(event, isPress: false)
         onPan?(delta(of: event))
     }
 
     override func otherMouseDown(with event: NSEvent) {
+        if isFlying {
+            exitFlyFromView()
+            return
+        }
         window?.makeFirstResponder(self)
+        noteInteraction(event, isPress: true)
         super.otherMouseDown(with: event)
     }
 
@@ -173,6 +285,7 @@ final class SplatMTKView: MTKView {
             super.otherMouseDragged(with: event)
             return
         }
+        noteInteraction(event, isPress: false)
         let flags = event.modifierFlags
         let drag = delta(of: event)
         if flags.contains(.control) {
@@ -188,6 +301,11 @@ final class SplatMTKView: MTKView {
     // MARK: - Scroll
 
     override func scrollWheel(with event: NSEvent) {
+        if isFlying {
+            onFlySpeed?(Float(event.scrollingDeltaY))
+            return
+        }
+        noteInteraction(event, isPress: false)
         let flags = event.modifierFlags
         if event.hasPreciseScrollingDeltas {
             trackpadScroll(event, flags: flags)
@@ -229,6 +347,8 @@ final class SplatMTKView: MTKView {
     }
 
     override func magnify(with event: NSEvent) {
+        guard !isFlying else { return }
+        noteInteraction(event, isPress: false)
         onZoom?(exp(-Float(event.magnification)))
     }
 
@@ -237,6 +357,22 @@ final class SplatMTKView: MTKView {
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) {
             super.keyDown(with: event)
+            return
+        }
+        if event.keyCode == Self.graveKeyCode, event.modifierFlags.contains(.shift) {
+            if isFlying {
+                exitFlyFromView()
+            } else {
+                onFlyToggle?()
+            }
+            return
+        }
+        if isFlying {
+            if Self.flyExitKeyCodes.contains(event.keyCode) {
+                exitFlyFromView()
+            } else {
+                pressedKeys.insert(event.keyCode)
+            }
             return
         }
         if isEditing, let edit = Self.editCommand(for: event) {
@@ -257,6 +393,14 @@ final class SplatMTKView: MTKView {
             return
         }
         onCommand?(command)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if isFlying {
+            pressedKeys.remove(event.keyCode)
+            return
+        }
+        super.keyUp(with: event)
     }
 
     /// Undo and redo in edit mode. Other Command keys go to the menu system.
@@ -295,5 +439,99 @@ final class SplatMTKView: MTKView {
         default:
             return nil
         }
+    }
+
+    // MARK: - Fly mode
+
+    /// Leaves fly mode from the view and tells the model.
+    private func exitFlyFromView() {
+        isFlying = false
+        onFlyExit?()
+    }
+
+    /// Captures the cursor, makes the window send mouse moves, and starts the 60 Hz movement timer.
+    private func startFlying() {
+        pressedKeys.removeAll()
+        if let window {
+            previousAcceptsMouseMoved = window.acceptsMouseMovedEvents
+            window.acceptsMouseMovedEvents = true
+            window.makeFirstResponder(self)
+            resignKeyObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.exitFlyFromView()
+                }
+            }
+        }
+        CGAssociateMouseAndMouseCursorPosition(0)
+        NSCursor.hide()
+        isCursorCaptured = true
+        lastFlyTick = ContinuousClock.now
+        flyTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.flyTick()
+            }
+        }
+    }
+
+    /// Stops the timer and gives the cursor back. Safe to call more than once.
+    private func stopFlying() {
+        flyTimer?.invalidate()
+        flyTimer = nil
+        lastFlyTick = nil
+        pressedKeys.removeAll()
+        if let observer = resignKeyObserver {
+            NotificationCenter.default.removeObserver(observer)
+            resignKeyObserver = nil
+        }
+        if let window, let previous = previousAcceptsMouseMoved {
+            window.acceptsMouseMovedEvents = previous
+        }
+        previousAcceptsMouseMoved = nil
+        if isCursorCaptured {
+            NSCursor.unhide()
+            CGAssociateMouseAndMouseCursorPosition(1)
+            isCursorCaptured = false
+        }
+    }
+
+    /// One movement tick: integrates the held keys over the real elapsed time (clamped to 0.1 s).
+    private func flyTick() {
+        guard isFlying else { return }
+        let now: ContinuousClock.Instant = ContinuousClock.now
+        let previous: ContinuousClock.Instant = lastFlyTick ?? now
+        lastFlyTick = now
+        let elapsed: Duration = now - previous
+        let parts = elapsed.components
+        let rawSeconds: Double = Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
+        let seconds: Double = Swift.min(Swift.max(rawSeconds, 0), 0.1)
+
+        var right: Float = 0
+        var up: Float = 0
+        var forward: Float = 0
+        if pressedKeys.contains(Self.keyD) { right += 1 }
+        if pressedKeys.contains(Self.keyA) { right -= 1 }
+        if pressedKeys.contains(Self.keyE) { up += 1 }
+        if pressedKeys.contains(Self.keyQ) { up -= 1 }
+        if pressedKeys.contains(Self.keyW) { forward += 1 }
+        if pressedKeys.contains(Self.keyS) { forward -= 1 }
+        guard right != 0 || up != 0 || forward != 0 else { return }
+
+        let length: Float = (right * right + up * up + forward * forward).squareRoot()
+        let direction: SIMD3<Float> = SIMD3<Float>(right, up, forward)
+        let movement: SIMD3<Float> = direction / length
+        let flags: NSEvent.ModifierFlags = NSEvent.modifierFlags
+        let boost: Float
+        if flags.contains(.shift) {
+            boost = 4
+        } else if flags.contains(.option) {
+            boost = 0.25
+        } else {
+            boost = 1
+        }
+        onFlyStep?(movement, boost, seconds)
     }
 }

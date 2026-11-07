@@ -78,6 +78,7 @@ final class ViewerModel {
         didSet {
             if !isEditingAllowed {
                 isEditing = false
+                isFlying = false
             }
         }
     }
@@ -87,8 +88,25 @@ final class ViewerModel {
             if !isEditing {
                 brushCursor = nil
             }
+            if isEditing {
+                isFlying = false
+            }
         }
     }
+
+    // MARK: Cursor depth and fly mode. The behaviour is below in the "Cursor depth" and "Fly mode" sections.
+
+    /// Pivot at cursor depth: gestures orbit, pan and zoom about the surface under the cursor.
+    var anchorsToCursorDepth = true
+    /// World point under the cursor at the start of the current gesture. Orbit gestures rotate about it.
+    @ObservationIgnored private var cursorOrbitAnchor: SIMD3<Float>?
+    /// True while fly mode owns the mouse and the keys. The view captures the cursor while this is set.
+    private(set) var isFlying = false
+    /// Base fly speed multiplier, changed by the scroll wheel in fly mode. The base speed is 0.5 scene radii per second.
+    var flySpeedScale: Float = 1
+    /// Short text shown over the viewport after a speed change, cleared after about a second.
+    private(set) var flySpeedNotice: String?
+    @ObservationIgnored private var flySpeedNoticeTask: Task<Void, Never>?
     /// Brush radius in points.
     var brushRadius: Double = 40
     var brushMode: BrushMode = .add
@@ -241,6 +259,7 @@ final class ViewerModel {
     /// Moves the view to a fractional position along the camera flight, without animation.
     func scrub(to position: Double) {
         stopMotion()
+        cursorOrbitAnchor = nil
         guard let flight else { return }
         let last = Double(flight.count - 1)
         let clamped = Swift.min(Swift.max(position, 0), last)
@@ -276,10 +295,49 @@ final class ViewerModel {
 
     // MARK: - Manual input
 
-    /// Orbit from a mouse or trackpad gesture. Cancels any flight or playback.
+    /// Orbit from a key step. Cancels any flight or playback. Rotates about the pivot.
     func orbit(deltaYaw: Float, deltaPitch: Float) {
         stopMotion()
         view.orbit(deltaYaw: deltaYaw, deltaPitch: deltaPitch)
+    }
+
+    /// Orbit from a mouse drag or a trackpad scroll. Rotates about the cursor anchor of the gesture when
+    /// there is one, otherwise about the pivot.
+    func orbitGesture(deltaYaw: Float, deltaPitch: Float) {
+        guard anchorsToCursorDepth, let anchor = cursorOrbitAnchor else {
+            orbit(deltaYaw: deltaYaw, deltaPitch: deltaPitch)
+            return
+        }
+        stopMotion()
+        view.orbit(around: anchor, deltaYaw: deltaYaw, deltaPitch: deltaPitch)
+    }
+
+    // MARK: - Cursor depth
+
+    /// Starts a gesture at `point` (view points, top-left origin, in a view of `viewSize` points). Picks the
+    /// surface under the cursor, moves the pivot to its depth (`setDepth`) and remembers its world point for
+    /// orbit gestures. Stops any flight or playback when a surface is picked. Without a surface the anchor
+    /// is cleared and the view is left alone.
+    func beginInteraction(atViewPoint point: CGPoint, viewSize: CGSize) {
+        guard anchorsToCursorDepth else {
+            cursorOrbitAnchor = nil
+            return
+        }
+        let width: Int = Int(viewSize.width.rounded())
+        let height: Int = Int(viewSize.height.rounded())
+        guard width > 0, height > 0 else {
+            cursorOrbitAnchor = nil
+            return
+        }
+        let camera: Camera = view.camera(width: width, height: height)
+        let pixel: SIMD2<Float> = SIMD2(Float(point.x), Float(point.y))
+        guard let pick = CursorDepth.pick(cloud: scene.cloud, camera: camera, pixel: pixel) else {
+            cursorOrbitAnchor = nil
+            return
+        }
+        stopMotion()
+        view.setDepth(pick.depth)
+        cursorOrbitAnchor = pick.worldPoint
     }
 
     /// Pan from a gesture. `deltaPixels` uses the same convention as `ViewCamera.pan`.
@@ -339,6 +397,7 @@ final class ViewerModel {
     /// Animates the view to `target`. Reduce Motion jumps to the target instead.
     func fly(to target: ViewCamera, duration: Double = 0.6) {
         stopMotion()
+        cursorOrbitAnchor = nil
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             view = target
             return
@@ -392,6 +451,69 @@ final class ViewerModel {
     private static func seconds(_ duration: Duration) -> Double {
         let parts = duration.components
         return Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
+    }
+
+    // MARK: - Fly mode
+
+    /// Enters or leaves fly mode. Entering is ignored while editing is active. Leaving keeps the view where it is.
+    func setFlying(_ flying: Bool) {
+        if flying {
+            guard isEditingActive else { return }
+            stopMotion()
+            cursorOrbitAnchor = nil
+            isFlying = true
+        } else {
+            isFlying = false
+            flySpeedNoticeTask?.cancel()
+            flySpeedNotice = nil
+        }
+    }
+
+    func toggleFlying() {
+        setFlying(!isFlying)
+    }
+
+    /// Mouse movement in fly mode turns the view. `deltaX` and `deltaY` are in points, y downward.
+    /// Moving right turns the view right and moving down looks down, whatever the up axis.
+    func look(deltaX: Float, deltaY: Float) {
+        guard isFlying else { return }
+        let radiansPerPoint: Float = 0.003
+        let up: SIMD3<Float> = upAxis.vector
+        let forward: SIMD3<Float> = view.forward
+        let right: SIMD3<Float> = view.right
+        // Derivative of the forward axis for positive yaw is up × forward. Its component along right gives the
+        // direction of positive yaw as seen by the user.
+        let turn: SIMD3<Float> = SIMD3(up.y * forward.z - up.z * forward.y,
+                                       up.z * forward.x - up.x * forward.z,
+                                       up.x * forward.y - up.y * forward.x)
+        let towardRight: Float = turn.x * right.x + turn.y * right.y + turn.z * right.z
+        let yawSign: Float = towardRight < 0 ? -1 : 1
+        view.lookAround(deltaYaw: deltaX * radiansPerPoint * yawSign, deltaPitch: deltaY * radiansPerPoint)
+    }
+
+    /// Moves the eye at the fly speed. `movement` has right, up and forward components in -1...1 (already normalised
+    /// by the caller). `boost` multiplies the speed (Shift 4, Option 1/4). `seconds` is the elapsed time.
+    func flyStep(movement: SIMD3<Float>, boost: Float, seconds: Double) {
+        guard isFlying else { return }
+        let extent: SIMD3<Float> = bounds.extent
+        let halfDiagonal: Float = 0.5 * (extent * extent).sum().squareRoot()
+        let radius: Float = halfDiagonal > 0 ? halfDiagonal : 1
+        let distance: Float = 0.5 * radius * flySpeedScale * boost * Float(seconds)
+        view.moveEye(right: movement.x * distance, up: movement.y * distance, forward: movement.z * distance)
+    }
+
+    /// Changes the base fly speed by the scroll amount (about 10 % per unit) and shows it for about a second.
+    func changeFlySpeed(scrollAmount: Float) {
+        guard isFlying else { return }
+        let factor: Float = exp(scrollAmount * 0.1)
+        flySpeedScale = Swift.min(Swift.max(flySpeedScale * factor, 0.01), 100)
+        flySpeedNotice = "Fly speed " + String(format: "%.2f", flySpeedScale) + "\u{00D7}"
+        flySpeedNoticeTask?.cancel()
+        flySpeedNoticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.flySpeedNotice = nil
+        }
     }
 }
 

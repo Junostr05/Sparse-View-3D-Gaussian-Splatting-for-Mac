@@ -24,6 +24,12 @@ struct ViewerContent: View {
                                 .padding(.bottom, 16)
                         }
                     }
+                    .overlay(alignment: .top) {
+                        if model.isFlying {
+                            FlyModeHUD(model: model)
+                                .padding(.top, 12)
+                        }
+                    }
             case .unavailable:
                 ContentUnavailableView(
                     "Metal Not Available",
@@ -35,5 +41,25 @@ struct ViewerContent: View {
         .task(id: ObjectIdentifier(model)) {
             model.prepareRenderer()
         }
+    }
+}
+
+/// Fly mode hint and the fly speed notice, shown over the viewport. Plain text on system material, not glass.
+private struct FlyModeHUD: View {
+    let model: ViewerModel
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Fly Mode: W A S D move, Q E down and up, Esc to exit")
+                .font(.callout)
+            if let notice = model.flySpeedNotice {
+                Text(notice)
+                    .font(.headline)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
