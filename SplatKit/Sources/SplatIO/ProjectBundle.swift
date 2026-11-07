@@ -379,6 +379,27 @@ public enum ProjectBundle {
         }
     }
 
+    /// Camera poses of the project without decoding any image. Uses the same pose files as
+    /// `loadDataset`. A project without a pose source has no cameras, so the result is `[]`.
+    public static func cameraPoses(_ contents: ProjectContents) throws(DatasetError) -> [NamedCamera] {
+        let files = contents.files
+
+        switch contents.manifest.source {
+        case .colmap?:
+            let directory = ProjectLayout.colmapDirectory
+            return try TrainingDatasetLoader.cameras(
+                colmapCameras: files[directory + "/cameras.bin"] ?? Data(),
+                colmapImages: files[directory + "/images.bin"] ?? Data()
+            )
+        case .arkit?:
+            return try TrainingDatasetLoader.cameras(
+                arkitCapture: files[ProjectLayout.arkitCapture] ?? Data()
+            )
+        case nil:
+            return []
+        }
+    }
+
     /// The stored checkpoint, or `nil` when the project has none.
     public static func latestCheckpoint(_ contents: ProjectContents) throws(ProjectError) -> GaussianCloud? {
         guard let data = contents.files[ProjectLayout.latestCheckpoint] else {

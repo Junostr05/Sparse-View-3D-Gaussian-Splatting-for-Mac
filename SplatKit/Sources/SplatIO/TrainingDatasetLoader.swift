@@ -1,6 +1,17 @@
 import Foundation
 import SplatCore
 
+/// A camera pose with the name of the image it belongs to. Carries no pixels.
+public struct NamedCamera: Sendable, Equatable {
+    public var name: String
+    public var camera: Camera
+
+    public init(name: String, camera: Camera) {
+        self.name = name
+        self.camera = camera
+    }
+}
+
 /// Builds a `TrainingDataset` from COLMAP or ARKit input. Image bytes come from a caller
 /// closure and are decoded by an injected decoder, so this module stays free of ImageIO.
 public enum TrainingDatasetLoader {
@@ -14,6 +25,59 @@ public enum TrainingDatasetLoader {
                                   imageData: (String) -> Data?,
                                   maxImageSide: Int,
                                   decode: ImageDecoder) throws(DatasetError) -> TrainingDataset {
+        let specs = try colmapSpecs(cameras: cameras, images: images)
+        let views = try loadViews(specs,
+                                  imageData: imageData,
+                                  maxImageSide: maxImageSide,
+                                  decode: decode)
+
+        var points: PointCloud?
+        if let points3D {
+            points = pointCloud(try COLMAPReader.readPoints3D(points3D))
+        }
+        return TrainingDataset(views: views, points: points)
+    }
+
+    /// Loads an ARKit JSON capture (see `ARKitCapture`). ARKit provides no initialization points.
+    public static func loadARKit(capture: Data,
+                                 imageData: (String) -> Data?,
+                                 maxImageSide: Int,
+                                 decode: ImageDecoder) throws(DatasetError) -> TrainingDataset {
+        let specs = try arkitSpecs(capture: capture)
+        let views = try loadViews(specs,
+                                  imageData: imageData,
+                                  maxImageSide: maxImageSide,
+                                  decode: decode)
+        return TrainingDataset(views: views, points: nil)
+    }
+
+    /// Camera poses of a COLMAP reconstruction without any image. Each camera has the pixel size
+    /// from `cameras.bin`; distortion and image-size rescaling are not applied. Sorted by name.
+    /// Returns an empty array when `colmapImages` lists no images.
+    public static func cameras(colmapCameras: Data, colmapImages: Data) throws(DatasetError) -> [NamedCamera] {
+        try namedCameras(try colmapSpecs(cameras: colmapCameras, images: colmapImages))
+    }
+
+    /// Camera poses of an ARKit JSON capture without any image. Same rules as
+    /// `cameras(colmapCameras:colmapImages:)`.
+    public static func cameras(arkitCapture: Data) throws(DatasetError) -> [NamedCamera] {
+        try namedCameras(try arkitSpecs(capture: arkitCapture))
+    }
+
+    // MARK: - Shared view construction
+
+    /// One view before its image is decoded: camera model, pixel size of the camera and pose.
+    private struct ViewSpec {
+        var name: String
+        var model: CameraModel
+        var width: Int
+        var height: Int
+        var rotation: Matrix3
+        var translation: SIMD3<Float>
+    }
+
+    /// View specs of a COLMAP reconstruction, in image record order.
+    private static func colmapSpecs(cameras: Data, images: Data) throws(DatasetError) -> [ViewSpec] {
         let cameraRecords = try COLMAPReader.readCameras(cameras)
         let imageRecords = try COLMAPReader.readImages(images)
 
@@ -37,24 +101,11 @@ public enum TrainingDatasetLoader {
                                   rotation: pose.rotation,
                                   translation: pose.translation))
         }
-
-        let views = try loadViews(specs,
-                                  imageData: imageData,
-                                  maxImageSide: maxImageSide,
-                                  decode: decode)
-
-        var points: PointCloud?
-        if let points3D {
-            points = pointCloud(try COLMAPReader.readPoints3D(points3D))
-        }
-        return TrainingDataset(views: views, points: points)
+        return specs
     }
 
-    /// Loads an ARKit JSON capture (see `ARKitCapture`). ARKit provides no initialization points.
-    public static func loadARKit(capture: Data,
-                                 imageData: (String) -> Data?,
-                                 maxImageSide: Int,
-                                 decode: ImageDecoder) throws(DatasetError) -> TrainingDataset {
+    /// View specs of an ARKit JSON capture, in frame order.
+    private static func arkitSpecs(capture: Data) throws(DatasetError) -> [ViewSpec] {
         let parsed: ARKitCapture
         do {
             parsed = try JSONDecoder().decode(ARKitCapture.self, from: capture)
@@ -73,24 +124,26 @@ public enum TrainingDatasetLoader {
                                   rotation: resolved.rotation,
                                   translation: resolved.translation))
         }
-
-        let views = try loadViews(specs,
-                                  imageData: imageData,
-                                  maxImageSide: maxImageSide,
-                                  decode: decode)
-        return TrainingDataset(views: views, points: nil)
+        return specs
     }
 
-    // MARK: - Shared view construction
-
-    /// One view before its image is decoded: camera model, pixel size of the camera and pose.
-    private struct ViewSpec {
-        var name: String
-        var model: CameraModel
-        var width: Int
-        var height: Int
-        var rotation: Matrix3
-        var translation: SIMD3<Float>
+    /// Cameras at their own pixel size, sorted by name in the same order `loadViews` uses. Does not
+    /// read images, so an empty list is valid here (unlike `loadViews`, which throws `noViews`).
+    private static func namedCameras(_ specs: [ViewSpec]) throws(DatasetError) -> [NamedCamera] {
+        var result: [NamedCamera] = []
+        result.reserveCapacity(specs.count)
+        for spec in specs.sorted(by: { $0.name < $1.name }) {
+            guard spec.width > 0, spec.height > 0 else {
+                throw .truncated(file: "cameras.bin")
+            }
+            let camera = Camera(model: spec.model,
+                                width: spec.width,
+                                height: spec.height,
+                                rotation: spec.rotation,
+                                translation: spec.translation)
+            result.append(NamedCamera(name: spec.name, camera: camera))
+        }
+        return result
     }
 
     /// Checks that every image exists (reporting all missing names at once), then decodes and
