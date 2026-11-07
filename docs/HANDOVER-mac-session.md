@@ -55,3 +55,9 @@ The viewer uses `ViewCamera` (SplatCore: turntable camera with roll, Blender vie
 - Inspector "Viewport": Up Axis, View menu, Camera picker, "Fly through" slider and Play/Pause. Reduce Motion makes flights jump.
 - A keyboard button (toolbar of the .ply window, "Viewport" section of the project inspector) opens a popover with all shortcuts (`ViewerShortcutsView`).
 - Not done: orthographic view (key 5; the rasterizer is perspective only), selection-based framing.
+
+## Editing and export (Phase 5, 2026-11-07)
+
+Edit mode (paintbrush in the toolbar, project window and .ply/.splat/.spz viewer window): left drag paints a selection by projected centre (x-ray, brush radius in points, Shift subtracts), Delete/X deletes, A / Option+A / Ctrl+I select all / clear / invert, Cmd+Z / Shift+Cmd+Z undo / redo, plus a glass control bar with the same actions. Deletions are non-destructive: a project stores `edits/deleted.bin` (+ `edits` in the manifest) next to the checkpoint; a new checkpoint or import drops them. In the viewer window edits live in memory and are saved by exporting. Export (toolbar) writes `.ply`, `.splat` (DC colour only) or `.spz` (v2, gzip, SPZ's own RUB frame; v3/v4 files cannot be read) with the deletions applied.
+
+Checked in the running app: painting, delete, undo/redo, delete-all and restore, persistence across save and reopen (27 901 deleted Gaussians restored), export sheet. Not checked end to end: the saved export files in other viewers (only round-trip unit tests), the Save panel with a typed path (an automation artefact), pasteboard and trackpad gestures. Known limits: the brush projects every Gaussian per mouse event (not measured on 757 k Gaussians in a slow case), x-ray selection only (no front-only mode).

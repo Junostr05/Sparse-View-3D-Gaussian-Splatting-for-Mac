@@ -1,12 +1,9 @@
 import AppKit
 import Foundation
 import Observation
-import OSLog
 import SplatCore
 import SplatIO
 import SplatMetal
-
-private let logger = Logger(subsystem: "io.github.junostr05.SparseSplat", category: "Viewer")
 
 /// Metal objects for one window. Deliberately not observable.
 final class MetalSession {
@@ -53,10 +50,11 @@ final class ViewerModel {
     static let secondsPerSegment: Double = 1.5
 
     /// The scene shown by the viewport. Replaced during training by `replaceCloud(_:)`.
-    private(set) var scene: LoadedScene
+    /// Written by the editing extension (`ViewerModel+Editing.swift`) too, hence not `private(set)`.
+    var scene: LoadedScene
 
-    /// Incremented on every `replaceCloud(_:)`. `ViewportView` reads it so SwiftUI re-renders the view.
-    private(set) var cloudRevision = 0
+    /// Incremented on every `replaceCloud(_:)` and every edit. `ViewportView` reads it so SwiftUI re-renders the view.
+    var cloudRevision = 0
 
     /// The camera the viewport renders. Changed by input, by flights and by playback.
     private(set) var view: ViewCamera
@@ -64,6 +62,40 @@ final class ViewerModel {
     var background: Background = .black
     var isInspectorPresented = true
     var renderState: RenderState = .preparing
+
+    // MARK: Editing state. The behaviour is in ViewerModel+Editing.swift.
+
+    /// The base cloud the edit history refers to. Replaced by `replaceCloud(_:)`.
+    @ObservationIgnored var baseCloud: GaussianCloud
+    /// Deletions of the base cloud, with undo and redo.
+    var history: EditHistory
+    /// Base index of each displayed Gaussian: element `i` is the base index of display index `i`.
+    var displayIndexToBase: [Int]
+    /// Selected Gaussians, over display indices.
+    var selection: SelectionMask
+    /// Set by the project model: false while a training preview is shown, which disables editing.
+    var isEditingAllowed = true {
+        didSet {
+            if !isEditingAllowed {
+                isEditing = false
+            }
+        }
+    }
+    /// Edit mode: a left drag paints the brush selection instead of orbiting.
+    var isEditing = false {
+        didSet {
+            if !isEditing {
+                brushCursor = nil
+            }
+        }
+    }
+    /// Brush radius in points.
+    var brushRadius: Double = 40
+    var brushMode: BrushMode = .add
+    /// Brush cursor in view points with a top-left origin. `nil` when the pointer is outside the viewport.
+    var brushCursor: CGPoint?
+    /// Called after every delete, undo and redo with the cumulative deletions as base indices.
+    @ObservationIgnored var onDeletionsChanged: ((_ baseCount: Int, _ deleted: [UInt32]) -> Void)?
 
     /// Estimated cameras of the project, in the order the viewer lists them. Empty for a plain .ply scene.
     let cameras: [NamedCamera]
@@ -97,6 +129,11 @@ final class ViewerModel {
 
     init(scene: LoadedScene, upAxis: UpAxis = .negativeY, cameras: [NamedCamera] = []) {
         self.scene = scene
+        let count: Int = scene.cloud.count
+        self.baseCloud = scene.cloud
+        self.history = EditHistory(baseCount: count)
+        self.displayIndexToBase = Array(0..<count)
+        self.selection = SelectionMask(count: count)
         let bounds = scene.cloud.robustBounds()
         self.bounds = bounds
         self.upAxis = upAxis
@@ -120,19 +157,13 @@ final class ViewerModel {
         }
     }
 
-    /// Replaces the displayed Gaussians, for example with a training preview. The camera keeps
-    /// its view. Before the renderer exists the new cloud is used when it is created.
+    /// Replaces the base cloud, for example with a training preview or the final result of a run.
+    /// The camera keeps its view. The edit state is reset: the new cloud has no deletions, no selection
+    /// and editing is off. Before the renderer exists the new cloud is used when it is created.
     func replaceCloud(_ cloud: GaussianCloud) {
-        scene = LoadedScene(cloud: cloud, removedNonFinite: 0)
+        resetEditing(baseCloud: cloud)
         shDegreeLimit = min(shDegreeLimit, cloud.shDegree)
-        if case .ready(let session) = renderState {
-            do throws(MetalError) {
-                try session.renderer.setCloud(cloud)
-            } catch {
-                logger.error("Replacing the cloud failed: \(String(describing: error))")
-            }
-        }
-        cloudRevision += 1
+        presentCloud(cloud, removedNonFinite: 0)
     }
 
     func report(_ newStats: FrameStats) {

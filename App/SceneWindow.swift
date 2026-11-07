@@ -3,9 +3,13 @@ import SplatCore
 import SplatIO
 
 struct SceneWindow: View {
+    /// The file name without extension, used as the default export name.
+    let name: String
     @State private var model: ViewerModel
+    @State private var exportError: String?
 
-    init(scene: LoadedScene) {
+    init(scene: LoadedScene, name: String) {
+        self.name = name
         _model = State(initialValue: ViewerModel(scene: scene))
     }
 
@@ -19,6 +23,12 @@ struct SceneWindow: View {
                         Label("Reset View", systemImage: "arrow.counterclockwise")
                     }
                     .keyboardShortcut("0", modifiers: .command)
+                }
+                ToolbarItem {
+                    EditModeToggle(model: model)
+                }
+                ToolbarItem {
+                    ExportButton(model: model, defaultName: name, onFailure: { exportError = $0 })
                 }
                 ToolbarItem {
                     Menu {
@@ -44,6 +54,14 @@ struct SceneWindow: View {
             .inspector(isPresented: $model.isInspectorPresented) {
                 SceneInspector(model: model)
                     .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
+            }
+            .alert("Export Failed", isPresented: Binding(
+                get: { exportError != nil },
+                set: { if !$0 { exportError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(exportError ?? "")
             }
     }
 }

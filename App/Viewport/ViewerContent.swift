@@ -6,6 +6,8 @@ struct ViewerContent: View {
     let model: ViewerModel
 
     var body: some View {
+        // Read here so that the brush bar appears and disappears with edit mode.
+        let isEditing: Bool = model.isEditingActive
         Group {
             switch model.renderState {
             case .preparing:
@@ -13,6 +15,15 @@ struct ViewerContent: View {
             case .ready(let session):
                 ViewportView(model: model, session: session)
                     .accessibilityLabel("3D viewport")
+                    .overlay {
+                        EditOverlay(model: model)
+                    }
+                    .overlay(alignment: .bottom) {
+                        if isEditing {
+                            BrushControls(model: model)
+                                .padding(.bottom, 16)
+                        }
+                    }
             case .unavailable:
                 ContentUnavailableView(
                     "Metal Not Available",

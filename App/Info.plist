@@ -62,6 +62,18 @@
 				<string>io.github.junostr05.SparseSplat.splat</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Compressed Splat</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.junostr05.SparseSplat.spz</string>
+			</array>
+		</dict>
 	</array>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
@@ -116,6 +128,23 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>splat</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.junostr05.SparseSplat.spz</string>
+			<key>UTTypeDescription</key>
+			<string>Compressed Splat</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>spz</string>
 				</array>
 			</dict>
 		</dict>

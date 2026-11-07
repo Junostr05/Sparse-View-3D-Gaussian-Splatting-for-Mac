@@ -33,6 +33,20 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         view.onCommand = { command in
             model.apply(command)
         }
+        view.onBrushStroke = { [weak view] stroke, shift in
+            guard let view else { return }
+            let size: CGSize = view.drawableSize
+            let backingScale: Float = Float(size.width / max(view.bounds.width, 1))
+            let viewSize: SIMD2<Float> = SIMD2(Float(size.width), Float(size.height))
+            let mode: BrushMode = shift ? .subtract : model.brushMode
+            model.applyBrush(stroke: stroke, viewSizePixels: viewSize, backingScale: backingScale, mode: mode)
+        }
+        view.onBrushCursor = { point in
+            model.brushCursor = point
+        }
+        view.onEditCommand = { command in
+            model.performEdit(command)
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {

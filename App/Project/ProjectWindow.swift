@@ -5,6 +5,8 @@ import SplatIO
 /// The window of a `.gsproj` project: image list, live viewport and the training inspector.
 struct ProjectWindow: View {
     let document: Binding<ProjectDocument>
+    /// The package name without extension, used as the default export name.
+    let name: String
     @State private var model = ProjectModel()
     @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
@@ -20,6 +22,14 @@ struct ProjectWindow: View {
             detail(for: contents)
         }
         .toolbar {
+            if let viewer = model.viewer {
+                ToolbarItem {
+                    EditModeToggle(model: viewer)
+                }
+                ToolbarItem {
+                    ExportButton(model: viewer, defaultName: name, onFailure: { model.errorMessage = $0 })
+                }
+            }
             ToolbarItem {
                 Toggle(isOn: $isInspectorPresented) {
                     Label("Inspector", systemImage: "sidebar.trailing")
@@ -31,7 +41,7 @@ struct ProjectWindow: View {
                 .inspectorColumnWidth(min: 240, ideal: 300, max: 380)
         }
         .task {
-            await model.restoreCheckpoint(contents)
+            await model.restoreCheckpoint(contents, document: document)
         }
         .onDisappear {
             pipeline.close()

@@ -11,10 +11,12 @@ struct SparseSplatApp: App {
     var body: some Scene {
         // First group: launching the app opens an empty project. Keep it first.
         DocumentGroup(newDocument: ProjectDocument()) { file in
-            ProjectWindow(document: file.$document)
+            ProjectWindow(document: file.$document,
+                          name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene")
         }
         DocumentGroup(viewing: SplatDocument.self) { file in
-            SceneWindow(scene: file.document.scene)
+            SceneWindow(scene: file.document.scene,
+                        name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene")
         }
     }
 }

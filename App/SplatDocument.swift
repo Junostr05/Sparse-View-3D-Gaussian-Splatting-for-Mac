@@ -6,6 +6,7 @@ import SplatIO
 extension UTType {
     nonisolated static let gaussianPLY = UTType(importedAs: "io.github.junostr05.SparseSplat.gaussian-ply")
     nonisolated static let antimatterSplat = UTType(importedAs: "io.github.junostr05.SparseSplat.splat")
+    nonisolated static let compressedSplat = UTType(importedAs: "io.github.junostr05.SparseSplat.spz")
 }
 
 /// Read-only document holding a parsed Gaussian scene.
@@ -13,7 +14,7 @@ extension UTType {
 /// The type is `nonisolated` so the `FileDocument` requirements (and the parsing in
 /// `init(configuration:)`) do not run under the app's default `@MainActor` isolation.
 nonisolated struct SplatDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.gaussianPLY, .antimatterSplat] }
+    static var readableContentTypes: [UTType] { [.gaussianPLY, .antimatterSplat, .compressedSplat] }
     static var writableContentTypes: [UTType] { [] }
 
     let scene: LoadedScene
@@ -57,6 +58,14 @@ nonisolated struct SplatDocument: FileDocument {
             "The file header declares an invalid size."
         case .empty:
             "The file does not contain any Gaussians."
+        case .unsupportedCompression:
+            "The file is compressed in a way this Mac cannot decode."
+        case .corrupt(let detail):
+            "The file is corrupt: \(detail)."
+        case .nonFinite:
+            "The file contains a value that is not a finite number."
+        case .outOfRange(let detail):
+            "The file contains a value out of range: \(detail)."
         }
     }
 }

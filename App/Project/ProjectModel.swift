@@ -195,6 +195,10 @@ final class ProjectModel {
     /// The held-out view of the current leave-one-out run. Named only in the `.selection` phase, so the
     /// final-phase events and the checkpoint take it from here.
     @ObservationIgnored private var heldOutViewName: String?
+    /// True while the viewer's base cloud is the stored latest checkpoint, so its edits can be saved.
+    /// False while a training preview is the base: a preview is not stored, and its deletions would
+    /// refer to a cloud the package does not hold.
+    @ObservationIgnored private var editsTargetCheckpoint = false
 
     var isPaused: Bool {
         progress?.state == .paused
@@ -259,17 +263,47 @@ final class ProjectModel {
     // MARK: - Viewer
 
     /// Shows the stored checkpoint in the viewport, if the package has one and no viewer exists yet.
-    func restoreCheckpoint(_ contents: ProjectContents) async {
+    /// The stored deletions of that checkpoint are applied, and later edits are written into `document`.
+    func restoreCheckpoint(_ contents: ProjectContents, document: Binding<ProjectDocument>) async {
         guard viewer == nil, !isTraining else { return }
         do {
             guard let cloud = try await ProjectImport.loadCheckpoint(contents) else { return }
             guard viewer == nil else { return }
-            viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
-                                 upAxis: UpAxis.forInputKind(contents.manifest.inputKind),
-                                 cameras: (try? ProjectBundle.cameraPoses(contents)) ?? [])
+            let restored: ViewerModel = makeViewer(cloud: cloud, contents: contents,
+                                                   document: document, baseIsCheckpoint: true)
+            do {
+                // The deletions belong to the latest checkpoint only: a different count means they are stale.
+                if let stored = try ProjectBundle.deletions(contents), stored.baseGaussianCount == cloud.count {
+                    restored.restoreDeletions(stored.deleted)
+                }
+            } catch {
+                warningMessage = "The stored edits could not be read and were not applied: \(Self.describe(error))"
+            }
+            viewer = restored
         } catch {
             errorMessage = Self.describe(error)
         }
+    }
+
+    /// Creates the viewport model for `cloud`. Its deletions are written into `document` through
+    /// `ProjectBundle.withDeletions`, but only while the base cloud is the stored checkpoint.
+    private func makeViewer(cloud: GaussianCloud,
+                            contents: ProjectContents,
+                            document: Binding<ProjectDocument>,
+                            baseIsCheckpoint: Bool) -> ViewerModel {
+        editsTargetCheckpoint = baseIsCheckpoint
+        let model = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
+                                upAxis: UpAxis.forInputKind(contents.manifest.inputKind),
+                                cameras: (try? ProjectBundle.cameraPoses(contents)) ?? [])
+        // Editing is locked while a run is in progress; `runTraining` unlocks it at the end.
+        model.isEditingAllowed = !isTraining
+        model.onDeletionsChanged = { [weak self] baseCount, deleted in
+            guard self?.editsTargetCheckpoint == true else { return }
+            document.wrappedValue.contents = ProjectBundle.withDeletions(document.wrappedValue.contents,
+                                                                         baseGaussianCount: baseCount,
+                                                                         deleted: deleted)
+        }
+        return model
     }
 
     // MARK: - Training
@@ -285,6 +319,7 @@ final class ProjectModel {
         progress = nil
         heldOutViewName = nil
         isTraining = true
+        viewer?.isEditingAllowed = false
         Task {
             await self.runTraining(contents: contents, document: document)
         }
@@ -305,9 +340,7 @@ final class ProjectModel {
             if viewer == nil {
                 let cloud: GaussianCloud = await DepthPipeline.previewCloud(depth)
                 if viewer == nil {
-                    viewer = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
-                                         upAxis: UpAxis.forInputKind(contents.manifest.inputKind),
-                                         cameras: (try? ProjectBundle.cameraPoses(contents)) ?? [])
+                    viewer = makeViewer(cloud: cloud, contents: contents, document: document, baseIsCheckpoint: false)
                 }
             }
             // Each run builds its own initial cloud from its own dataset (see `DepthPreparedRun.initializer`).
@@ -332,6 +365,7 @@ final class ProjectModel {
         session = nil
         runTask = nil
         isTraining = false
+        viewer?.isEditingAllowed = true
     }
 
     /// Shows one progress event. Previews update the viewer; the terminal states store a checkpoint.
@@ -348,11 +382,14 @@ final class ProjectModel {
 
         if let cloud = event.preview {
             viewer?.replaceCloud(cloud)
+            editsTargetCheckpoint = false
         }
 
         switch event.state {
         case .finished, .cancelled:
             if let cloud = event.preview {
+                // The checkpoint stored below is this cloud, so the viewer's base is the stored checkpoint again.
+                editsTargetCheckpoint = true
                 // A single run has no held-out fields; leave-one-out carries them on the terminal event.
                 let record = CheckpointRecord(iteration: event.iteration,
                                               gaussianCount: cloud.count,

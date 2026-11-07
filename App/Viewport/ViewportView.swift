@@ -22,6 +22,8 @@ struct ViewportView: NSViewRepresentable {
         _ = model.shDegreeLimit
         _ = model.background
         _ = model.cloudRevision
+        // Edit mode changes how the mouse and the keys are read, so it is part of the update too.
+        nsView.isEditing = model.isEditingActive
         nsView.needsDisplay = true
     }
 }
