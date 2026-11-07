@@ -143,6 +143,18 @@ extension CPURasterizer {
                                                settings: RasterSettings,
                                                imageGradient: [SIMD3<Float>],
                                                depthGradient: [SIMD2<Float>]?) -> ScreenSpaceBackward {
+        backwardCore(cloud, camera: camera, settings: settings, imageGradient: imageGradient,
+                     depthGradient: depthGradient, collectPose: false).screenSpace
+    }
+
+    /// Shared implementation of the backward pass. With `collectPose`, the per-Gaussian camera pose
+    /// gradients (`GaussianChain.propagate`) are summed as well; the parameter gradients are the same either way.
+    static func backwardCore(_ cloud: GaussianCloud,
+                             camera: Camera,
+                             settings: RasterSettings,
+                             imageGradient: [SIMD3<Float>],
+                             depthGradient: [SIMD2<Float>]?,
+                             collectPose: Bool) -> (screenSpace: ScreenSpaceBackward, pose: PoseGradient) {
         precondition(imageGradient.count == camera.width * camera.height,
                      "imageGradient must hold width·height pixels")
         if let depthGradient {
@@ -207,14 +219,18 @@ extension CPURasterizer {
         var gradients = GaussianGradients(zeroLike: cloud)
         var mean2D = [SIMD2<Float>](repeating: .zero, count: cloud.count)
         var visible = [Bool](repeating: false, count: cloud.count)
+        var pose = PoseGradient.zero
         for (k, entry) in sorted.enumerated() {
             let chain = GaussianChain(cloud: cloud, index: entry.index, camera: camera,
                                       settings: settings)
-            chain.propagate(screen[k], into: &gradients)
+            if let contribution = chain.propagate(screen[k], into: &gradients, collectPose: collectPose) {
+                pose += contribution
+            }
             mean2D[entry.index] = SIMD2(Float(screen[k].mean2D.x), Float(screen[k].mean2D.y))
             visible[entry.index] = true
         }
-        return ScreenSpaceBackward(gradients: gradients, mean2D: mean2D, visible: visible)
+        let screenSpace = ScreenSpaceBackward(gradients: gradients, mean2D: mean2D, visible: visible)
+        return (screenSpace, pose)
     }
 }
 
@@ -467,7 +483,10 @@ private struct GaussianChain {
                 [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]]
     }
 
-    func propagate(_ g: ScreenSpaceGradient, into out: inout GaussianGradients) {
+    /// Propagates `g` to the stored parameters. With `collectPose`, also returns this Gaussian's
+    /// contribution to the camera pose gradient at δ = 0 (see PoseGradient.swift); nil otherwise.
+    func propagate(_ g: ScreenSpaceGradient, into out: inout GaussianGradients,
+                   collectPose: Bool) -> PoseGradient? {
         let fx = Double(camera.fx), fy = Double(camera.fy)
 
         // Mip mode: the used opacity is o·κ·c2, so ∂L/∂o_used = g.opacity, and the factors below apply.
@@ -566,6 +585,7 @@ private struct GaussianChain {
         }
 
         // --- colour: SH + 0.5, clamped at 0 per channel
+        var directionGradient = SIMD3<Double>.zero
         let degree = min(cloud.shDegree, settings.shDegreeLimit)
         let coefficientCount = GaussianCloud.coefficientCount(degree: cloud.shDegree)
         let used = (degree + 1) * (degree + 1)
@@ -593,9 +613,40 @@ private struct GaussianChain {
                 dDirection += projected * SIMD3(basis.dx[k], basis.dy[k], basis.dz[k])
             }
             // direction = v/|v|, v = p − C
-            dPosition += (dDirection - direction * (direction * dDirection).sum()) / length
+            directionGradient = (dDirection - direction * (direction * dDirection).sum()) / length
+            dPosition += directionGradient
         }
 
         for c in 0..<3 { out.positions[3 * index + c] += Float(dPosition[c]) }
+
+        guard collectPose else { return nil }
+        // Camera pose at δ = 0 (derivation in PoseGradient.swift). Camera-space point: dL/dτ += dL/dpc,
+        // dL/dω += pc × dL/dpc. Covariance through W: S = W·Σ3·Wᵀ, G = Jᵀ·g2·J, dL/dω += 2·(M12, −M02, M01)
+        // with M = S·G − G·S. View direction: C' = C − Wᵀτ at δ = 0, so dL/dτ += W·(dL/dp through the direction)
+        // and dL/dω has no direction term.
+        let gCamera = matmul(matmul(transpose(jacobian), g2), jacobian)
+        let sCamera = matmul(matmul(w, sigma3D), transpose(w))
+        let commutator = matmul(sCamera, gCamera)
+        let reverse = matmul(gCamera, sCamera)
+        var commutatorDifference = commutator
+        for i in 0..<3 { for j in 0..<3 { commutatorDifference[i][j] = commutator[i][j] - reverse[i][j] } }
+        let covarianceRotation = SIMD3<Double>(2 * commutatorDifference[1][2],
+                                               -2 * commutatorDifference[0][2],
+                                               2 * commutatorDifference[0][1])
+        let rotation = crossProduct(pCam, dpc) + covarianceRotation
+        let translation = dpc + applyMatrix(w, directionGradient)
+        return PoseGradient(rotation: rotation, translation: translation)
     }
+}
+
+/// Cross product of two Double vectors.
+private func crossProduct(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> SIMD3<Double> {
+    SIMD3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+}
+
+/// `m · v` for a row-major Double matrix.
+private func applyMatrix(_ m: Mat, _ v: SIMD3<Double>) -> SIMD3<Double> {
+    SIMD3(m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+          m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+          m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z)
 }

@@ -34,14 +34,18 @@ public struct TrainingOutcome: Sendable {
     public var heldOut: HeldOutMetrics?
     /// Completed iterations of the run that produced `cloud`.
     public var iterations: Int
+    /// Training cameras (dataset view order) with the learned pose corrections applied, from the run that produced
+    /// `cloud`. Nil when pose refinement is off.
+    public var refinedCameras: [Camera]?
 
     public init(cloud: GaussianCloud, heldOutView: String? = nil, bestIteration: Int? = nil,
-                heldOut: HeldOutMetrics? = nil, iterations: Int) {
+                heldOut: HeldOutMetrics? = nil, iterations: Int, refinedCameras: [Camera]? = nil) {
         self.cloud = cloud
         self.heldOutView = heldOutView
         self.bestIteration = bestIteration
         self.heldOut = heldOut
         self.iterations = iterations
+        self.refinedCameras = refinedCameras
     }
 }
 
@@ -161,7 +165,8 @@ public actor TrainingSession {
         let trainer = try startTrainer(dataset: dataset)
         let (end, rate) = try await train(trainer, limit: configuration.iterations)
         let cloud = try complete(trainer, end: end, rate: rate, total: configuration.iterations)
-        return TrainingOutcome(cloud: cloud, iterations: trainer.iteration)
+        return TrainingOutcome(cloud: cloud, iterations: trainer.iteration,
+                               refinedCameras: try refinedCameras(of: trainer))
     }
 
     private func runLeaveOneOut(heldOutIndex index: Int) async throws(TrainingError) -> TrainingOutcome {
@@ -185,7 +190,14 @@ public actor TrainingSession {
         let (end, rate) = try await train(trainer, limit: stopIteration)
         let cloud = try complete(trainer, end: end, rate: rate, total: stopIteration)
         return TrainingOutcome(cloud: cloud, heldOutView: heldOut.name, bestIteration: scheduler?.bestIteration,
-                               heldOut: scheduler?.bestMetrics, iterations: trainer.iteration)
+                               heldOut: scheduler?.bestMetrics, iterations: trainer.iteration,
+                               refinedCameras: try refinedCameras(of: trainer))
+    }
+
+    /// Refined training cameras of the final run, or nil when pose refinement is off.
+    private func refinedCameras(of trainer: GPUTrainer) throws(TrainingError) -> [Camera]? {
+        guard configuration.poseRefinement.isEnabled else { return nil }
+        return try trainer.refinedCameras()
     }
 
     private enum SelectionResult {
