@@ -62,14 +62,51 @@ struct ProjectInspector: View {
         }
     }
 
-    /// Which world axis points up in the viewport. The start value follows the capture source.
+    /// Up axis, standard views and, when the project has estimated cameras, the camera picker,
+    /// the fly-through slider and playback. The start up axis follows the capture source.
     private func viewportSection(_ viewer: ViewerModel) -> some View {
         let selection = Binding<UpAxis>(get: { viewer.upAxis }, set: { viewer.upAxis = $0 })
+        let cameraSelection = Binding<Int>(get: { viewer.activeCameraIndex ?? 0 },
+                                           set: { viewer.goToCamera($0) })
+        let flightSelection = Binding<Double>(get: { viewer.flightPosition },
+                                              set: { viewer.scrub(to: $0) })
+        let lastPosition: Double = Double(max(viewer.cameras.count - 1, 0))
         return Section("Viewport") {
             Picker("Up Axis", selection: selection) {
                 ForEach(UpAxis.allCases, id: \.self) { axis in
                     Text(axis.displayName).tag(axis)
                 }
+            }
+            Menu("View") {
+                Button("Front") { viewer.apply(.preset(.front)) }
+                Button("Back") { viewer.apply(.preset(.back)) }
+                Button("Right") { viewer.apply(.preset(.right)) }
+                Button("Left") { viewer.apply(.preset(.left)) }
+                Button("Top") { viewer.apply(.preset(.top)) }
+                Button("Bottom") { viewer.apply(.preset(.bottom)) }
+            }
+            if !viewer.cameras.isEmpty {
+                Picker("Camera", selection: cameraSelection) {
+                    ForEach(viewer.cameras.indices, id: \.self) { index in
+                        Text(viewer.cameras[index].name).tag(index)
+                    }
+                }
+                if viewer.cameras.count > 1 {
+                    Slider(value: flightSelection, in: 0...lastPosition) {
+                        Text("Fly through")
+                    }
+                }
+                Button {
+                    viewer.togglePlayback()
+                } label: {
+                    if viewer.isPlaying {
+                        Label("Pause Flight", systemImage: "pause.fill")
+                    } else {
+                        Label("Play Flight", systemImage: "play.fill")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewer.cameras.count < 2)
             }
         }
     }

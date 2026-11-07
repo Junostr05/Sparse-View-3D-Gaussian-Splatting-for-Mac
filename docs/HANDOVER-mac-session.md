@@ -44,3 +44,13 @@ Read first, in this order: `CLAUDE.md` (rules, routing, German replies), `docs/A
 Items 1–7 above are done: the pose stage is Apple Photogrammetry plus the existing COLMAP import (decision of 2026-11-06), the pipeline UI (P9) and Phase 4 tasks 1–22b are merged, CI is green. Measurements and the decision on training defaults (depth prior, dense init, anisotropy, isolation pruning on; scale cap, pseudo-views, early stopping off) are in `docs/superpowers/plans/2026-11-06-phase-4-addendum-input-pipeline.md`. Verified since: the held-out readout in the running app, and the per-view visibility test was measured and not built (see the addendum). Still open: why the depth prior loses at 4 synthetic views (pseudo-views are explained: their warped depth target is too noisy, see the addendum), and the first run of the benchmark workflow on GitHub.
 
 Viewer up axis (2026-11-07): Apple Photogrammetry and ARKit keep a +Y-up world (measured: mean camera up vector +Y, cameras above the point cloud), COLMAP uses -Y up. `UpAxis.forInputKind` sets the viewer's start value from the project's input kind, and the project inspector has an "Up Axis" picker under "Viewport". Checked in the app on the 13 table photos: the trained scene now stands upright.
+
+## Viewer controls (2026-11-07)
+
+The viewer uses `ViewCamera` (SplatCore: turntable camera with roll, Blender views, flight, key mapping; `OrbitCamera` stays as the reference for the gesture directions and the framing). A project opens in the view of its first estimated camera and the camera list comes from `ProjectBundle.cameraPoses` (no image decoding).
+
+- Mouse: middle drag orbits, Shift+middle pans, Ctrl+middle zooms; wheel zooms, Ctrl+wheel pans horizontally, Shift+wheel vertically. Left drag orbits (Option pans), right drag pans.
+- Trackpad: two-finger scroll orbits, Shift pans, Ctrl or Command zooms, pinch zooms.
+- Keys (top row or numpad): 1/3/7 front/right/top, Ctrl+1/3/7 back/left/bottom (the whole scene is framed, unlike Blender, because a camera view's pivot can lie inside the scene); 4/6/8/2 orbit by 15 degrees, with Ctrl they pan; 0 returns to the camera view; `[` and `]` previous/next camera; `.` or Home frames the scene; Space plays or pauses the camera flight.
+- Inspector "Viewport": Up Axis, View menu, Camera picker, "Fly through" slider and Play/Pause. Reduce Motion makes flights jump.
+- Not done: orthographic view (key 5; the rasterizer is perspective only), a help overlay for the shortcuts, selection-based framing.

@@ -16,19 +16,22 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         self.session = session
     }
 
-    /// Wires the view's input closures to the model's orbit camera.
+    /// Wires the view's input closures to the viewer model, which owns the camera.
     func attach(to view: SplatMTKView) {
         let model = self.model
         view.onOrbit = { delta in
             // Dragging right turns the scene right; dragging down views it from above.
-            model.orbit.orbit(deltaYaw: -delta.x * 0.01, deltaPitch: delta.y * 0.01)
+            model.orbit(deltaYaw: -delta.x * 0.01, deltaPitch: delta.y * 0.01)
         }
         view.onPan = { [weak view] delta in
             guard let view else { return }
-            model.orbit.pan(deltaPixels: delta, viewportHeight: Float(max(view.bounds.height, 1)))
+            model.pan(deltaPixels: delta, viewportHeight: Float(max(view.bounds.height, 1)))
         }
         view.onZoom = { factor in
-            model.orbit.zoom(factor: factor)
+            model.zoom(factor: factor)
+        }
+        view.onCommand = { command in
+            model.apply(command)
         }
     }
 
@@ -43,7 +46,7 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         guard width > 0, height > 0 else { return }
         guard let texture = offscreenTexture(width: width, height: height) else { return }
 
-        let camera = model.orbit.camera(width: width, height: height)
+        let camera = model.view.camera(width: width, height: height)
         var settings = RasterSettings()
         settings.shDegreeLimit = model.shDegreeLimit
         settings.background = model.background.color

@@ -18,7 +18,7 @@ struct ViewportView: NSViewRepresentable {
 
     func updateNSView(_ nsView: SplatMTKView, context: Context) {
         // Read everything that affects the image so SwiftUI observation re-runs this method.
-        _ = model.orbit
+        _ = model.view
         _ = model.shDegreeLimit
         _ = model.background
         _ = model.cloudRevision
