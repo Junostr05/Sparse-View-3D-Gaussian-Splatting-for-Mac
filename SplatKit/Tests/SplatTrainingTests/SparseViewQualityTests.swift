@@ -322,9 +322,14 @@ struct SparseViewBenchmark {
         let iterations: Int = 3_000
         var rows: [BenchmarkRow] = []
 
-        for views in [3, 4, 6] {
+        // SPLAT_BENCHMARK_SEED (default 5) and SPLAT_BENCHMARK_VIEWS (e.g. "4", default "3,4,6") narrow the run.
+        let environment = ProcessInfo.processInfo.environment
+        let seed: UInt64 = environment["SPLAT_BENCHMARK_SEED"].flatMap { UInt64($0) } ?? 5
+        let viewCounts: [Int] = environment["SPLAT_BENCHMARK_VIEWS"]
+            .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [3, 4, 6]
+        for views in viewCounts {
             let scene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
-                                            gaussians: 1_200, sparsePoints: 200, seed: 5)
+                                            gaussians: 1_200, sparsePoints: 200, seed: seed)
             let prepared = preparedDataset(scene)
             let extent: SceneExtent = sceneExtent(scene)
             for variant in benchmarkVariants {
