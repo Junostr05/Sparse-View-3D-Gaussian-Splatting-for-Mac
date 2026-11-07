@@ -255,8 +255,9 @@ public struct EarlyStoppingPolicy: Codable, Sendable, Equatable {
 /// to the render before the image loss. It absorbs exposure and white-balance changes between photos, so the
 /// Gaussians do not smear them into the scene. Only the loss sees it; the stored model stays unchanged.
 public struct AppearanceSettings: Codable, Sendable, Equatable {
-    /// On by default (user decision 2026-11-08, after the synthetic benchmark: +3.5 dB with exposure changes, neutral without).
-    public var isEnabled = true
+    /// Off again until the flaky `nonFiniteLoss` on real photos at the default learning rate is fixed (2026-11-08);
+    /// the user decided on 2026-11-08 to switch it on by default once it is safe (+3.5 dB with exposure changes).
+    public var isEnabled = false
     public var learningRate: Float = 2e-3
     /// Weight of the pull of every view's gain towards 1 and bias towards 0 (fixes the global gauge).
     public var identityWeight: Float = 0.01
