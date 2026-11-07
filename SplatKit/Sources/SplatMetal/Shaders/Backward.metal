@@ -297,6 +297,18 @@ inline void zeroParameterGradient(uint gid, uint K, ulong shBase, bool accumulat
     }
 }
 
+// Writes the six camera-pose contributions of one Gaussian into its scratch slots: dL/dω (0..2), then dL/dτ (3..5).
+// Used only when `ProjectUniforms.limits.w` is 1 (pose refinement); see PoseGradient.metal for the reduction.
+inline void storePoseContribution(device float* poseScratch, uint gid, float3 dTau, float3 dOmega)
+{
+    poseScratch[6u * gid] = dOmega.x;
+    poseScratch[6u * gid + 1u] = dOmega.y;
+    poseScratch[6u * gid + 2u] = dOmega.z;
+    poseScratch[6u * gid + 3u] = dTau.x;
+    poseScratch[6u * gid + 4u] = dTau.y;
+    poseScratch[6u * gid + 5u] = dTau.z;
+}
+
 kernel void projectBackward(
     device const float* positions [[buffer(0)]],
     device const float* logScales [[buffer(1)]],
@@ -313,9 +325,12 @@ kernel void projectBackward(
     constant ProjectUniforms& u [[buffer(12)]],
     constant MipFilterUniforms& mip [[buffer(13)]],
     device const float* samplingRates [[buffer(14)]],
+    device float* poseScratch [[buffer(15)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= u.counts.x) return;
+    // limits.w == 1: also write the camera-pose contribution of this Gaussian to poseScratch (6 floats).
+    const bool poseOn = u.limits.w > 0.5f;
 
     uint K = u.shInfo.z;                       // stored SH coefficients per Gaussian
     uint evalDegree = u.shInfo.y;              // min(shDegree, shDegreeLimit)
@@ -343,6 +358,9 @@ kernel void projectBackward(
     if (tilesTouched[gid] == 0u || !(z > 0.0f)) {
         zeroParameterGradient(gid, K, shBase, accumulate, gradPositions, gradLogScales, gradRotations,
                               gradOpacityLogits, gradSH);
+        if (poseOn) {
+            storePoseContribution(poseScratch, gid, float3(0.0f), float3(0.0f));
+        }
         return;
     }
 
@@ -449,6 +467,9 @@ kernel void projectBackward(
     if (!(det > 0.0f)) {
         zeroParameterGradient(gid, K, shBase, accumulate, gradPositions, gradLogScales, gradRotations,
                               gradOpacityLogits, gradSH);
+        if (poseOn) {
+            storePoseContribution(poseScratch, gid, float3(0.0f), float3(0.0f));
+        }
         return;
     }
     // Mip 2D compensation c2 = sqrt(D0 / D1) and its derivatives with respect to the raw entries (a0, b, c0):
@@ -582,6 +603,8 @@ kernel void projectBackward(
             gradSH[shBase + ulong(i)] = 0.0f;
         }
     }
+    // Gradient through the view direction (w.r.t. the Gaussian position), kept apart for the pose path.
+    float3 uDir = float3(0.0f);
     if (len > 0.0f) {
         float3 dir = offset / len;
         float basis[16];
@@ -609,7 +632,22 @@ kernel void projectBackward(
             storeGradient(&gradSH[o + 1ul], basis[k] * dColor.y, accumulate);
             storeGradient(&gradSH[o + 2ul], basis[k] * dColor.z, accumulate);
         }
-        dPos += (dDir - dir * dot(dir, dDir)) / len;
+        uDir = (dDir - dir * dot(dir, dDir)) / len;
+        dPos += uDir;
+    }
+
+    // Camera pose contribution at δ = 0 (the same chain as CPUBackward.swift `GaussianChain.propagate`):
+    // dL/dτ = dL/dpc + W·u and dL/dω = pc × dL/dpc + 2·(M12, −M02, M01) with M = S·G − G·S, S = W·Σ3·Wᵀ, G = W·G3·Wᵀ.
+    // Matrices are column-major: Mc[c][r] is row r, column c, so M12 = Mc[2][1], M02 = Mc[2][0], M01 = Mc[1][0].
+    if (poseOn) {
+        float3x3 Wm = float3x3(cam0, cam1, cam2);
+        float3x3 Gc = Wm * G3 * transpose(Wm);
+        float3x3 Sc = Wm * Sigma3 * transpose(Wm);
+        float3x3 Mc = Sc * Gc - Gc * Sc;
+        float3 covarianceRotation = 2.0f * float3(Mc[2][1], -Mc[2][0], Mc[1][0]);
+        float3 dTau = dpc + Wm * uDir;
+        float3 dOmega = cross(pc, dpc) + covarianceRotation;
+        storePoseContribution(poseScratch, gid, dTau, dOmega);
     }
 
     // Write parameter gradients (overwrite, or add when accumulating).

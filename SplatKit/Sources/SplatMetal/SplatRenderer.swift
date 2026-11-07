@@ -344,7 +344,8 @@ public final class SplatRenderer {
     }
 
     private func makeProjectUniforms(camera: Camera, settings: RasterSettings,
-                                     tilesX: Int, tilesY: Int, accumulate: Bool = false) -> ProjectUniforms {
+                                     tilesX: Int, tilesY: Int, accumulate: Bool = false,
+                                     poseOn: Bool = false) -> ProjectUniforms {
         let store = gaussians
         let evalDegree = max(0, min(store.shDegree, settings.shDegreeLimit))
         let rot = camera.rotation
@@ -358,7 +359,7 @@ public final class SplatRenderer {
             rotRow2: SIMD4(rot.c0.z, rot.c1.z, rot.c2.z, t.z),
             camCenter: SIMD4(c.x, c.y, c.z, 0),
             intrinsics: SIMD4(camera.fx, camera.fy, camera.cx, camera.cy),
-            limits: SIMD4(settings.nearPlane, settings.farPlane, eps2D, 0),
+            limits: SIMD4(settings.nearPlane, settings.farPlane, eps2D, poseOn ? 1 : 0),
             counts: SIMD4(UInt32(store.count), UInt32(camera.width), UInt32(camera.height), UInt32(tilesX)),
             shInfo: SIMD4(UInt32(tilesY), UInt32(evalDegree),
                           UInt32(GaussianCloud.coefficientCount(degree: store.shDegree)),
@@ -417,10 +418,15 @@ extension SplatRenderer {
     /// the gradient buffers are zeroed on the GPU first. When no tile is intersected, the gradients stay as
     /// they are (zero when not accumulating) and no kernel is dispatched (statistics are not touched either,
     /// since no Gaussian is visible).
+    ///
+    /// - Parameter poseSink: when given, the camera-pose gradient of this view is written to the sink's scratch and
+    ///   reduced into its six sums (`PoseGradientSink`), in the same command buffer. Parameter gradients are unchanged.
+    ///   Nothing is written when no tile is intersected.
     public func encodeBackward(imageGradient: MTLBuffer, depthGradient: MTLBuffer? = nil,
                                into gradients: GradientBuffers,
                                statistics: DensificationStatisticsBuffers? = nil,
                                accumulate: Bool = false,
+                               poseSink: PoseGradientSink? = nil,
                                commandBuffer: MTLCommandBuffer) throws(MetalError) {
         guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
         let store = gaussians
@@ -500,9 +506,15 @@ extension SplatRenderer {
         }
 
         // Gaussian stage: one thread per Gaussian, chain rule to the stored parameters.
+        if let poseSink {
+            guard poseSink.scratch.length >= n * 6 * MemoryLayout<Float>.size,
+                  poseSink.sums.length >= (poseSink.base + 6) * MemoryLayout<Float>.size else {
+                throw .commandFailed("pose gradient buffers are too small for the cloud")
+            }
+        }
         var projectUniforms = makeProjectUniforms(camera: frame.camera, settings: frame.settings,
                                                   tilesX: frame.tilesX, tilesY: frame.tilesY,
-                                                  accumulate: accumulate)
+                                                  accumulate: accumulate, poseOn: poseSink != nil)
         var mipUniforms = makeMipUniforms(settings: frame.settings)
         let ratesBinding = try samplingRatesBinding(settings: frame.settings)
         let projectEncoder = try context.makeComputeEncoder(commandBuffer)
@@ -522,8 +534,15 @@ extension SplatRenderer {
         projectEncoder.setBytes(&projectUniforms, length: MemoryLayout<ProjectUniforms>.size, index: 12)
         projectEncoder.setBytes(&mipUniforms, length: MemoryLayout<MipFilterUniforms>.size, index: 13)
         projectEncoder.setBuffer(ratesBinding, offset: 0, index: 14)
+        projectEncoder.setBuffer(poseSink?.scratch ?? gradients.positions, offset: 0, index: 15)
         MetalContext.dispatch1D(projectEncoder, pipeline: projectBackwardPipeline, count: n)
         projectEncoder.endEncoding()
+
+        // Pose gradient (pose refinement): reduce the per-Gaussian contributions into the view's sums.
+        if let poseSink {
+            try poseSink.reducer.encode(scratch: poseSink.scratch, count: n, sums: poseSink.sums,
+                                        base: poseSink.base, commandBuffer: commandBuffer)
+        }
     }
 
     /// Rendered depth of the view, for tests and evaluation. Synchronous: waits for the GPU.

@@ -132,6 +132,11 @@ public final class GPUTrainer {
     private let depthLoss: GPUDepthLoss?
     /// Per-view colour compensation (v1.2). Nil unless `configuration.appearance.isEnabled`.
     let appearance: GPUAppearance?
+    /// Camera pose refinement (v1.2), nil unless `configuration.poseRefinement.isEnabled` (GPUPoseRefiner.swift).
+    private let poseRefiner: GPUPoseRefiner?
+    /// The training cameras in view order. Pose corrections are folded into these; without refinement they equal the
+    /// dataset's cameras. Pseudo-views keep their own cameras.
+    private var cameras: [Camera]
     /// Grow-only, zero-filled dL/drendered for pseudo-view backward passes. Only read by the GPU, so it stays zero.
     private var zeroImageGradient: MTLBuffer?
     /// True from a pseudo-view encode until the trainer reads its value at a wait point.
@@ -292,6 +297,15 @@ public final class GPUTrainer {
             }
         }
 
+        // Camera pose refinement (v1.2): one pose gradient sink per training view, created only when enabled.
+        var poseRefiner: GPUPoseRefiner?
+        if configuration.poseRefinement.isEnabled {
+            poseRefiner = try metalCall { () throws(MetalError) -> GPUPoseRefiner in
+                try GPUPoseRefiner(context: context, viewCount: dataset.views.count,
+                                   settings: configuration.poseRefinement, hyper: configuration.adam)
+            }
+        }
+
         var phase4Terms: [any AuxiliaryLoss] = []
         var depthTerm: DepthLossTerm?
         if hasDepthTerm, let depthLoss = depthLossObject {
@@ -354,6 +368,8 @@ public final class GPUTrainer {
         self.pseudoPriors = pseudoPriors
         self.depthLoss = depthLossObject
         self.appearance = appearanceModel
+        self.poseRefiner = poseRefiner
+        self.cameras = dataset.views.map { $0.camera }
         rebuildTermCache()
     }
 
@@ -401,8 +417,11 @@ public final class GPUTrainer {
     private func advance() throws(TrainingError) -> StepReport {
         let index = iteration
         let viewIndex = sampler.next()
-        let view = views[viewIndex]
-        let camera = view.camera
+        // Pose refinement: fold the pending pose gradients before this view's camera is read (GPUPoseRefiner).
+        if let poseRefiner, poseRefiner.hasPendingGradient {
+            _ = try synchronize()
+        }
+        let camera = cameras[viewIndex]
         let width = camera.width
         let height = camera.height
         var settings = RasterSettings(shDegreeLimit: configuration.activeSHDegree(iteration: index),
@@ -477,10 +496,14 @@ public final class GPUTrainer {
         // MCMC replaces classic densification, so it needs no statistics (v1.2).
         let collectsStatistics = index < configuration.densification.stopIteration && !configuration.mcmc.isEnabled
         let statisticsTarget: DensificationStatisticsBuffers? = collectsStatistics ? statistics : nil
+        let poseSink = try poseSinkForStep(viewIndex: viewIndex, iteration: index)
         try metalCall { () throws(MetalError) -> Void in
             try self.renderer.encodeBackward(imageGradient: gradientImage, depthGradient: depthPass?.gradient,
                                              into: currentGradients, statistics: statisticsTarget,
-                                             commandBuffer: commandBuffer)
+                                             poseSink: poseSink, commandBuffer: commandBuffer)
+        }
+        if poseSink != nil, pass.tileIntersections > 0, store.count > 0 {
+            poseRefiner?.noteAccumulation(viewIndex: viewIndex)
         }
 
         // Step 4 (Task 18): a pseudo iteration commits the training part (steps 1–3) and encodes the pseudo-view into
@@ -631,6 +654,8 @@ public final class GPUTrainer {
         if let gpuError {
             throw .metal(gpuError)
         }
+        // Pose refinement: every pending pose gradient is complete now; apply and fold them (GPUPoseRefiner).
+        poseRefiner?.applyPending(cameras: &cameras, sceneRadius: sceneExtent.radius)
 
         guard let stepIndex = unvalidatedLossStep else {
             return LossReadout()
@@ -669,6 +694,28 @@ public final class GPUTrainer {
         }
     }
 
+    // MARK: - Pose refinement (v1.2)
+
+    /// Pose sink of this step's training view, or nil when pose refinement is off or has not started (`startIteration`).
+    private func poseSinkForStep(viewIndex: Int, iteration index: Int) throws(TrainingError) -> PoseGradientSink? {
+        guard let poseRefiner, index >= configuration.poseRefinement.startIteration else {
+            return nil
+        }
+        let capacity = store.capacity
+        return try metalCall { () throws(MetalError) -> PoseGradientSink in
+            try poseRefiner.sink(viewIndex: viewIndex, capacity: capacity)
+        }
+    }
+
+    /// The training cameras in view order with every pose correction applied so far. Waits for the GPU. Equal to the
+    /// dataset's cameras when pose refinement is off.
+    public func refinedCameras() throws(TrainingError) -> [Camera] {
+        try guarded { () throws(TrainingError) -> [Camera] in
+            _ = try self.synchronize()
+            return self.cameras
+        }
+    }
+
     private func measurePSNR() throws(TrainingError) -> Double {
         _ = try synchronize()
         // Evaluation uses the full degree of the model, not the schedule's current degree.
@@ -683,7 +730,7 @@ public final class GPUTrainer {
         var sum: Double = 0
         for (index, view) in views.enumerated() {
             var rendered = try metalCall { () throws(MetalError) -> RGBImage in
-                try self.renderer.renderImage(camera: view.camera, settings: settings)
+                try self.renderer.renderImage(camera: self.cameras[index], settings: settings)
             }
             if let compensation {
                 rendered = AppearanceTransform.apply(rendered, compensation[index])
@@ -770,7 +817,7 @@ public final class GPUTrainer {
         guard let commandBuffer = context.queue.makeCommandBuffer() else {
             throw .metal("cannot create command buffer")
         }
-        let cameras = views.map { $0.camera }
+        let cameras = self.cameras
         try metalCall { () throws(MetalError) -> Void in
             try kernel.encode(positions: self.store.positions, count: self.store.count, cameras: cameras,
                               near: GPUTrainer.depthNearPlane, into: buffer, commandBuffer: commandBuffer)
