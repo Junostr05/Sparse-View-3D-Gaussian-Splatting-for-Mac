@@ -174,4 +174,25 @@ The depth prior is the only component with a clear gain (+0.7 dB, +0.028 SSIM). 
 
 Decision 14 changed. New projects start with the depth prior (Pearson + L1), dense initialisation, anisotropy and isolation pruning **on**; scale cap, pseudo-views and early stopping **off**; all remain switchable in the inspector. `TrainingConfiguration.defaultRegularizers` holds the set, `EarlyStoppingPolicy.offByDefault` the early-stopping default. Stored revision-2 manifests keep what they stored.
 
-Open: pseudo-views losing against the depth prior alone is unexplained (design weakness or a bug, not investigated); the 4-view synthetic regression of the depth prior is unexplained; the benchmark workflow (`.github/workflows/benchmark.yml`) has never run on GitHub.
+Open: the 4-view synthetic regression of the depth prior is unexplained; the benchmark workflow (`.github/workflows/benchmark.yml`) has never run on GitHub.
+
+### Pseudo-view investigation (2026-11-07)
+
+Diagnostics (opt-in with `SPLAT_PSEUDO_SWEEP=1`, suite `PseudoViewSweep` in `SparseViewQualityTests.swift`). Synthetic scene, depth prior as base, 3000 iterations, novel-view PSNR in dB:
+
+| Variant | 3 views | 4 views |
+|---|---|---|
+| depth prior only | **26.55** | **29.06** |
+| pseudo-views, defaults (w 0.05, start 2000, 3 per pair) | 23.57 | 27.62 |
+| weight 0.01 | 25.63 | 28.54 |
+| weight 0.2 | 23.12 | 25.40 |
+| start at iteration 500 | 23.06 | 26.42 |
+| interval 8 instead of 2 | 25.47 | 27.98 |
+| 1 per pair | 25.79 | 27.47 |
+| full resolution | 23.55 | 25.70 |
+
+Every variant is worse than the depth prior alone, and the effect is monotonic: the less the pseudo-views act (lower weight, sparser, later), the closer the result gets to "depth only". No setting gives a gain.
+
+Cause, as far as measured: the warp code is correct (warping a parent into its own camera gives Pearson 1.0000 to the ground truth, `interpolate` at t = 0 reproduces the camera). The forward-warped target of two parents is a poor depth target at the interpolated camera: Pearson against the ground-truth depth is 0.45–0.64 at 3 views and 0.75–0.92 at 4 views, worst at t = 0.25 and 0.75, best at t = 0.5. With the Pearson loss at its normal strength this pulls the model toward a noisy target. The synthetic scene's soft Gaussian "surface" may exaggerate this; the real-photo result (also negative) points the same way. Not understood: why targets near a parent (t = 0.25) are worse than the middle one.
+
+Consequence: pseudo-views stay off. A redesign would be needed (e.g. use only pixels where both parents agree after warping, or a lower-confidence weight per pixel); not planned.

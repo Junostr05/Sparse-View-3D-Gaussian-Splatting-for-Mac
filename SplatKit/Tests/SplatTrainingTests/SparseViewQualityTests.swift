@@ -416,3 +416,108 @@ struct SparseViewBenchmark {
         return text
     }
 }
+
+
+// MARK: - Pseudo-view sweep (opt-in diagnostic)
+
+/// Varies the pseudo-view settings on top of the depth prior. Runs only with `SPLAT_PSEUDO_SWEEP=1`.
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["SPLAT_PSEUDO_SWEEP"] == "1"),
+       .enabled(if: TrainingTestEnvironment.hasMetal))
+struct PseudoViewSweep {
+
+    /// How well the warped depth target of each pseudo-view correlates with the ground-truth depth at that camera.
+    @Test
+    func pseudoTargetAccuracy() throws {
+        for views in [3, 4] {
+            let scene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
+                                            gaussians: 1_200, sparsePoints: 200, seed: 5)
+            let prepared = preparedDataset(scene)
+            let settings = PseudoViewSettings()
+            let made = PseudoViews.make(prepared.dataset.views, settings: settings, near: 0.01)
+            print("PSEUDOTARGET \(views) views: \(made.views.count) accepted, \(made.rejected.count) rejected")
+            let raster = RasterSettings(shDegreeLimit: 0, background: .zero)
+            for pseudo in made.views {
+                let truth: [Float] = CPURasterizer.renderWithDepth(scene.groundTruth, camera: pseudo.camera, settings: raster)
+                    .depth.normalized(minimumAlpha: 0.5)
+                let target: [Float] = pseudo.prior.metricDepth ?? []
+                var a: [Double] = []
+                var b: [Double] = []
+                var covered: Int = 0
+                var truthValid: Int = 0
+                for index in truth.indices where truth[index] > 0 {
+                    truthValid += 1
+                    if index < target.count, target[index] > 0 {
+                        covered += 1
+                        a.append(Double(target[index]))
+                        b.append(Double(truth[index]))
+                    }
+                }
+                print("PSEUDOTARGET \(views) views pair \(pseudo.parents) t \(pseudo.t): coverage of object pixels \(covered)/\(truthValid), Pearson \(String(format: "%.3f", pearson(a, b)))")
+            }
+        }
+    }
+
+    /// Warp sanity: parent depth against ground truth, and warping into the parent's own camera.
+    @Test
+    func warpSanity() throws {
+        let scene = SyntheticScene.make(viewCount: 4, novelCount: 4, width: 160, height: 120,
+                                        gaussians: 1_200, sparsePoints: 200, seed: 5)
+        let prepared = preparedDataset(scene)
+        let views = prepared.dataset.views
+        for index in 0..<2 {
+            let parent: [Float] = views[index].depth?.metricDepth ?? []
+            let truth: [Float] = scene.trainDepth[index].values
+            var a: [Double] = []
+            var b: [Double] = []
+            var relative: Double = 0
+            for i in truth.indices where truth[i] > 0 && i < parent.count && parent[i] > 0 {
+                a.append(Double(parent[i])); b.append(Double(truth[i]))
+                relative += abs(Double(parent[i] / truth[i]) - 1)
+            }
+            print("WARPSANITY view \(index) parent depth vs truth: Pearson \(String(format: "%.4f", pearson(a, b))), mean rel err \(String(format: "%.4f", relative / Double(max(1, a.count)))), n \(a.count)")
+            let warped: [Float] = PseudoViews.warpedDepth(into: views[index].camera, from: [views[index]], near: 0.01)
+            var c: [Double] = []
+            var d: [Double] = []
+            for i in truth.indices where truth[i] > 0 && warped[i] > 0 {
+                c.append(Double(warped[i])); d.append(Double(truth[i]))
+            }
+            print("WARPSANITY view \(index) self-warp vs truth: Pearson \(String(format: "%.4f", pearson(c, d))), n \(c.count)")
+            let interpolated = PseudoViews.interpolate(views[index].camera, views[index + 1].camera, t: 0, resolutionDivisor: 1)
+            print("WARPSANITY view \(index) interpolate t=0 centre diff \(interpolated.center - views[index].camera.center), fx diff \(interpolated.fx - views[index].camera.fx)")
+        }
+    }
+
+    @Test
+    func printsSweep() throws {
+        let context = try MetalContext.makeDefault()
+        let iterations: Int = 3_000
+        let regularizers: Set<RegularizerKind> = [.depthPearson, .depthL1]
+        for views in [3, 4] {
+            let scene = SyntheticScene.make(viewCount: views, novelCount: 4, width: 160, height: 120,
+                                            gaussians: 1_200, sparsePoints: 200, seed: 5)
+            let prepared = preparedDataset(scene)
+            typealias Tweak = (inout TrainingConfiguration) -> Void
+            let variants: [(String, Tweak)] = [
+                ("depth only", { _ in }),
+                ("pseudo default (w 0.05, start 2000, 3/pair)", { $0.regularizers.insert(.pseudoViews) }),
+                ("pseudo w 0.01", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.weight = 0.01 }),
+                ("pseudo w 0.2", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.weight = 0.2 }),
+                ("pseudo start 500", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.startIteration = 500 }),
+                ("pseudo interval 8", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.interval = 8 }),
+                ("pseudo 1/pair", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.perPair = 1 }),
+                ("pseudo full resolution", { $0.regularizers.insert(.pseudoViews); $0.pseudoViews.resolutionDivisor = 1 }),
+            ]
+            for (name, tweak) in variants {
+                var configuration = makeConfiguration(iterations: iterations, regularizers: regularizers)
+                tweak(&configuration)
+                let initial: GaussianCloud = DenseInitializer.initialize(prepared.dataset, configuration: configuration,
+                                                                         maxCount: configuration.maxGaussians)
+                let cloud: GaussianCloud = try trainGPU(prepared.dataset, initial: initial,
+                                                        configuration: configuration, context: context)
+                let novel = novelMetrics(scene, cloud: cloud)
+                let depth = novelDepthCorrelation(scene, cloud: cloud)
+                print("PSEUDOSWEEP \(views) views | \(name) | PSNR \(String(format: "%.2f", novel.psnr)) | SSIM \(String(format: "%.3f", novel.ssim)) | Pearson \(String(format: "%.3f", depth.rho))")
+            }
+        }
+    }
+}
