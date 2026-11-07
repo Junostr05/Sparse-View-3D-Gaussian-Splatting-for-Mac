@@ -43,6 +43,14 @@ xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -configuration Rel
 
 APP="$BUILD/DerivedData/Build/Products/Release/SparseSplat.app"
 [ -d "$APP" ] || { echo "app not found at $APP" >&2; exit 1; }
+# A clean Release build has been seen to skip the compiled icon (Assets.car); a second run picks it up.
+if [ ! -f "$APP/Contents/Resources/Assets.car" ]; then
+  echo "icon missing after the first build, building again"
+  xcodebuild -project SparseSplat.xcodeproj -scheme SparseSplat -configuration Release \
+    -destination 'platform=macOS' -derivedDataPath "$BUILD/DerivedData" \
+    "${ARCH_ARGS[@]}" "${SIGNING_ARGS[@]}" build | tail -3
+  [ -f "$APP/Contents/Resources/Assets.car" ] || { echo "the app still has no compiled icon" >&2; exit 1; }
+fi
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
 DMG="$BUILD/SparseSplat-$VERSION.dmg"
