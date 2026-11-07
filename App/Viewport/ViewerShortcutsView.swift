@@ -40,6 +40,7 @@ struct ViewerShortcutsView: View {
             Entry(keys: "Left drag", action: "Paint the selection (\u{21E7} subtracts)"),
             Entry(keys: "Delete or X", action: "Delete the selection"),
             Entry(keys: "A / \u{2325} + A / \u{2303} + I", action: "Select all / clear / invert"),
+            Entry(keys: "F", action: "Front-only brush on / off"),
             Entry(keys: "\u{2318} + Z / \u{21E7}\u{2318} + Z", action: "Undo / redo"),
         ]),
         Group(title: "Cameras", entries: [

@@ -122,6 +122,15 @@ struct BrushControls: View {
             .accessibilityLabel("Brush Mode")
             .help("Add to or subtract from the selection. Hold Shift to subtract.")
 
+            Toggle(isOn: $model.brushFrontOnly) {
+                Label("Front Only", systemImage: "square.stack.3d.up")
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.glass)
+            .labelStyle(.iconOnly)
+            .accessibilityLabel("Front Only")
+            .help("Select only the visible surface")
+
             Slider(value: $model.brushRadius, in: 8...200, step: 1) {
                 Text("Brush Radius")
             }

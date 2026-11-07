@@ -270,7 +270,7 @@ final class SplatMTKView: MTKView {
         return true
     }
 
-    /// Edit keys: Delete or x deletes, a selects all, Option+a clears, Control+i inverts.
+    /// Edit keys: Delete or x deletes, a selects all, Option+a clears, Control+i inverts, f toggles front-only.
     private static func editCommand(for event: NSEvent) -> EditCommand? {
         if event.keyCode == deleteKeyCode || event.keyCode == forwardDeleteKeyCode {
             return .deleteSelection
@@ -290,6 +290,8 @@ final class SplatMTKView: MTKView {
             return .selectAll
         case "i" where control && !option:
             return .invertSelection
+        case "f" where !control && !option:
+            return .toggleFrontOnly
         default:
             return nil
         }

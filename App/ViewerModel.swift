@@ -92,6 +92,11 @@ final class ViewerModel {
     /// Brush radius in points.
     var brushRadius: Double = 40
     var brushMode: BrushMode = .add
+    /// Front-only brush: selects only the visible surface under the brush instead of every depth (x-ray).
+    var brushFrontOnly: Bool = false
+    /// Sigmoid opacity of each Gaussian of the displayed cloud, computed on first use for front-only selection.
+    /// Cleared in `presentCloud(_:removedNonFinite:)` whenever the displayed cloud changes.
+    @ObservationIgnored var displayOpacityCache: [Float]?
     /// Brush cursor in view points with a top-left origin. `nil` when the pointer is outside the viewport.
     var brushCursor: CGPoint?
     /// Called after every delete, undo and redo with the cumulative deletions as base indices.

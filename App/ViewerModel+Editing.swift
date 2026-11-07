@@ -29,6 +29,7 @@ enum EditCommand: Sendable {
     case invertSelection
     case undo
     case redo
+    case toggleFrontOnly
 }
 
 /// Non-destructive editing: the brush selection, deletion through `EditHistory`, undo and redo,
@@ -67,10 +68,14 @@ extension ViewerModel {
         guard width > 0, height > 0 else { return }
         let camera: Camera = view.camera(width: width, height: height)
         let radiusPixels: Float = Float(brushRadius) * backingScale
+        let frontOnly: FrontOnlySettings? = brushFrontOnly
+            ? FrontOnlySettings(opacities: displayOpacities())
+            : nil
         let hit: SelectionMask = BrushSelector.select(positions: scene.cloud.positions,
                                                       camera: camera,
                                                       stroke: stroke,
-                                                      radiusPixels: radiusPixels)
+                                                      radiusPixels: radiusPixels,
+                                                      frontOnly: frontOnly)
         switch mode {
         case .add:
             selection.formUnion(hit)
@@ -111,7 +116,26 @@ extension ViewerModel {
             undo()
         case .redo:
             redo()
+        case .toggleFrontOnly:
+            brushFrontOnly.toggle()
         }
+    }
+
+    /// Sigmoid opacity of each Gaussian in the displayed cloud, cached until the displayed cloud changes.
+    private func displayOpacities() -> [Float] {
+        if let cached = displayOpacityCache {
+            return cached
+        }
+        let logits: [Float] = scene.cloud.opacityLogits
+        var opacities: [Float] = []
+        opacities.reserveCapacity(logits.count)
+        for logit in logits {
+            let negated: Float = -logit
+            let opacity: Float = 1 / (1 + exp(negated))
+            opacities.append(opacity)
+        }
+        displayOpacityCache = opacities
+        return opacities
     }
 
     // MARK: - Deletion and history
@@ -194,6 +218,7 @@ extension ViewerModel {
     /// The camera and the edit state are untouched.
     func presentCloud(_ cloud: GaussianCloud, removedNonFinite: Int) {
         scene = LoadedScene(cloud: cloud, removedNonFinite: removedNonFinite)
+        displayOpacityCache = nil
         if case .ready(let session) = renderState {
             do throws(MetalError) {
                 try session.renderer.setCloud(cloud)
