@@ -164,6 +164,23 @@ nonisolated enum ProjectImport {
         try ProjectBundle.latestCheckpoint(contents)
     }
 
+    /// The cloud a continuation starts from: the stored latest checkpoint without its stored deletions.
+    /// The deletions only apply while they belong to that checkpoint, as in `restoreCheckpoint`.
+    @concurrent
+    static func continuationStart(_ contents: ProjectContents) async throws -> GaussianCloud {
+        guard let checkpoint = try ProjectBundle.latestCheckpoint(contents) else {
+            throw ProjectError.corruptCheckpoint("the latest checkpoint is missing")
+        }
+        guard let stored = try ProjectBundle.deletions(contents),
+              stored.baseGaussianCount == checkpoint.count else {
+            return checkpoint
+        }
+        // Deleted Gaussians stay deleted: the continuation trains on the survivors only.
+        let indices: [Int] = stored.deleted.map { Int($0) }
+        let mask: SelectionMask = SelectionMask(count: checkpoint.count, indices: indices)
+        return try checkpoint.removing(mask)
+    }
+
     /// Runs `body` inside the folder's security-scoped access, when the system grants one.
     static func withSecurityScope<T>(_ folder: URL, _ body: () throws -> T) rethrows -> T {
         let scoped: Bool = folder.startAccessingSecurityScopedResource()
@@ -182,6 +199,14 @@ final class ProjectModel {
     /// Latest progress without its preview. `nil` before the first run.
     private(set) var progress: TrainingProgress?
     private(set) var isTraining = false
+    /// Options of "Continue Training". Edited in the inspector while no run is active.
+    var continuation = ContinuationSettings()
+    /// True while a continuation of a stored model runs (as opposed to a run from scratch).
+    private(set) var isContinuing = false
+    /// Iterations of the stored model plus all completed rounds of the current continuation.
+    private(set) var totalIterations = 0
+    /// 1-based number of the round in progress, 0 when no continuation runs.
+    private(set) var round = 0
     var errorMessage: String?
     /// Non-fatal notes from the last import or run, such as depth files that were missing or unreadable.
     var warningMessage: String?
@@ -199,6 +224,11 @@ final class ProjectModel {
     /// False while a training preview is the base: a preview is not stored, and its deletions would
     /// refer to a cloud the package does not hold.
     @ObservationIgnored private var editsTargetCheckpoint = false
+    /// Iterations already trained before the current session's round: the stored checkpoint's count, plus
+    /// the rounds that finished. Zero for a run from scratch. Checkpoint records and progress are cumulative.
+    @ObservationIgnored private var iterationOffset = 0
+    /// Set by `stop()`. Ends an endless continuation between rounds, when no session is running to cancel.
+    @ObservationIgnored private var stopRequested = false
 
     var isPaused: Bool {
         progress?.state == .paused
@@ -318,6 +348,11 @@ final class ProjectModel {
         errorMessage = nil
         progress = nil
         heldOutViewName = nil
+        iterationOffset = 0
+        totalIterations = 0
+        round = 0
+        isContinuing = false
+        stopRequested = false
         isTraining = true
         viewer?.isEditingAllowed = false
         Task {
@@ -325,18 +360,36 @@ final class ProjectModel {
         }
     }
 
+    /// True when the project has images and a stored checkpoint to continue from, and no run is active.
+    func canContinue(_ contents: ProjectContents) -> Bool {
+        !isTraining
+            && !contents.manifest.imageFiles.isEmpty
+            && contents.files[ProjectLayout.latestCheckpoint] != nil
+    }
+
+    /// Continues optimizing the stored checkpoint: rounds of `continuation.roundIterations` each, repeated
+    /// until Stop when `continuation.isEndless` is set. Every round saves its result as the checkpoint.
+    func continueTraining(document: Binding<ProjectDocument>) {
+        let contents: ProjectContents = document.wrappedValue.contents
+        guard !isTraining, canContinue(contents) else { return }
+        errorMessage = nil
+        progress = nil
+        heldOutViewName = nil
+        iterationOffset = 0
+        totalIterations = 0
+        round = 0
+        isContinuing = true
+        stopRequested = false
+        isTraining = true
+        viewer?.isEditingAllowed = false
+        Task {
+            await self.runContinuation(contents: contents, document: document)
+        }
+    }
+
     private func runTraining(contents: ProjectContents, document: Binding<ProjectDocument>) async {
         do {
-            // Depth problems never fail the run: they only appear in the status and the warning.
-            let depth: DepthPreparedRun = try await DepthPipeline.prepare(contents: contents,
-                                                                          store: PipelineModel.makeModelStore())
-            depthStatuses = depth.statuses
-            warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
-            if !depth.estimatedMaps.isEmpty {
-                // Cache the inferred maps in the project, so the next run skips the model.
-                document.wrappedValue.contents = ProjectBundle.withDepthMaps(document.wrappedValue.contents,
-                                                                             depth.estimatedMaps)
-            }
+            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document)
             if viewer == nil {
                 let cloud: GaussianCloud = await DepthPipeline.previewCloud(depth)
                 if viewer == nil {
@@ -347,18 +400,7 @@ final class ProjectModel {
             let trainingSession = TrainingSession(dataset: depth.dataset,
                                                   configuration: depth.configuration,
                                                   initializer: depth.initializer)
-            session = trainingSession
-            // The run is a separate task so that `stop()` can cancel it. The stream ends when it returns.
-            runTask = Task {
-                do {
-                    _ = try await trainingSession.run()
-                } catch {
-                    // Reported as a `.failed` progress event, which `apply` shows.
-                }
-            }
-            for await event in trainingSession.progress {
-                apply(event, document: document)
-            }
+            _ = await consume(trainingSession, document: document)
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -368,8 +410,107 @@ final class ProjectModel {
         viewer?.isEditingAllowed = true
     }
 
+    /// Continuation: loads the stored checkpoint (minus its deletions), then trains rounds from it. Each round
+    /// is a new session that starts from the cloud the previous round stored. Endless mode repeats rounds
+    /// while the last one finished and no stop was requested.
+    private func runContinuation(contents: ProjectContents, document: Binding<ProjectDocument>) async {
+        do {
+            var cloud: GaussianCloud = try await ProjectImport.continuationStart(contents)
+            // Depth is prepared once for all rounds, as in `runTraining`.
+            let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document)
+            iterationOffset = contents.manifest.checkpoints.last?.iteration ?? 0
+            totalIterations = iterationOffset
+            round = 0
+            while true {
+                round += 1
+                // Each round takes its own copy of the settings, so edits in the inspector apply from the next round.
+                let settings: ContinuationSettings = continuation
+                let roundConfiguration: TrainingConfiguration = depth.configuration.continued(
+                    from: cloud.count,
+                    shDegree: cloud.shDegree,
+                    round: round - 1,
+                    settings: settings
+                )
+                let roundSession = TrainingSession(dataset: depth.dataset,
+                                                   initialCloud: cloud,
+                                                   configuration: roundConfiguration)
+                // `consume` has already stored this round's checkpoint when it returns.
+                guard let terminal = await consume(roundSession, document: document),
+                      terminal.state == .finished,
+                      let finalCloud = terminal.preview else {
+                    break
+                }
+                iterationOffset += terminal.iteration
+                totalIterations = iterationOffset
+                cloud = finalCloud
+                guard continuation.isEndless, !stopRequested, !Task.isCancelled else {
+                    break
+                }
+            }
+        } catch {
+            errorMessage = Self.describe(error)
+        }
+        session = nil
+        runTask = nil
+        isTraining = false
+        isContinuing = false
+        round = 0
+        viewer?.isEditingAllowed = true
+    }
+
+    /// Depth preparation shared by a run and a continuation. Depth problems never fail it: they only appear in
+    /// the status and the warning. Maps the monocular model produced are cached in the project.
+    private func prepareDepth(contents: ProjectContents,
+                              document: Binding<ProjectDocument>) async throws -> DepthPreparedRun {
+        let depth: DepthPreparedRun = try await DepthPipeline.prepare(contents: contents,
+                                                                      store: PipelineModel.makeModelStore())
+        depthStatuses = depth.statuses
+        warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
+        if !depth.estimatedMaps.isEmpty {
+            // Cache the inferred maps in the project, so the next run skips the model.
+            document.wrappedValue.contents = ProjectBundle.withDepthMaps(document.wrappedValue.contents,
+                                                                         depth.estimatedMaps)
+        }
+        return depth
+    }
+
+    /// Runs one session as a separate task, so `stop()` and `togglePause()` can reach it, and applies its
+    /// progress. Returns the session's last terminal event (`finished`, `cancelled` or `failed`), if any.
+    private func consume(_ trainingSession: TrainingSession,
+                         document: Binding<ProjectDocument>) async -> TrainingProgress? {
+        session = trainingSession
+        // The run is a separate task so that `stop()` can cancel it. The stream ends when it returns.
+        runTask = Task {
+            do {
+                _ = try await trainingSession.run()
+            } catch {
+                // Reported as a `.failed` progress event, which `apply` shows.
+            }
+        }
+        // A stop requested before this task existed (depth preparation, the gap between rounds) must not be lost.
+        if stopRequested {
+            runTask?.cancel()
+        }
+        var terminal: TrainingProgress?
+        for await event in trainingSession.progress {
+            apply(event, document: document)
+            switch event.state {
+            case .finished, .cancelled, .failed:
+                terminal = event
+            case .running, .paused:
+                break
+            }
+        }
+        session = nil
+        runTask = nil
+        return terminal
+    }
+
     /// Shows one progress event. Previews update the viewer; the terminal states store a checkpoint.
     private func apply(_ event: TrainingProgress, document: Binding<ProjectDocument>) {
+        // Cumulative over the stored checkpoint and the finished rounds; equal to `event.iteration` for a run from scratch.
+        let iteration: Int = iterationOffset + event.iteration
+        totalIterations = iteration
         if case .failed(let message) = event.state {
             errorMessage = message
         }
@@ -391,7 +532,7 @@ final class ProjectModel {
                 // The checkpoint stored below is this cloud, so the viewer's base is the stored checkpoint again.
                 editsTargetCheckpoint = true
                 // A single run has no held-out fields; leave-one-out carries them on the terminal event.
-                let record = CheckpointRecord(iteration: event.iteration,
+                let record = CheckpointRecord(iteration: iteration,
                                               gaussianCount: cloud.count,
                                               psnr: event.psnr,
                                               date: Date(),
@@ -434,6 +575,7 @@ final class ProjectModel {
 
     /// Cancels the run. The run stores its last completed model as a checkpoint.
     func stop() {
+        stopRequested = true
         runTask?.cancel()
     }
 

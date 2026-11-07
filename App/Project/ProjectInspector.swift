@@ -122,6 +122,10 @@ struct ProjectInspector: View {
         Section("Training") {
             presetPicker
             trainingControls
+            if model.isContinuing {
+                LabeledContent("Round", value: "\(model.round)")
+                LabeledContent("Total iterations", value: model.totalIterations.formatted())
+            }
             if let progress = model.progress {
                 ProgressView(value: Double(progress.iteration),
                              total: Double(max(progress.totalIterations, 1)))
@@ -170,6 +174,7 @@ struct ProjectInspector: View {
     }
 
     /// One primary action (Train). While a run is active, Pause or Resume and Stop use the default style.
+    /// With a stored checkpoint, Continue Training is the primary action and Retrain from Scratch is bordered.
     @ViewBuilder
     private var trainingControls: some View {
         if model.isTraining {
@@ -181,6 +186,16 @@ struct ProjectInspector: View {
                     model.stop()
                 }
             }
+        } else if model.canContinue(document.wrappedValue.contents) {
+            Button("Continue Training") {
+                model.continueTraining(document: document)
+            }
+            .buttonStyle(.glassProminent)
+            Button("Retrain from Scratch") {
+                model.startTraining(document: document)
+            }
+            .buttonStyle(.bordered)
+            continueOptions
         } else {
             Button("Train") {
                 model.startTraining(document: document)
@@ -189,7 +204,39 @@ struct ProjectInspector: View {
         }
     }
 
+    /// Round length, endless mode and Gaussian growth for "Continue Training".
+    private var continueOptions: some View {
+        let settings = Bindable(model)
+        return DisclosureGroup("Continue Options") {
+            Picker("Iterations per round", selection: settings.continuation.roundIterations) {
+                ForEach(Self.roundChoices, id: \.self) { iterations in
+                    Text(iterations.formatted()).tag(iterations)
+                }
+            }
+            Toggle("Train until stopped", isOn: settings.continuation.isEndless)
+            Text("Rounds repeat until you press Stop. The model is saved after every round.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Toggle("Add more Gaussians", isOn: settings.continuation.addGaussians)
+            Picker("Gaussian limit", selection: settings.continuation.maxGaussians) {
+                ForEach(Self.gaussianLimitChoices, id: \.self) { limit in
+                    Text(limit.formatted()).tag(limit)
+                }
+            }
+            .disabled(!model.continuation.addGaussians)
+            Text("The device memory budget can still cap the limit.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(model.isTraining)
+    }
+
     // MARK: - Helpers
+
+    /// Iterations per continuation round offered in the picker.
+    private static let roundChoices: [Int] = [1_000, 2_000, 5_000, 10_000, 20_000]
+    /// Gaussian ceilings offered when "Add more Gaussians" is on. The device memory budget can still cap them.
+    private static let gaussianLimitChoices: [Int] = [1_000_000, 2_000_000, 3_000_000, 5_000_000]
 
     private static func preset(for configuration: TrainingConfiguration) -> TrainingPreset? {
         TrainingPreset.allCases.first { preset in
