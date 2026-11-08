@@ -36,6 +36,7 @@ struct ViewerShortcutsView: View {
             Entry(keys: "4 / 6 / 8 / 2", action: "Orbit in 15\u{00B0} steps"),
             Entry(keys: "\u{2303} + 4 / 6 / 8 / 2", action: "Pan in steps"),
             Entry(keys: ". or Home", action: "Frame the scene"),
+            Entry(keys: "Z", action: "Next display mode (Splat, Points, Depth, Shapes, Heatmap)"),
         ]),
         Group(title: "Editing (Edit Mode)", entries: [
             Entry(keys: "Left drag", action: "Paint the selection (\u{21E7} subtracts)"),

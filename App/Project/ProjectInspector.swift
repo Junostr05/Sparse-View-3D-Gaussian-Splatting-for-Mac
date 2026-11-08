@@ -145,6 +145,7 @@ struct ProjectInspector: View {
                     Text(axis.displayName).tag(axis)
                 }
             }
+            ViewportDisplayControls(viewer: viewer)
             Menu("View") {
                 Button("Front") { viewer.apply(.preset(.front)) }
                 Button("Back") { viewer.apply(.preset(.back)) }

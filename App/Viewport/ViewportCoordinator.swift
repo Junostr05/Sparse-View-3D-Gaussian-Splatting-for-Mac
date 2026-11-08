@@ -86,7 +86,12 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
 
         let frameStats: FrameStats
         do {
-            frameStats = try session.renderer.render(camera: camera, settings: settings, to: texture)
+            if model.displayMode == .depth {
+                frameStats = try session.renderer.renderDepthColorized(camera: camera, settings: settings, to: texture)
+            } else {
+                try session.renderer.setDisplay(model.frameDisplay())
+                frameStats = try session.renderer.render(camera: camera, settings: settings, to: texture)
+            }
         } catch {
             if !hasLoggedRenderError {
                 hasLoggedRenderError = true

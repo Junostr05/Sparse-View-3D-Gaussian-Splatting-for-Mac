@@ -22,6 +22,11 @@ struct ViewportView: NSViewRepresentable {
         _ = model.shDegreeLimit
         _ = model.background
         _ = model.cloudRevision
+        // Display mode, point size, heatmap metric and freshly computed colour sets change the image.
+        _ = model.displayMode
+        _ = model.pointSize
+        _ = model.heatmapMetric
+        _ = model.displayColorRevision
         // Edit mode changes how the mouse and the keys are read, so it is part of the update too.
         nsView.isEditing = model.isEditingActive
         // Fly mode is owned by the model (menu, inspector, Shift + `); the view starts or stops the capture.
