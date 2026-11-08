@@ -33,7 +33,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: App/SparseSplat.entitlements
         INFOPLIST_FILE: App/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.4.0"
+        MARKETING_VERSION: "1.5.0"
         CURRENT_PROJECT_VERSION: "1"
   sparsesplat:
     type: tool
@@ -57,7 +57,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.junostr05.SparseSplat.sparsesplat
         SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: NO
-        MARKETING_VERSION: "1.4.0"
+        MARKETING_VERSION: "1.5.0"
         CURRENT_PROJECT_VERSION: "1"
 schemes:
   SparseSplat:
