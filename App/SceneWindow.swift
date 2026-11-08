@@ -63,5 +63,8 @@ struct SceneWindow: View {
             } message: {
                 Text(exportError ?? "")
             }
+            .commandPalette { openWindow in
+                CommandRegistry.sceneWindowCommands(viewer: model, openWindow: openWindow)
+            }
     }
 }

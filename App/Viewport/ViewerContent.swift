@@ -4,10 +4,13 @@ import SwiftUI
 /// Shared by the viewer window and the project window. It is content, so it carries no glass.
 struct ViewerContent: View {
     let model: ViewerModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // Read here so that the brush bar appears and disappears with edit mode.
         let isEditing: Bool = model.isEditingActive
+        // The viewport bar is hidden while the brush bar shows and while a flight video is written.
+        let showsBar: Bool = !isEditing && model.videoExport?.state != .running
         Group {
             switch model.renderState {
             case .preparing:
@@ -27,6 +30,13 @@ struct ViewerContent: View {
                                 .padding(.bottom, 16)
                         }
                     }
+                    .overlay(alignment: .bottom) {
+                        if showsBar {
+                            ViewportBar(model: model)
+                                .padding(.bottom, 16)
+                                .transition(.opacity)
+                        }
+                    }
                     .overlay(alignment: .top) {
                         if model.isFlying {
                             FlyModeHUD(model: model)
@@ -39,6 +49,15 @@ struct ViewerContent: View {
                     systemImage: "exclamationmark.triangle",
                     description: Text("This Mac cannot render the scene because no Metal device could be set up.")
                 )
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showsBar)
+        .sheet(item: Bindable(model).presentedExport) { export in
+            switch export {
+            case .image:
+                ViewerImageExportSheet(viewer: model)
+            case .video:
+                ViewerVideoExportSheet(viewer: model)
             }
         }
         .task(id: ObjectIdentifier(model)) {

@@ -46,6 +46,10 @@ struct ProjectWindow: View {
         .onDisappear {
             pipeline.close()
         }
+        .commandPalette { openWindow in
+            CommandRegistry.projectWindowCommands(viewer: model.viewer, project: model, document: document,
+                                                  openWindow: openWindow)
+        }
     }
 
     /// The viewport is content (no glass). Before a model exists, the frame strip shows pending frames,

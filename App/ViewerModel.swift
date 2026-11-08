@@ -80,6 +80,16 @@ final class ViewerModel {
     @ObservationIgnored var viewportPixelSize: PixelSize?
     /// The running or last video export. Its state disables the export buttons while a video is written.
     var videoExport: ViewerVideoExportJob?
+    /// Export sheet the viewport presents. Set by the viewport bar and the command palette, and cleared when the sheet closes.
+    var presentedExport: PresentedExport?
+
+    /// The export sheets that `ViewerContent` presents.
+    enum PresentedExport: Identifiable {
+        case image
+        case video
+
+        var id: Self { self }
+    }
 
     // MARK: Display modes. The behaviour is in ViewerModel+Display.swift.
 
@@ -500,7 +510,8 @@ final class ViewerModel {
     /// Enters or leaves fly mode. Entering is ignored while editing is active. Leaving keeps the view where it is.
     func setFlying(_ flying: Bool) {
         if flying {
-            guard isEditingActive else { return }
+            // Editing and fly mode are exclusive: `isEditing` turns fly mode off.
+            guard !isEditingActive else { return }
             stopMotion()
             cursorOrbitAnchor = nil
             isFlying = true
