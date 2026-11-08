@@ -9,6 +9,8 @@ struct ProjectInspector: View {
     let document: Binding<ProjectDocument>
     let model: ProjectModel
     let pipeline: PipelineModel
+    /// Only used by the footer's "Check for Updates" button. Nothing is checked until the user presses it.
+    @State private var updateChecker = UpdateChecker()
 
     var body: some View {
         let manifest: ProjectManifest = document.wrappedValue.contents.manifest
@@ -49,13 +51,52 @@ struct ProjectInspector: View {
                 }
             }
             Section {
-                Text(Self.versionText)
+                VStack(spacing: 4) {
+                    Text(Self.versionText)
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                    Button("Check for Updates") {
+                        Task { await updateChecker.check(currentVersion: Self.currentVersion) }
+                    }
+                    .buttonStyle(.borderless)
                     .font(.footnote)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .disabled(updateChecker.state == .checking)
+                    updateStatus
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The result of the last "Check for Updates" press. Empty until the button has been pressed.
+    @ViewBuilder
+    private var updateStatus: some View {
+        switch updateChecker.state {
+        case .idle:
+            EmptyView()
+        case .checking:
+            statusText("Checking\u{2026}")
+        case .upToDate(let current):
+            statusText("You have the latest version (\(current)).")
+        case .updateAvailable(let latest, let url):
+            VStack(spacing: 2) {
+                statusText("Version \(latest) is available.")
+                Link("Open Release Page", destination: url)
+                    .font(.footnote)
+            }
+        case .noReleases:
+            statusText("No releases published yet.")
+        case .failed(let message):
+            statusText(message)
+        }
+    }
+
+    private func statusText(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
     }
 
     /// "SparseSplat 1.2.0 (1)" from the bundle's version and build number.
@@ -64,6 +105,12 @@ struct ProjectInspector: View {
         let version: String = info["CFBundleShortVersionString"] as? String ?? "?"
         let build: String = info["CFBundleVersion"] as? String ?? "?"
         return "SparseSplat \(version) (\(build))"
+    }
+
+    /// The bundle's short version string, "1.2.0", compared against the latest release.
+    private static var currentVersion: String {
+        let info: [String: Any] = Bundle.main.infoDictionary ?? [:]
+        return info["CFBundleShortVersionString"] as? String ?? "?"
     }
 
     // MARK: - Sections
