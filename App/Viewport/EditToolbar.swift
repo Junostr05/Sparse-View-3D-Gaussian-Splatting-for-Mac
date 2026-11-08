@@ -39,16 +39,25 @@ struct ExportButton: View {
     let onFailure: (String) -> Void
 
     @State private var isSheetPresented = false
+    /// The choice the sheet opens with. The command palette can open it on the web page option.
+    @State private var initialChoice: ExportChoice = .cloud(.ply)
 
     var body: some View {
         Button {
+            initialChoice = .cloud(.ply)
             isSheetPresented = true
         } label: {
             Label("Export\u{2026}", systemImage: "square.and.arrow.up")
         }
-        .help("Export the scene as .ply, .splat or .spz")
+        .help("Export the scene as .ply, .splat, .spz or a web page")
+        .onChange(of: model.exportRequest) { _, request in
+            guard let request else { return }
+            initialChoice = request
+            isSheetPresented = true
+            model.exportRequest = nil
+        }
         .sheet(isPresented: $isSheetPresented) {
-            ExportSheet(model: model, defaultName: defaultName, onFailure: onFailure)
+            ExportSheet(model: model, defaultName: defaultName, onFailure: onFailure, initialChoice: initialChoice)
         }
     }
 }

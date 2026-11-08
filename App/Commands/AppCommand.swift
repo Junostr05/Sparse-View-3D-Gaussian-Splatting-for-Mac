@@ -94,6 +94,11 @@ enum CommandRegistry {
                                 enabled: viewer.videoExport?.state != .running) {
             viewer.presentedExport = .image
         })
+        commands.append(command("view.exportWeb", "Export for Web\u{2026}", category: "Export",
+                                keywords: ["html", "web", "page", "share", "browser", "embed"],
+                                enabled: viewer.videoExport?.state != .running) {
+            viewer.exportRequest = .webPage
+        })
         commands.append(command("view.exportVideo", "Export Flight Video\u{2026}", category: "Export",
                                 keywords: ["movie", "mp4", "animation", "turntable"],
                                 enabled: viewer.canEdit) {

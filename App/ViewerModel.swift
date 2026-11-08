@@ -85,6 +85,10 @@ final class ViewerModel {
     /// The Clean Up Assistant sheet (`CleanupAssistantView`). Set by the edit toolbar and the command palette.
     var presentedCleanup = false
 
+    /// Asks the export button to open its sheet on a given choice, for example from the command palette.
+    /// `ExportButton` clears it after it has opened the sheet.
+    var exportRequest: ExportChoice?
+
     /// The export sheets that `ViewerContent` presents.
     enum PresentedExport: Identifiable {
         case image
