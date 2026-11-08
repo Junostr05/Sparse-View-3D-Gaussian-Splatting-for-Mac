@@ -11,7 +11,7 @@ struct QualitySettingsSection: View {
         Section {
             Toggle("Exposure compensation", isOn: appearanceBinding)
                 .disabled(model.isTraining)
-            Text("Learns a colour gain and bias per photo, so exposure and white-balance changes do not smear into the scene. Measured: +3.5 dB on test scenes with exposure changes, neutral without. Can stop training with a non-finite loss on real photos; a fix is in progress.")
+            Text("Learns a colour gain and bias per photo, so exposure and white-balance changes do not smear into the scene. On by default. Measured: +3.5 dB on test scenes with exposure changes, neutral without.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
