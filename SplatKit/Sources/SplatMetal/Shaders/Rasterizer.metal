@@ -20,6 +20,9 @@ kernel void projectGaussians(
 {
     if (gid >= u.counts.x) return;
     outTilesTouched[gid] = 0u;
+    // DropGaussian (experimental, off unless mip.info.z > 0): a dropped Gaussian is culled for this pass, so the
+    // backward kernel (tilesTouched == 0) gives it no gradient.
+    if (dropGaussian(mip, gid)) return;
     // Mip mode (Mip-Splatting): 3D filter on the scales, 2D filter with compensation. The mip 2D variance v2 is
     // passed in limits.z, in place of eps2D.
     const bool mipOn = mip.info.x > 0.5f;
@@ -153,6 +156,7 @@ kernel void projectGaussians(
     if (mipOn) {
         opacity *= opacityFactor * compensation;
     }
+    opacity *= dropKeepScale(mip);
     if (viewMode == VIEW_MODE_POINTS || viewMode == VIEW_MODE_HEATMAP) {
         opacity = 1.0f;
     } else if (viewMode == VIEW_MODE_SHAPES) {

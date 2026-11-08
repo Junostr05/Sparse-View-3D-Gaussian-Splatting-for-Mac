@@ -511,7 +511,7 @@ kernel void projectBackward(
     float g2c = -q11;
     if (mipOn) {
         // Compensation path: ∂L/∂c2 = gOpacity·o·κ, into the Σ2D entries (off-diagonal with ½, as dL = tr(g2·dΣ)).
-        float gCompensation = slot[3] * opacityRaw * opacityFactor;
+        float gCompensation = slot[3] * opacityRaw * opacityFactor * dropKeepScale(mip);
         g2a += gCompensation * dC2a;
         g2b += 0.5f * gCompensation * dC2b;
         g2c += gCompensation * dC2c;
@@ -538,7 +538,7 @@ kernel void projectBackward(
     float dLogS2 = chain.z * dot(Rq[2], dM[2]);
     if (mipOn) {
         // Opacity through κ: ∂o_used/∂logScaleⱼ = o_used · (1 − sⱼ²/s'ⱼ²), with o_used = o·κ·c2.
-        float usedOpacity = opacityRaw * opacityFactor * compensation;
+        float usedOpacity = opacityRaw * opacityFactor * compensation * dropKeepScale(mip);
         float3 ratio2 = (rawS * rawS) / (s * s);
         dLogS0 += slot[3] * usedOpacity * (1.0f - ratio2.x);
         dLogS1 += slot[3] * usedOpacity * (1.0f - ratio2.y);
@@ -672,5 +672,7 @@ kernel void projectBackward(
     if (mipOn) {
         opacityGradient *= compensation * opacityFactor;
     }
+    // DropGaussian: the kept Gaussians were rendered with opacity × 1 / (1 − p).
+    opacityGradient *= dropKeepScale(mip);
     storeGradient(&gradOpacityLogits[gid], opacityGradient, accumulate);
 }

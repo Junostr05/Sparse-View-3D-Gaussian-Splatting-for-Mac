@@ -10,6 +10,11 @@ public struct RasterSettings: Sendable, Equatable {
     public var background: SIMD3<Float>
     /// Training-time anti-aliasing (Mip-Splatting). `.classic` (the default) leaves every path unchanged.
     public var mipFilter: MipFilter
+    /// Experimental DropGaussian (training only): probability that a Gaussian is left out of this pass; the others
+    /// get opacity × 1 / (1 − dropRate). 0 (the default) leaves every path unchanged. Metal path only.
+    public var dropRate: Float = 0
+    /// Selects the random subset of a pass; the same value must be used for its forward and backward pass.
+    public var dropSeed: UInt32 = 0
 
     public init(tileSize: Int = 16,
                 nearPlane: Float = 0.01,

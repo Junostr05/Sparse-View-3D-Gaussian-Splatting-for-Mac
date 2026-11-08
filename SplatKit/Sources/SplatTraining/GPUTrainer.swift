@@ -457,6 +457,11 @@ public final class GPUTrainer {
         var settings = RasterSettings(shDegreeLimit: configuration.activeSHDegree(iteration: index),
                                       background: configuration.background)
         settings.mipFilter = trainingMipFilter
+        if let dropout = configuration.dropout, dropout.isEnabled {
+            // DropGaussian (experimental): a fresh random subset per iteration, shared by this step's passes.
+            settings.dropRate = dropout.rate(iteration: index, iterations: configuration.iterations)
+            settings.dropSeed = UInt32(truncatingIfNeeded: configuration.seed &* 0x9E37_79B9 &+ UInt64(index))
+        }
         try refreshSamplingRatesIfDue(iteration: index)
         let texture = try renderTarget(width: width, height: height)
         let gradientImage = try imageGradientBuffer(pixelCount: width * height)

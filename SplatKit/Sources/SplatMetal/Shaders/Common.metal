@@ -26,10 +26,28 @@ struct ProjectUniforms {
                          // w: 1 = accumulate parameter gradients (add) instead of overwriting them (Phase 4)
 };
 
-// Mirrors `MipFilterUniforms` in ShaderTypes.swift (16 bytes). Read by the projection kernels only in mip mode.
+// Mirrors `MipFilterUniforms` in ShaderTypes.swift (16 bytes). Read by the projection kernels: x, y only in mip mode;
+// z, w (DropGaussian) in every mode.
 struct MipFilterUniforms {
     float4 info;         // x: 1 = mip filters on (Mip-Splatting 2D filter and 3D filter), 0 = classic; y: v3 (3D variance)
+                         // z: DropGaussian drop rate p (0 = off), w: DropGaussian seed (integer value)
 };
+
+// DropGaussian (experimental): true when Gaussian `gid` is left out of this pass. Same hash in forward and backward.
+inline bool dropGaussian(constant MipFilterUniforms& mip, uint gid) {
+    float p = mip.info.z;
+    if (!(p > 0.0f)) return false;
+    uint h = gid * 747796405u + uint(mip.info.w) * 2891336453u + 1u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return float(h >> 8) * (1.0f / 16777216.0f) < p;
+}
+
+// DropGaussian opacity scale 1 / (1 − p) of the Gaussians that are kept (1 when off).
+inline float dropKeepScale(constant MipFilterUniforms& mip) {
+    float p = mip.info.z;
+    return p > 0.0f ? 1.0f / (1.0f - p) : 1.0f;
+}
 
 // Mirrors `ViewModeUniforms` in ShaderTypes.swift (112 bytes). Read by projectGaussians only; mode 0 with the crop off is the normal rendering.
 #define VIEW_MODE_SPLAT 0u

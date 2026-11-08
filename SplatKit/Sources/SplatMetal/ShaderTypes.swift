@@ -20,7 +20,8 @@ struct ProjectUniforms {
     var shInfo: SIMD4<UInt32>
 }
 
-/// MSL `MipFilterUniforms`, 16 bytes. `info.x`: 1 = mip filters on, `info.y`: v3 (3D filter variance).
+/// MSL `MipFilterUniforms`, 16 bytes. `info.x`: 1 = mip filters on, `info.y`: v3 (3D filter variance),
+/// `info.z`: DropGaussian rate (0 = off), `info.w`: DropGaussian seed.
 struct MipFilterUniforms {
     var info: SIMD4<Float>
 }
