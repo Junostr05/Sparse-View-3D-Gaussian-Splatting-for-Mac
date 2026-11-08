@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import SplatCore
 import SplatMetal
 
@@ -82,6 +83,32 @@ extension ViewerModel {
             return makeDisplay(colors: last.set.colors)
         }
         return ViewerDisplay(mode: .splat)
+    }
+
+    /// Draws one frame of the viewer with `renderer`, in the display mode in effect, the SH limit and the background.
+    /// The viewport and the image and video export both draw through here, so an export shows what the viewport
+    /// shows (without the overlays). Synchronous: the GPU has finished when this returns.
+    @discardableResult
+    func renderFrame(with renderer: SplatRenderer, camera: Camera, to texture: MTLTexture) throws(MetalError) -> FrameStats {
+        var settings = RasterSettings()
+        settings.shDegreeLimit = shDegreeLimit
+        settings.background = background.color
+        if displayMode == .depth {
+            return try renderer.renderDepthColorized(camera: camera, settings: settings, to: texture)
+        }
+        try renderer.setDisplay(frameDisplay())
+        return try renderer.render(camera: camera, settings: settings, to: texture)
+    }
+
+    /// Waits until the colour set of the current display mode is ready for the displayed cloud. Frames rendered
+    /// before that would fall back to the splats, so an export calls this before its first frame. Returns at once in
+    /// the splat and depth modes.
+    func awaitDisplayColors() async {
+        while let key = displayColorKey, displayColorSets[key]?.revision != cloudRevision {
+            _ = frameDisplay()
+            try? await Task.sleep(for: .milliseconds(20))
+            if Task.isCancelled { return }
+        }
     }
 
     private func makeDisplay(colors: [SIMD4<Float>]) -> ViewerDisplay {

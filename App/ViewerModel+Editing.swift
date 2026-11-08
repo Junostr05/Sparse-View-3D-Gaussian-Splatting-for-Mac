@@ -35,11 +35,12 @@ enum EditCommand: Sendable {
 /// Non-destructive editing: the brush selection, deletion through `EditHistory`, undo and redo,
 /// and export of the edited cloud. The displayed cloud is always `baseCloud` minus the deletions.
 extension ViewerModel {
-    /// Edit mode is on and the model allows it (no training preview is shown).
-    var isEditingActive: Bool { isEditing && isEditingAllowed }
+    /// Edit mode is on and the model allows it (no training preview is shown, no video export is rendering).
+    var isEditingActive: Bool { isEditing && canEdit }
 
-    /// Editing is possible at all. False while a training preview is shown.
-    var canEdit: Bool { isEditingAllowed }
+    /// Editing is possible at all. False while a training preview is shown, and while a flight video is written:
+    /// a deletion would change the frames that follow it.
+    var canEdit: Bool { isEditingAllowed && videoExport?.state != .running }
 
     /// Number of Gaussians in the displayed cloud.
     var displayedCount: Int { scene.cloud.count }
@@ -143,7 +144,7 @@ extension ViewerModel {
     /// Deletes the selected Gaussians. The selection is mapped to base indices, recorded as one undo step
     /// and cleared. The displayed cloud is rebuilt on the GPU; the edit state is kept.
     func deleteSelection() {
-        guard isEditingAllowed, !selection.isEmpty else { return }
+        guard canEdit, !selection.isEmpty else { return }
         var baseSelection = SelectionMask(count: baseCloud.count)
         for displayIndex in selection.selectedIndices() {
             baseSelection[displayIndexToBase[displayIndex]] = true
@@ -153,13 +154,13 @@ extension ViewerModel {
     }
 
     func undo() {
-        guard isEditingAllowed, history.canUndo else { return }
+        guard canEdit, history.canUndo else { return }
         history.undo()
         commitHistoryChange()
     }
 
     func redo() {
-        guard isEditingAllowed, history.canRedo else { return }
+        guard canEdit, history.canRedo else { return }
         history.redo()
         commitHistoryChange()
     }

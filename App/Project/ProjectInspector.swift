@@ -162,6 +162,7 @@ struct ProjectInspector: View {
             ))
             ViewerShortcutsButton()
             ViewportOverlayControls(model: viewer)
+            ViewportExportControls(viewer: viewer)
             if !viewer.cameras.isEmpty {
                 Picker("Camera", selection: cameraSelection) {
                     ForEach(viewer.cameras.indices, id: \.self) { index in

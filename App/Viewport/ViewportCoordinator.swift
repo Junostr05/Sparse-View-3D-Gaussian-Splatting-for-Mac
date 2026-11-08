@@ -80,18 +80,11 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         guard let texture = offscreenTexture(width: width, height: height) else { return }
 
         let camera = model.view.camera(width: width, height: height)
-        var settings = RasterSettings()
-        settings.shDegreeLimit = model.shDegreeLimit
-        settings.background = model.background.color
+        model.viewportPixelSize = PixelSize(width: width, height: height)
 
         let frameStats: FrameStats
         do {
-            if model.displayMode == .depth {
-                frameStats = try session.renderer.renderDepthColorized(camera: camera, settings: settings, to: texture)
-            } else {
-                try session.renderer.setDisplay(model.frameDisplay())
-                frameStats = try session.renderer.render(camera: camera, settings: settings, to: texture)
-            }
+            frameStats = try model.renderFrame(with: session.renderer, camera: camera, to: texture)
         } catch {
             if !hasLoggedRenderError {
                 hasLoggedRenderError = true

@@ -74,6 +74,13 @@ final class ViewerModel {
     /// Camera names at the camera centres. Only shown together with `showsCameras`.
     var showsCameraNames = false
 
+    // MARK: Export. The image and video export sheets live in App/Viewport/ViewportExportControls.swift.
+
+    /// Pixel size of the viewport's last frame. Read by the image export for "Current size". Not observed.
+    @ObservationIgnored var viewportPixelSize: PixelSize?
+    /// The running or last video export. Its state disables the export buttons while a video is written.
+    var videoExport: ViewerVideoExportJob?
+
     // MARK: Display modes. The behaviour is in ViewerModel+Display.swift.
 
     /// What the viewport draws: the splats, points, depth, shapes or a heatmap.
@@ -172,8 +179,8 @@ final class ViewerModel {
     /// Bounds of the scene the camera framing and the display normalisation use. Set once at init.
     @ObservationIgnored let bounds: Bounds
     @ObservationIgnored private var lastStatsTime: ContinuousClock.Instant?
-    /// One view per camera, built from `cameras` and the current up axis.
-    @ObservationIgnored private var cameraViews: [ViewCamera] = []
+    /// One view per camera, built from `cameras` and the current up axis. The flight the viewer plays runs through them.
+    @ObservationIgnored private(set) var cameraViews: [ViewCamera] = []
     /// Overlay geometry for the bounds, the up axis and the cameras. Built by `viewportOverlayScene`, cleared
     /// whenever the camera views are rebuilt.
     @ObservationIgnored var overlayCache: ViewportOverlayScene?
