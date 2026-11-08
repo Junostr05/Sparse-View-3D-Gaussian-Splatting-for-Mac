@@ -33,6 +33,9 @@ struct LibraryView: View {
     @State private var isNewProjectPresented: Bool = false
     @State private var renameTarget: LibraryItem?
     @State private var isDropTargeted: Bool = false
+    /// The training queue, owned by the app. Shown in place of the project grid while `showsQueue` is on.
+    let queue: TrainingQueue
+    @State private var showsQueue: Bool = false
 
     var body: some View {
         content
@@ -118,8 +121,12 @@ struct LibraryView: View {
                 message: "The library folder could not be opened. Choose it again.",
                 folder: folder)
         case .ready:
-            projectGrid
-                .searchable(text: $searchText, placement: .toolbar, prompt: "Search projects")
+            if showsQueue {
+                QueueView(queue: queue)
+            } else {
+                projectGrid
+                    .searchable(text: $searchText, placement: .toolbar, prompt: "Search projects")
+            }
         }
     }
 
@@ -268,6 +275,13 @@ struct LibraryView: View {
                 }
                 .help("Show the selected projects in the Finder")
                 .disabled(selection.isEmpty)
+                Button {
+                    addToQueue(selectedURLs())
+                } label: {
+                    Label("Add to Queue", systemImage: "text.badge.plus")
+                }
+                .help("Add the selected projects to the training queue")
+                .disabled(selection.isEmpty)
                 Button(role: .destructive) {
                     trash(selectedURLs())
                 } label: {
@@ -286,6 +300,13 @@ struct LibraryView: View {
                 }
                 .help("Reload the projects of the library")
                 .keyboardShortcut("r", modifiers: .command)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Toggle(isOn: $showsQueue) {
+                    Label("Queue", systemImage: "list.number")
+                }
+                .help("Show the training queue")
+                .accessibilityLabel("Show the training queue")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("New Project\u{2026}") {
@@ -316,9 +337,23 @@ struct LibraryView: View {
         Button("Reveal in Finder") {
             store.reveal(urls)
         }
+        Button("Add to Queue") {
+            addToQueue(urls)
+        }
         Divider()
         Button("Move to Trash", role: .destructive) {
             trash(urls)
+        }
+    }
+
+    /// Queues each package for training. A refusal (already waiting) is shown in the library's alert.
+    private func addToQueue(_ urls: [URL]) {
+        for url in urls {
+            queue.add(package: url)
+        }
+        if let note = queue.message {
+            store.message = note
+            queue.message = nil
         }
     }
 

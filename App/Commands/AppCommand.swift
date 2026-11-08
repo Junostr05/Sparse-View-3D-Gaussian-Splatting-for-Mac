@@ -28,12 +28,15 @@ enum CommandRegistry {
     static func projectWindowCommands(viewer: ViewerModel?,
                                       project: ProjectModel,
                                       document: Binding<ProjectDocument>,
-                                      openWindow: OpenWindowAction) -> [AppCommand] {
+                                      openWindow: OpenWindowAction,
+                                      queue: TrainingQueue? = nil,
+                                      projectURL: URL? = nil) -> [AppCommand] {
         var commands: [AppCommand] = []
         if let viewer {
             commands += viewCommands(viewer) + editCommands(viewer)
         }
         commands += projectCommands(project, document: document)
+        commands += queueCommands(queue: queue, projectURL: projectURL)
         commands += windowCommands(openWindow)
         return commands
     }
@@ -179,6 +182,22 @@ enum CommandRegistry {
             project.startTraining(document: document)
         })
         return commands
+    }
+
+    // MARK: - Queue
+
+    /// Adds the open project to the training queue. Disabled for an unsaved project.
+    private static func queueCommands(queue: TrainingQueue?, projectURL: URL?) -> [AppCommand] {
+        guard let queue, let projectURL else {
+            return [command("project.addToQueue", "Add to Queue", category: "Project",
+                            keywords: ["batch", "overnight", "queue", "later"], enabled: false) {}]
+        }
+        return [
+            command("project.addToQueue", "Add to Queue", category: "Project",
+                    keywords: ["batch", "overnight", "queue", "later"]) {
+                queue.add(package: projectURL)
+            },
+        ]
     }
 
     // MARK: - Window

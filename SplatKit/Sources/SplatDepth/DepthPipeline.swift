@@ -1,40 +1,49 @@
 import Metal
 import Synchronization
 import SplatCore
-import SplatDepth
 import SplatIO
-import SplatTraining
 
 /// One image's depth outcome from the last preparation, in dataset order.
-nonisolated struct DepthStatusRow: Identifiable, Sendable {
-    let name: String
-    let status: ViewDepthStatus
+public nonisolated struct DepthStatusRow: Identifiable, Sendable {
+    public let name: String
+    public let status: ViewDepthStatus
 
-    var id: String { name }
+    public var id: String { name }
+
+    public init(name: String, status: ViewDepthStatus) {
+        self.name = name
+        self.status = status
+    }
+}
+
+/// Failures of depth preparation that stop it (as opposed to the warnings it collects).
+public enum DepthPipelineError: Error, Equatable {
+    /// The default Metal device is missing, so the memory budget cannot be computed.
+    case noMetalDevice
 }
 
 /// Everything a run needs from depth preparation. Depth problems are listed here and never fail the run.
-nonisolated struct DepthPreparedRun: Sendable {
+public nonisolated struct DepthPreparedRun: Sendable {
     /// The full dataset with its depth priors set. Leave-one-out takes views out of it inside the session.
-    let dataset: TrainingDataset
-    let configuration: TrainingConfiguration
+    public let dataset: TrainingDataset
+    public let configuration: TrainingConfiguration
     /// Builds the dense initial cloud of a run from that run's dataset, with the memory cap of the full dataset.
     /// Each run calls it, so a held-out view never reaches the cloud of a run that must not see it.
-    let initializer: @Sendable (TrainingDataset) -> GaussianCloud
-    let report: DepthPreparationReport
+    public let initializer: @Sendable (TrainingDataset) -> GaussianCloud
+    public let report: DepthPreparationReport
     /// Statuses in dataset order, for the "Depth status" disclosure.
-    let statuses: [DepthStatusRow]
+    public let statuses: [DepthStatusRow]
     /// Maps the monocular model produced in this run, keyed by image name. The project stores them under
     /// `estimator`, so the next run with the same model skips inference.
-    let estimatedMaps: [String: DepthMap]
+    public let estimatedMaps: [String: DepthMap]
     /// The estimator that produced `estimatedMaps`.
-    let estimator: DepthEstimatorKind
+    public let estimator: DepthEstimatorKind
     /// Non-fatal problems: unreadable depth files, a depth model that would not load or is not installed.
-    let warnings: [String]
+    public let warnings: [String]
 }
 
 /// Wraps the monocular estimator and keeps every map it produces, keyed by view name, so the project can store them.
-nonisolated final class EstimatedDepthRecorder: DepthProvider, Sendable {
+final class EstimatedDepthRecorder: DepthProvider, Sendable {
     private let estimator: any DepthProvider
     private let produced: Mutex<[String: DepthMap]> = Mutex([:])
 
@@ -57,10 +66,10 @@ nonisolated final class EstimatedDepthRecorder: DepthProvider, Sendable {
 
 /// Depth preparation for a training run: supplied maps first, then the depth model when enabled, then
 /// alignment, then the dense initial cloud. Blocking work runs off the main actor (`@concurrent`).
-nonisolated enum DepthPipeline {
+public nonisolated enum DepthPipeline {
     /// `useRefinedPoses` starts the run from the stored refined poses (a continuation); `false` uses the original poses.
     @concurrent
-    static func prepare(contents: ProjectContents,
+    public static func prepare(contents: ProjectContents,
                         store: ModelStore?,
                         useRefinedPoses: Bool = false) async throws -> DepthPreparedRun {
         let configuration: TrainingConfiguration = contents.manifest.training
@@ -114,7 +123,7 @@ nonisolated enum DepthPipeline {
 
         // Memory cap as in Phase 3, plus the depth buffers (and pseudo-view priors) of this run.
         guard let device = MTLCreateSystemDefaultDevice() else {
-            throw TrainingError.metal("no Metal device")
+            throw DepthPipelineError.noMetalDevice
         }
         var viewSizes: [SIMD2<Int>] = []
         viewSizes.reserveCapacity(prepared.dataset.views.count)
@@ -156,7 +165,7 @@ nonisolated enum DepthPipeline {
     /// The first cloud the viewport shows, before any run has a preview: the initializer applied to the full
     /// dataset. Only drawn, never trained on, so it does not leak a held-out view.
     @concurrent
-    static func previewCloud(_ depth: DepthPreparedRun) async -> GaussianCloud {
+    public static func previewCloud(_ depth: DepthPreparedRun) async -> GaussianCloud {
         depth.initializer(depth.dataset)
     }
 

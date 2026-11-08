@@ -8,14 +8,14 @@ import SplatCore
 /// The image is drawn into an 8-bit RGBX sRGB bitmap, so embedded color profiles are converted to
 /// sRGB and any alpha is composited over black. `nonisolated` so the decode runs on the caller's
 /// executor (the training preparation runs it off the main actor).
-nonisolated enum ImageIODecoder {
+public nonisolated enum ImageIODecoder {
     enum DecodeError: Error, Equatable {
         case unreadableImage
         case emptyImage
         case bitmapCreationFailed
     }
 
-    static func decode(_ data: Data) throws -> RGBImage {
+    public static func decode(_ data: Data) throws -> RGBImage {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw DecodeError.unreadableImage

@@ -2,6 +2,7 @@ import Metal
 import Observation
 import SwiftUI
 import SplatCore
+import SplatDepth
 import SplatIO
 import SplatTraining
 
@@ -165,21 +166,10 @@ nonisolated enum ProjectImport {
         try ProjectBundle.latestCheckpoint(contents)
     }
 
-    /// The cloud a continuation starts from: the stored latest checkpoint without its stored deletions.
-    /// The deletions only apply while they belong to that checkpoint, as in `restoreCheckpoint`.
+    /// The cloud a continuation starts from. Shared with the headless runner (`HeadlessTraining.continuationStart`).
     @concurrent
     static func continuationStart(_ contents: ProjectContents) async throws -> GaussianCloud {
-        guard let checkpoint = try ProjectBundle.latestCheckpoint(contents) else {
-            throw ProjectError.corruptCheckpoint("the latest checkpoint is missing")
-        }
-        guard let stored = try ProjectBundle.deletions(contents),
-              stored.baseGaussianCount == checkpoint.count else {
-            return checkpoint
-        }
-        // Deleted Gaussians stay deleted: the continuation trains on the survivors only.
-        let indices: [Int] = stored.deleted.map { Int($0) }
-        let mask: SelectionMask = SelectionMask(count: checkpoint.count, indices: indices)
-        return try checkpoint.removing(mask)
+        try HeadlessTraining.continuationStart(contents)
     }
 
     /// Runs `body` inside the folder's security-scoped access, when the system grants one.
@@ -604,29 +594,24 @@ final class ProjectModel {
             guard let cloud = event.preview else {
                 return
             }
-            // Cumulative over the stored checkpoint and the finished rounds; equal to `event.iteration` for a run from scratch.
-            let iteration: Int = iterationOffset + event.iteration
-            // The checkpoint stored below is this cloud, so the viewer's base is the stored checkpoint again.
+            // The checkpoint, its record and the refined poses are stored by the shared run logic.
+            // The viewer holds the stored cloud now, so its base is the stored checkpoint again.
             editsTargetCheckpoint = true
-            // A single run has no held-out fields; leave-one-out carries them on the terminal event.
-            let record = CheckpointRecord(iteration: iteration,
-                                          gaussianCount: cloud.count,
-                                          psnr: event.psnr,
-                                          date: Date(),
-                                          heldOutView: heldOutView(for: event.phase),
-                                          heldOutPSNR: event.heldOut?.psnr,
-                                          heldOutSSIM: event.heldOut?.ssim,
-                                          bestIteration: event.bestIteration)
-            var contents: ProjectContents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
-                                                                         cloud: cloud,
-                                                                         record: record)
-            if let refined = outcome?.refinedCameras, refined.count == viewNames.count {
-                let named: [NamedCamera] = zip(viewNames, refined).map { NamedCamera(name: $0.0, camera: $0.1) }
-                contents = ProjectBundle.withRefinedPoses(contents, cameras: named)
+            let stored: HeadlessTraining.StoredRun = HeadlessTraining.storingRun(
+                into: document.wrappedValue.contents,
+                cloud: cloud,
+                event: event,
+                iterationOffset: iterationOffset,
+                heldOutView: heldOutView(for: event.phase),
+                outcome: outcome,
+                viewNames: viewNames,
+                date: Date()
+            )
+            if let named = stored.refinedCameras {
                 // The open viewer lists the cameras the model was trained with.
                 viewer?.replaceCameras(named)
             }
-            document.wrappedValue.contents = contents
+            document.wrappedValue.contents = stored.contents
             // The library shows this checkpoint as the project's cover. The viewer holds the stored cloud now.
             if let viewer, let cover = ProjectCoverRenderer.jpeg(of: viewer) {
                 document.wrappedValue.contents = ProjectBundle.withCover(document.wrappedValue.contents, jpeg: cover)

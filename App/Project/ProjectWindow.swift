@@ -7,6 +7,10 @@ struct ProjectWindow: View {
     let document: Binding<ProjectDocument>
     /// The package name without extension, used as the default export name.
     let name: String
+    /// The package's file URL, nil for an unsaved document. Used to tell the training queue about running training.
+    let url: URL?
+    /// The app's training queue, used by the command palette.
+    let queue: TrainingQueue
     @State private var model = ProjectModel()
     @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
@@ -49,10 +53,19 @@ struct ProjectWindow: View {
         }
         .onDisappear {
             pipeline.close()
+            if let url {
+                ActiveProjectTraining.set(url, training: false)
+            }
+        }
+        .onChange(of: model.isTraining, initial: false) { (_, training: Bool) in
+            // The training queue skips a project while its window trains it.
+            if let url {
+                ActiveProjectTraining.set(url, training: training)
+            }
         }
         .commandPalette { openWindow in
             CommandRegistry.projectWindowCommands(viewer: model.viewer, project: model, document: document,
-                                                  openWindow: openWindow)
+                                                  openWindow: openWindow, queue: queue, projectURL: url)
         }
         .dropDestination(for: URL.self) { urls, _ in
             handleDrop(urls)

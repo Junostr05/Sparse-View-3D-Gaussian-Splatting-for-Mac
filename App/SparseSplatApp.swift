@@ -7,6 +7,8 @@ struct SparseSplatApp: App {
     @State private var folder: LibraryFolder = LibraryFolder()
     @State private var library: LibraryStore = LibraryStore()
     @State private var covers: LibraryCovers = LibraryCovers()
+    /// The batch queue of training jobs. Shared by the library window, the project windows and their commands.
+    @State private var queue: TrainingQueue = TrainingQueue.shared
 
     init() {
         // Launching opens the library, never an untitled document. Opening a document is explicit.
@@ -16,7 +18,7 @@ struct SparseSplatApp: App {
     var body: some Scene {
         // The library is the start screen. It is the only window shown at launch.
         Window("Library", id: LibraryWindow.id) {
-            LibraryView(folder: folder, store: library, covers: covers)
+            LibraryView(folder: folder, store: library, covers: covers, queue: queue)
         }
         .defaultLaunchBehavior(.presented)
         .defaultSize(width: 1040, height: 720)
@@ -28,7 +30,9 @@ struct SparseSplatApp: App {
         // Documents open from the library, Finder or Open. Launching the app never opens them.
         DocumentGroup(newDocument: ProjectDocument()) { file in
             ProjectWindow(document: file.$document,
-                          name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene")
+                          name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene",
+                          url: file.fileURL,
+                          queue: queue)
         }
         .defaultLaunchBehavior(.suppressed)
 
