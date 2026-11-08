@@ -22,6 +22,7 @@ struct SparseSplatApp: App {
         .defaultSize(width: 1040, height: 720)
         .commands {
             LibraryCommands(store: library)
+            PaletteCommands()
         }
 
         // Documents open from the library, Finder or Open. Launching the app never opens them.
