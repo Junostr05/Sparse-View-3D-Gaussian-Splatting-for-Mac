@@ -128,6 +128,9 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
     public var edits: EditRecord?
     /// The pose provider behind the stored poses, when they were estimated. `nil` for COLMAP and ARKit imports.
     public var poseMethod: PoseMethod?
+    /// Image names (from `imageFiles`) the user excluded from training, for example after photo triage.
+    /// The images stay in the package; `ProjectBundle.loadDataset` skips them. Empty when not recorded.
+    public var excludedImages: [String]
 
     /// An empty project at the current format version.
     public init() {
@@ -140,6 +143,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
         frameProvenance = []
         edits = nil
         poseMethod = nil
+        excludedImages = []
     }
 
     /// Decodes a manifest. Keys added after format version 1 shipped are optional, so older
@@ -156,6 +160,7 @@ public struct ProjectManifest: Codable, Sendable, Equatable {
                                                         forKey: .frameProvenance) ?? []
         edits = try container.decodeIfPresent(EditRecord.self, forKey: .edits)
         poseMethod = try container.decodeIfPresent(PoseMethod.self, forKey: .poseMethod)
+        excludedImages = try container.decodeIfPresent([String].self, forKey: .excludedImages) ?? []
     }
 }
 
@@ -458,6 +463,7 @@ public enum ProjectBundle {
             files[ProjectLayout.imagesDirectory + "/" + name]
         }
         let maxImageSide = contents.manifest.training.maxImageSide
+        let excluded = Set(contents.manifest.excludedImages)
         let overrides = try refinedOverrides(contents, enabled: useRefinedPoses)
 
         var dataset: TrainingDataset
@@ -470,14 +476,16 @@ public enum ProjectBundle {
                 points3D: files[directory + "/points3D.bin"],
                 imageData: imageData,
                 maxImageSide: maxImageSide,
-                decode: decode
+                decode: decode,
+                excluding: excluded
             )
         case .arkit?:
             dataset = try TrainingDatasetLoader.loadARKit(
                 capture: files[ProjectLayout.arkitCapture] ?? Data(),
                 imageData: imageData,
                 maxImageSide: maxImageSide,
-                decode: decode
+                decode: decode,
+                excluding: excluded
             )
         case nil:
             throw .noViews
@@ -515,6 +523,8 @@ public enum ProjectBundle {
         case nil:
             return []
         }
+        let excluded = Set(contents.manifest.excludedImages)
+        cameras.removeAll { excluded.contains($0.name) }
         if !overrides.isEmpty {
             for index in cameras.indices {
                 if let pose = overrides[cameras[index].name] {
@@ -751,6 +761,8 @@ public enum ProjectBundle {
         result.manifest.inputKind = inputKind
         result.manifest.frameProvenance = frameProvenance
         result.manifest.imageFiles = imageFiles.keys.sorted()
+        // Exclusions refer to the images being replaced, so they do not carry over.
+        result.manifest.excludedImages = []
         result.manifest.checkpoints = []
         result.manifest.edits = nil
         result.manifest.poseMethod = nil
