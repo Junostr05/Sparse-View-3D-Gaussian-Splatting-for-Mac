@@ -31,6 +31,19 @@ struct MipFilterUniforms {
     float4 info;         // x: 1 = mip filters on (Mip-Splatting 2D filter and 3D filter), 0 = classic; y: v3 (3D variance)
 };
 
+// Mirrors `ViewModeUniforms` in ShaderTypes.swift (32 bytes). Read by projectGaussians only; mode 0 is the normal rendering.
+#define VIEW_MODE_SPLAT 0u
+#define VIEW_MODE_POINTS 1u
+#define VIEW_MODE_SHAPES 2u
+#define VIEW_MODE_HEATMAP 3u
+// ln 255: the Gaussian falls to 1/255 alpha at the radius where its exponent reaches this value.
+#define VIEW_LOG_255 5.5451774f
+
+struct ViewModeUniforms {
+    uint4 modeInfo;      // x: projection mode (VIEW_MODE_*), y: 1 = colour override bound, z, w: unused
+    float4 styleInfo;    // x: point disc radius in pixels, y: opacity scale (shapes), z: scale scale, w: unused
+};
+
 // Mirrors `DuplicateUniforms` in ShaderTypes.swift (16 bytes).
 struct DuplicateUniforms {
     uint4 info;          // gaussian count, tilesX, tilesY, unused

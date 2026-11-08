@@ -122,6 +122,15 @@ public struct KDTree: Sendable {
         return heap.sortedIndices()
     }
 
+    /// Indices of the k nearest points to an arbitrary location, ordered by ascending distance (ties by smaller index).
+    /// Fewer than k when the tree holds fewer points.
+    public func nearestNeighbors(to query: SIMD3<Float>, k: Int) -> [Int] {
+        guard k > 0, !points.isEmpty else { return [] }
+        var heap = BoundedHeap(capacity: k)
+        search(node: 0, query: query, excluding: -1, heap: &heap)
+        return heap.sortedIndices()
+    }
+
     // MARK: - Build
 
     /// Recursively builds the subtree for `order[lower..<upper]` and returns its node index.

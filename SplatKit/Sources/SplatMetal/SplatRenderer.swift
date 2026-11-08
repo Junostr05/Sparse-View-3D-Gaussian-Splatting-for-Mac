@@ -49,6 +49,7 @@ public final class SplatRenderer {
     private let rasterPipeline: MTLComputePipelineState
     private let rasterBackwardPipeline: MTLComputePipelineState
     private let projectBackwardPipeline: MTLComputePipelineState
+    private let depthColormapPipeline: MTLComputePipelineState
 
     /// The Gaussian store this renderer reads. `setCloud` may replace it.
     public private(set) var gaussians: GaussianBuffers
@@ -72,6 +73,17 @@ public final class SplatRenderer {
     /// Bound to the depth slots of the forward and backward kernels when no depth buffer is given.
     private var dummyDepth: MTLBuffer?
 
+    /// The viewer display of the forward pass (`setDisplay`). `.splat` is the normal rendering, which training uses.
+    private(set) var display: ViewerDisplay = .splat
+    /// The colour array the override buffer was filled from. `nil` when the buffer is stale or unused.
+    private var uploadedColorOverride: [SIMD4<Float>]?
+    /// Per Gaussian: the override colour of the points, shapes and heatmap modes (`setDisplay`). Grow-only.
+    private var colorOverrideBuffer: MTLBuffer?
+    /// Float2 per pixel for the depth view (`renderDepthColorized`). Grow-only.
+    private var depthViewBuffer: MTLBuffer?
+    /// Depth view: pixels with less accumulated opacity than this (A = 1 − T_final) show the background.
+    static let minimumDepthAlpha: Float = 0.5
+
     /// Per Gaussian: sampling rate ν of the Mip-Splatting 3D filter (`GPUSamplingRate`). Read only when the
     /// settings' `mipFilter` is on; the trainer keeps it current. Must hold at least `gaussians.count` floats.
     public var samplingRateBuffer: MTLBuffer?
@@ -85,6 +97,8 @@ public final class SplatRenderer {
         var total: Int
         /// Gaussian count at forward time; `encodeBackward` rejects a store whose count changed.
         var count: Int
+        /// Display mode of the forward pass. `encodeBackward` needs `.splat`: the other modes change the geometry.
+        var viewMode: ViewerDisplayMode
     }
     private var lastFrame: LastFrame?
 
@@ -105,18 +119,64 @@ public final class SplatRenderer {
         rasterPipeline = try context.makePipeline("rasterizeTiles", minThreads: Self.tileSize * Self.tileSize)
         rasterBackwardPipeline = try context.makePipeline("rasterizeBackward", minThreads: Self.tileSize * Self.tileSize)
         projectBackwardPipeline = try context.makePipeline("projectBackward")
+        depthColormapPipeline = try context.makePipeline("depthColormap")
         self.gaussians = gaussians
     }
 
     /// Replaces the scene. The store is updated in place when the SH degree matches and the cloud
     /// fits its capacity; otherwise a new store is created. Clears the state kept for `backward`.
+    /// The colour override is dropped (the SH colours are drawn) until `setDisplay` is called with the colours of the new cloud.
     public func setCloud(_ cloud: GaussianCloud) throws(MetalError) {
         lastFrame = nil
+        uploadedColorOverride = nil
+        display.colorOverride = nil
         if cloud.shDegree == gaussians.shDegree && cloud.count <= gaussians.capacity {
             gaussians.upload(cloud)
         } else {
             gaussians = try GaussianBuffers(context: context, cloud: cloud)
         }
+    }
+
+    /// Sets how the following frames are drawn. The default `.splat` is the normal rendering. The colour override
+    /// of the points, shapes and heatmap modes is uploaded when its array changes; it must hold at least one colour
+    /// per Gaussian of the current cloud. Without an override those modes draw the SH colours.
+    public func setDisplay(_ newDisplay: ViewerDisplay) throws(MetalError) {
+        if let colors = newDisplay.colorOverride, uploadedColorOverride != colors {
+            let n: Int = gaussians.count
+            guard colors.count >= n else {
+                throw .commandFailed("colour override has \(colors.count) colours for \(n) Gaussians")
+            }
+            let buffer = try context.ensureBuffer(&colorOverrideBuffer, length: n * MemoryLayout<SIMD4<Float>>.stride)
+            let pointer = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: max(n, 1))
+            for i in 0..<n {
+                pointer[i] = colors[i]
+            }
+            uploadedColorOverride = colors
+        }
+        display = newDisplay
+    }
+
+    /// Projection mode of the display (`ViewModeUniforms.modeInfo.x`). The depth view projects like the splats.
+    private var projectionCode: UInt32 {
+        switch display.mode {
+        case .splat, .depth: return 0
+        case .points: return 1
+        case .shapes: return 2
+        case .heatmap: return 3
+        }
+    }
+
+    /// True when the projection reads the colour override: a non-splat mode with an uploaded override.
+    private var colorOverrideActive: Bool {
+        projectionCode != 0 && display.colorOverride != nil && uploadedColorOverride != nil
+    }
+
+    private func makeViewModeUniforms() -> ViewModeUniforms {
+        let mode: UInt32 = projectionCode
+        let overrideFlag: UInt32 = colorOverrideActive ? 1 : 0
+        return ViewModeUniforms(modeInfo: SIMD4<UInt32>(mode, overrideFlag, 0, 0),
+                                styleInfo: SIMD4<Float>(display.pointRadiusPixels, display.opacityScale,
+                                                        display.scaleScale, 0))
     }
 
     @discardableResult
@@ -196,6 +256,14 @@ public final class SplatRenderer {
             var uniforms = makeProjectUniforms(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY)
             var mipUniforms = makeMipUniforms(settings: settings)
             let ratesBinding = try samplingRatesBinding(settings: settings)
+            var viewUniforms = makeViewModeUniforms()
+            // The colour override is bound only when it is active; otherwise a 16-byte dummy that is never read.
+            let colorBinding: MTLBuffer
+            if colorOverrideActive, let overrideBuffer = colorOverrideBuffer {
+                colorBinding = overrideBuffer
+            } else {
+                colorBinding = try dummyDepthBuffer()
+            }
 
             let encoder = try context.makeComputeEncoder(commandBufferA)
             encoder.setComputePipelineState(projectPipeline)
@@ -212,6 +280,8 @@ public final class SplatRenderer {
             encoder.setBytes(&uniforms, length: MemoryLayout<ProjectUniforms>.size, index: 10)
             encoder.setBytes(&mipUniforms, length: MemoryLayout<MipFilterUniforms>.size, index: 11)
             encoder.setBuffer(ratesBinding, offset: 0, index: 12)
+            encoder.setBytes(&viewUniforms, length: MemoryLayout<ViewModeUniforms>.size, index: 13)
+            encoder.setBuffer(colorBinding, offset: 0, index: 14)
             MetalContext.dispatch1D(encoder, pipeline: projectPipeline, count: n)
             encoder.endEncoding()
 
@@ -302,7 +372,7 @@ public final class SplatRenderer {
         }
 
         lastFrame = LastFrame(camera: camera, settings: settings, tilesX: tilesX, tilesY: tilesY,
-                              total: total, count: n)
+                              total: total, count: n, viewMode: display.mode)
         return ForwardPass(commandBuffer: commandBufferB, visibleGaussians: visible,
                            tileIntersections: total, projectionSeconds: projectionSeconds)
     }
@@ -429,6 +499,9 @@ extension SplatRenderer {
                                poseSink: PoseGradientSink? = nil,
                                commandBuffer: MTLCommandBuffer) throws(MetalError) {
         guard let frame = lastFrame else { throw .commandFailed("no frame rendered") }
+        guard frame.viewMode == .splat else {
+            throw .commandFailed("backward needs the splat display; the last frame used \(frame.viewMode.rawValue)")
+        }
         let store = gaussians
         guard frame.count == store.count else {
             throw .commandFailed("gaussian count changed since render")
@@ -579,6 +652,103 @@ extension SplatRenderer {
             alpha[i] = values[2 * i + 1]
         }
         return DepthRender(raw: raw, alpha: alpha)
+    }
+
+    /// Depth view: the rendered depth of the splats, mapped to colour with a turbo-like ramp, near = warm.
+    /// Pixels with less than `minimumDepthAlpha` opacity show `settings.background`. The range of the ramp is the
+    /// 2nd to 98th percentile of the valid depths of this frame. The splats are always projected normally here,
+    /// whatever display is set. Synchronous: waits for the GPU. Like `renderDepth`, it keeps no state for `backward`.
+    @discardableResult
+    public func renderDepthColorized(camera: Camera, settings: RasterSettings,
+                                     to texture: MTLTexture) throws(MetalError) -> FrameStats {
+        lastFrame = nil
+        let width = camera.width
+        let height = camera.height
+        guard width > 0, height > 0 else {
+            return FrameStats(gpuTimeMilliseconds: 0, visibleGaussians: 0, tileIntersections: 0)
+        }
+        let pixelCount = width * height
+        let depthBuffer = try context.ensureBuffer(&depthViewBuffer, length: pixelCount * 2 * MemoryLayout<Float>.size)
+
+        let savedDisplay = display
+        display = .splat
+        defer { display = savedDisplay }
+        let pass = try encodeForward(camera: camera, settings: settings, to: texture, depth: depthBuffer)
+        let forwardBuffer = pass.commandBuffer
+        forwardBuffer.commit()
+        forwardBuffer.waitUntilCompleted()
+        try Self.check(forwardBuffer)
+        lastFrame = nil
+
+        let range = Self.depthRange(of: depthBuffer, pixelCount: pixelCount)
+        var uniforms = DepthColormapUniforms(
+            range: SIMD4<Float>(range.low, range.high, Self.minimumDepthAlpha, 0),
+            background: SIMD4<Float>(settings.background.x, settings.background.y, settings.background.z, 0),
+            size: SIMD4<UInt32>(UInt32(width), UInt32(height), 0, 0))
+        guard let colormapBuffer = context.queue.makeCommandBuffer() else {
+            throw .commandFailed("cannot create command buffer")
+        }
+        let encoder = try context.makeComputeEncoder(colormapBuffer)
+        encoder.setComputePipelineState(depthColormapPipeline)
+        encoder.setBuffer(depthBuffer, offset: 0, index: 0)
+        encoder.setBytes(&uniforms, length: MemoryLayout<DepthColormapUniforms>.size, index: 1)
+        encoder.setTexture(texture, index: 0)
+        encoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: Self.tileSize, height: Self.tileSize, depth: 1))
+        encoder.endEncoding()
+        colormapBuffer.commit()
+        colormapBuffer.waitUntilCompleted()
+        try Self.check(colormapBuffer)
+
+        let forwardSeconds = pass.projectionSeconds + (forwardBuffer.gpuEndTime - forwardBuffer.gpuStartTime)
+        let colormapSeconds = colormapBuffer.gpuEndTime - colormapBuffer.gpuStartTime
+        return FrameStats(gpuTimeMilliseconds: (forwardSeconds + colormapSeconds) * 1000.0,
+                          visibleGaussians: pass.visibleGaussians,
+                          tileIntersections: pass.tileIntersections)
+    }
+
+    /// The 2nd and 98th percentile of the depth (Draw / A) over the valid pixels, from a 4096-bin histogram over
+    /// the valid range: two passes over the buffer. Bin centres are returned. `(0, 0)` without valid pixels.
+    static func depthRange(of buffer: MTLBuffer, pixelCount: Int) -> (low: Float, high: Float) {
+        let binCount = 4096
+        let values = buffer.contents().bindMemory(to: Float.self, capacity: 2 * max(pixelCount, 1))
+        var low = Float.infinity
+        var high = -Float.infinity
+        var valid = 0
+        for i in 0..<pixelCount {
+            let alpha = values[2 * i + 1]
+            guard alpha >= minimumDepthAlpha, alpha > 0 else { continue }
+            let depth = values[2 * i] / alpha
+            guard depth.isFinite else { continue }
+            valid += 1
+            low = min(low, depth)
+            high = max(high, depth)
+        }
+        guard valid > 0 else { return (0, 0) }
+        let width = (high - low) / Float(binCount)
+        guard width > 0 else { return (low, high) }
+
+        var histogram = [Int](repeating: 0, count: binCount)
+        for i in 0..<pixelCount {
+            let alpha = values[2 * i + 1]
+            guard alpha >= minimumDepthAlpha, alpha > 0 else { continue }
+            let depth = values[2 * i] / alpha
+            guard depth.isFinite else { continue }
+            let bin = min(Int((depth - low) / width), binCount - 1)
+            histogram[bin] += 1
+        }
+        func quantile(_ fraction: Float) -> Float {
+            let target = max(1, Int((Float(valid) * fraction).rounded(.up)))
+            var cumulative = 0
+            for bin in 0..<binCount {
+                cumulative += histogram[bin]
+                if cumulative >= target {
+                    return low + (Float(bin) + 0.5) * width
+                }
+            }
+            return high
+        }
+        return (quantile(0.02), quantile(0.98))
     }
 
     /// Gradients of `L = Σ imageGradient · image + Σ (gD·Draw + gA·A)` with respect to every Gaussian

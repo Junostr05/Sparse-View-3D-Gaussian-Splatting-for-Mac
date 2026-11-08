@@ -12,6 +12,8 @@ public enum ViewCommand: Sendable, Equatable {
     /// Blender Home / numpad period: frame the whole scene.
     case frameAll
     case togglePlayback
+    /// Z: the next viewer display mode (splat, points, depth, shapes, heatmap).
+    case cycleDisplayMode
 
     /// Maps a key to a command. `character` is the lowercase character of the key.
     ///
@@ -33,6 +35,7 @@ public enum ViewCommand: Sendable, Equatable {
         case "]": return .nextCamera
         case ".": return .frameAll
         case " ": return .togglePlayback
+        case "z": return .cycleDisplayMode
         default: return nil
         }
     }

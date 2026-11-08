@@ -45,6 +45,24 @@ struct SamplingUniforms {
     var counts: SIMD4<UInt32>
 }
 
+/// MSL `ViewModeUniforms`, 32 bytes. Read by `projectGaussians` only; mode 0 is the normal splat rendering.
+struct ViewModeUniforms {
+    /// x: projection mode (0 splat, 1 points, 2 shapes, 3 heatmap), y: 1 = colour override is bound, z, w: unused.
+    var modeInfo: SIMD4<UInt32>
+    /// x: point disc radius in pixels, y: opacity scale (shapes), z: scale scale (non-splat modes), w: unused.
+    var styleInfo: SIMD4<Float>
+}
+
+/// MSL `DepthColormapUniforms`, 48 bytes. Read by the `depthColormap` kernel of the depth view.
+struct DepthColormapUniforms {
+    /// x: depth at the warm end (near), y: depth at the cold end (far), z: minimum alpha of a valid pixel, w: unused.
+    var range: SIMD4<Float>
+    /// rgb: background colour for pixels without coverage, w: unused.
+    var background: SIMD4<Float>
+    /// width, height, unused, unused.
+    var size: SIMD4<UInt32>
+}
+
 /// MSL `DuplicateUniforms`, 16 bytes.
 struct DuplicateUniforms {
     /// gaussian count, tilesX, tilesY, unused.

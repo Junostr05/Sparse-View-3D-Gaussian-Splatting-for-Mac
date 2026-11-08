@@ -74,6 +74,23 @@ final class ViewerModel {
     /// Camera names at the camera centres. Only shown together with `showsCameras`.
     var showsCameraNames = false
 
+    // MARK: Display modes. The behaviour is in ViewerModel+Display.swift.
+
+    /// What the viewport draws: the splats, points, depth, shapes or a heatmap.
+    var displayMode: ViewerDisplayMode = .splat
+    /// The value the heatmap mode colours.
+    var heatmapMetric: HeatmapMetric = .size
+    /// Disc radius in rendered pixels for the points mode.
+    var pointSize: Double = 3
+    /// Per-Gaussian colours computed for the displayed cloud. Each set is valid for the `cloudRevision` it was made for.
+    @ObservationIgnored var displayColorSets: [DisplayColorKey: DisplayColorSet] = [:]
+    /// The heatmap colours last shown, kept as the fallback while another metric is computed.
+    @ObservationIgnored var lastHeatmapSet: (key: DisplayColorKey, set: DisplayColorSet)?
+    /// Colour sets being computed, with the cloud revision each was requested for.
+    var pendingDisplayColors: [DisplayColorKey: Int] = [:]
+    /// Incremented when a colour set arrives, so the viewport redraws.
+    var displayColorRevision = 0
+
     // MARK: Editing state. The behaviour is in ViewerModel+Editing.swift.
 
     /// The base cloud the edit history refers to. Replaced by `replaceCloud(_:)`.
@@ -152,6 +169,7 @@ final class ViewerModel {
     /// Latest frame statistics, assigned at most every 0.5 s.
     private(set) var stats: FrameStats?
 
+    /// Bounds of the scene the camera framing and the display normalisation use. Set once at init.
     @ObservationIgnored let bounds: Bounds
     @ObservationIgnored private var lastStatsTime: ContinuousClock.Instant?
     /// One view per camera, built from `cameras` and the current up axis.
@@ -395,6 +413,8 @@ final class ViewerModel {
             fly(to: target, duration: 0.4)
         case .togglePlayback:
             togglePlayback()
+        case .cycleDisplayMode:
+            displayMode = displayMode.next
         }
     }
 

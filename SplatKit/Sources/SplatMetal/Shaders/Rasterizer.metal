@@ -14,6 +14,8 @@ kernel void projectGaussians(
     constant ProjectUniforms& u [[buffer(10)]],
     constant MipFilterUniforms& mip [[buffer(11)]],
     device const float* samplingRates [[buffer(12)]],
+    constant ViewModeUniforms& view [[buffer(13)]],
+    device const float4* colorOverride [[buffer(14)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= u.counts.x) return;
@@ -21,6 +23,9 @@ kernel void projectGaussians(
     // Mip mode (Mip-Splatting): 3D filter on the scales, 2D filter with compensation. The mip 2D variance v2 is
     // passed in limits.z, in place of eps2D.
     const bool mipOn = mip.info.x > 0.5f;
+    // Viewer display mode (VIEW_MODE_SPLAT leaves every step below unchanged).
+    const uint viewMode = view.modeInfo.x;
+    const bool useColorOverride = view.modeInfo.y != 0u;
 
     float3 pw = float3(positions[3 * gid], positions[3 * gid + 1], positions[3 * gid + 2]);
     float3 pc = float3(dot(u.rotRow0.xyz, pw) + u.rotRow0.w,
@@ -46,6 +51,9 @@ kernel void projectGaussians(
         float3(2.0f * (qx * qy - qw * qz), 1.0f - 2.0f * (qx * qx + qz * qz), 2.0f * (qy * qz + qw * qx)),
         float3(2.0f * (qx * qz + qw * qy), 2.0f * (qy * qz - qw * qx), 1.0f - 2.0f * (qx * qx + qy * qy)));
     float3 s = float3(exp(logScales[3 * gid]), exp(logScales[3 * gid + 1]), exp(logScales[3 * gid + 2]));
+    if (viewMode != VIEW_MODE_SPLAT) {
+        s *= view.styleInfo.z;
+    }
     float opacityFactor = 1.0f;
     if (mipOn) {
         // 3D filter: s' = sqrt(s² + v3/ν²), opacity × Π s/s'.
@@ -92,13 +100,25 @@ kernel void projectGaussians(
         c += u.limits.z;
     }
 
+    // Points mode: a round disc of pointRadiusPixels. The covariance is s·I with s = r² / (2 ln 255), so a fully
+    // opaque point falls to 1/255 alpha at its rim, and the tile rectangle uses the disc radius.
+    float radiusOverride = 0.0f;
+    if (viewMode == VIEW_MODE_POINTS) {
+        float discRadius = view.styleInfo.x;
+        float discVariance = discRadius * discRadius / (2.0f * VIEW_LOG_255);
+        a = discVariance;
+        b = 0.0f;
+        c = discVariance;
+        radiusOverride = ceil(discRadius);
+    }
+
     float det = a * c - b * b;
     if (det <= 0.0f) return;
     float3 conic = float3(c / det, -b / det, a / det);
 
     float mid = 0.5f * (a + c);
     float lambda = mid + sqrt(max(0.1f, mid * mid - det));
-    float radius = ceil(3.0f * sqrt(lambda));
+    float radius = radiusOverride > 0.0f ? radiusOverride : ceil(3.0f * sqrt(lambda));
     if (radius <= 0.0f) return;
 
     int tilesX = int(u.counts.w);
@@ -111,15 +131,25 @@ kernel void projectGaussians(
     int maxY = clamp(int(clamp((mean.y + radius + 15.0f) / tile, -lo, lo)), 0, tilesY);
     if (maxX <= minX || maxY <= minY) return;
 
-    // Color.
-    float3 dir = normalize(pw - u.camCenter.xyz);
-    ulong shBase = ulong(gid) * ulong(u.shInfo.z) * 3ul;
-    float3 raw = evaluateSH(shCoeffs, shBase, u.shInfo.y, dir);
-    float3 color = max(raw + 0.5f, float3(0.0f));
+    // Color: the SH colour, or the per-Gaussian override of the points, shapes and heatmap modes.
+    float3 color;
+    if (useColorOverride) {
+        color = colorOverride[gid].xyz;
+    } else {
+        float3 dir = normalize(pw - u.camCenter.xyz);
+        ulong shBase = ulong(gid) * ulong(u.shInfo.z) * 3ul;
+        float3 raw = evaluateSH(shCoeffs, shBase, u.shInfo.y, dir);
+        color = max(raw + 0.5f, float3(0.0f));
+    }
 
     float opacity = 1.0f / (1.0f + exp(-opacityLogits[gid]));
     if (mipOn) {
         opacity *= opacityFactor * compensation;
+    }
+    if (viewMode == VIEW_MODE_POINTS || viewMode == VIEW_MODE_HEATMAP) {
+        opacity = 1.0f;
+    } else if (viewMode == VIEW_MODE_SHAPES) {
+        opacity *= view.styleInfo.y;
     }
 
     outMeanDepth[gid] = float4(mean.x, mean.y, z, radius);
