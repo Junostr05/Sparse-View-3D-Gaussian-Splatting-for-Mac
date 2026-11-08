@@ -412,6 +412,9 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var mcmc = MCMCSettings()
     public var antiAliasing = AntiAliasingSettings()
     public var poseRefinement = PoseRefinementSettings()
+    /// Iterations between autosaves of an interrupted run (v1.5). 0 turns autosave off. Not part of the
+    /// configuration hash of an optimizer snapshot, so changing it keeps a snapshot usable.
+    public var autosaveInterval = 2_000
 
     public init() {}
 
@@ -483,6 +486,8 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
             ?? defaults.antiAliasing
         poseRefinement = try container.decodeIfPresent(PoseRefinementSettings.self, forKey: .poseRefinement)
             ?? defaults.poseRefinement
+        autosaveInterval = try container.decodeIfPresent(Int.self, forKey: .autosaveInterval)
+            ?? defaults.autosaveInterval
     }
 
     /// SH degree in use at `iteration`: grows by one every `shDegreeInterval` iterations.

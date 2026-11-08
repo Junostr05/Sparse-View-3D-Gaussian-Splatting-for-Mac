@@ -31,11 +31,11 @@ targets += [
     // Phase 3 Task 15. Nonisolated default isolation: never set defaultIsolation(MainActor.self) here.
     .target(
         name: "SplatTraining",
-        dependencies: ["SplatCore", "SplatMetal"]
+        dependencies: ["SplatCore", "SplatIO", "SplatMetal"]
     ),
     .testTarget(
         name: "SplatTrainingTests",
-        dependencies: ["SplatTraining", "SplatMetal", "SplatCore", "SplatDepth"]
+        dependencies: ["SplatTraining", "SplatMetal", "SplatCore", "SplatIO", "SplatDepth"]
     ),
     // Phase 4 Task 5: depth alignment, providers and preparation. Phase 4 Task 20: the Core ML
     // depth estimator, which loads its model through SplatIO's ModelStore. Nonisolated default isolation.

@@ -1,4 +1,6 @@
+import os
 import SplatCore
+import SplatIO
 import SplatMetal
 
 // Headless training run (Phase 3 Task 15, leave-one-out Phase 4 Task 19). The actor owns the Metal
@@ -37,17 +39,43 @@ public struct TrainingOutcome: Sendable {
     /// Training cameras (dataset view order) with the learned pose corrections applied, from the run that produced
     /// `cloud`. Nil when pose refinement is off.
     public var refinedCameras: [Camera]?
+    /// Optimizer state at the end of the run that produced `cloud` (v1.5). Nil for a leave-one-out selection run that
+    /// was cancelled, which stores no state.
+    public var optimizerState: OptimizerState?
 
     public init(cloud: GaussianCloud, heldOutView: String? = nil, bestIteration: Int? = nil,
-                heldOut: HeldOutMetrics? = nil, iterations: Int, refinedCameras: [Camera]? = nil) {
+                heldOut: HeldOutMetrics? = nil, iterations: Int, refinedCameras: [Camera]? = nil,
+                optimizerState: OptimizerState? = nil) {
         self.cloud = cloud
         self.heldOutView = heldOutView
         self.bestIteration = bestIteration
         self.heldOut = heldOut
         self.iterations = iterations
         self.refinedCameras = refinedCameras
+        self.optimizerState = optimizerState
     }
 }
+
+/// A snapshot of an interrupted run, handed to an `AutosaveHandler` every `configuration.autosaveInterval` iterations.
+public struct TrainingAutosave: Sendable {
+    /// Completed iterations of the session's trainer (the round's own count, not the project's cumulative one).
+    public var iteration: Int
+    /// The cloud at that iteration, as `GPUTrainer.snapshot()` returns it.
+    public var cloud: GaussianCloud
+    /// The optimizer state at that iteration. Its Adam step is cumulative over the lineage.
+    public var optimizerState: OptimizerState
+
+    public init(iteration: Int, cloud: GaussianCloud, optimizerState: OptimizerState) {
+        self.iteration = iteration
+        self.cloud = cloud
+        self.optimizerState = optimizerState
+    }
+}
+
+/// Receives autosaves. Called on the session's actor, synchronously, between two iterations: a handler must only hand
+/// the snapshot off (for example to a background writer) and return. It is not a progress stream, so no autosave is
+/// dropped by a slow consumer.
+public typealias AutosaveHandler = @Sendable (TrainingAutosave) -> Void
 
 /// Runs one `GPUTrainer` (two in leave-one-out) and reports its progress as an `AsyncStream`.
 public actor TrainingSession {
@@ -60,6 +88,11 @@ public actor TrainingSession {
     private let configuration: TrainingConfiguration
     /// Builds the initial cloud of a run from the dataset of that run.
     private let initializer: @Sendable (TrainingDataset) -> GaussianCloud
+    /// Receives autosaves (v1.5). Nil: no autosave.
+    private let autosaveHandler: AutosaveHandler?
+    /// The optimizer state of a continuation, taken by the single run. Cleared once used or ignored.
+    private var pendingOptimizerState: OptimizerState?
+    private let logger = Logger(subsystem: "io.github.junostr05.SparseSplat", category: "training")
 
     private var hasStarted = false
     private var isPaused = false
@@ -81,8 +114,11 @@ public actor TrainingSession {
     /// Run 1 only: the latest held-out evaluation.
     private var latestHeldOut: HeldOutMetrics?
 
+    /// `autosave` receives a snapshot every `configuration.autosaveInterval` iterations (not in the held-out selection
+    /// run, and never at the last iteration, whose result is the run's checkpoint).
     public init(dataset: TrainingDataset, configuration: TrainingConfiguration,
-                initializer: @escaping @Sendable (TrainingDataset) -> GaussianCloud) {
+                initializer: @escaping @Sendable (TrainingDataset) -> GaussianCloud,
+                autosave: AutosaveHandler? = nil) {
         let (stream, continuation) = AsyncStream.makeStream(of: TrainingProgress.self,
                                                             bufferingPolicy: .bufferingNewest(4))
         progress = stream
@@ -90,11 +126,17 @@ public actor TrainingSession {
         self.dataset = dataset
         self.configuration = configuration
         self.initializer = initializer
+        self.autosaveHandler = autosave
+        self.pendingOptimizerState = nil
     }
 
     /// Single-cloud form: every run starts from `initialCloud`, whatever its dataset. Early stopping
     /// with this form still holds the view out of training, but the cloud was built from all views.
-    public init(dataset: TrainingDataset, initialCloud: GaussianCloud, configuration: TrainingConfiguration) {
+    /// `optimizerState` (v1.5) continues the moments of a previous run, as a continuation round: it is used only when it
+    /// fits `initialCloud` and the configuration's switches (count, SH degree, views, appearance, pose refinement).
+    /// Otherwise it is ignored with a logged reason and the run starts with fresh Adam state.
+    public init(dataset: TrainingDataset, initialCloud: GaussianCloud, configuration: TrainingConfiguration,
+                optimizerState: OptimizerState? = nil, autosave: AutosaveHandler? = nil) {
         let (stream, continuation) = AsyncStream.makeStream(of: TrainingProgress.self,
                                                             bufferingPolicy: .bufferingNewest(4))
         progress = stream
@@ -102,6 +144,8 @@ public actor TrainingSession {
         self.dataset = dataset
         self.configuration = configuration
         self.initializer = { _ in initialCloud }
+        self.autosaveHandler = autosave
+        self.pendingOptimizerState = optimizerState
     }
 
     deinit {
@@ -163,10 +207,25 @@ public actor TrainingSession {
     private func runSingle() async throws(TrainingError) -> TrainingOutcome {
         currentPhase = .single
         let trainer = try startTrainer(dataset: dataset)
+        try restoreOptimizerState(into: trainer)
         let (end, rate) = try await train(trainer, limit: configuration.iterations)
-        let cloud = try complete(trainer, end: end, rate: rate, total: configuration.iterations)
+        let (cloud, optimizer) = try complete(trainer, end: end, rate: rate, total: configuration.iterations)
         return TrainingOutcome(cloud: cloud, iterations: trainer.iteration,
-                               refinedCameras: try refinedCameras(of: trainer))
+                               refinedCameras: try refinedCameras(of: trainer), optimizerState: optimizer)
+    }
+
+    /// Takes the optimizer state given to the session, if any, into the fresh `trainer` as a continuation. A state that
+    /// does not fit is logged with its reason, and the run keeps the fresh Adam state of the trainer.
+    private func restoreOptimizerState(into trainer: GPUTrainer) throws(TrainingError) {
+        guard let state = pendingOptimizerState else {
+            return
+        }
+        pendingOptimizerState = nil
+        if let reason = try trainer.restore(from: state, continuing: true) {
+            logger.notice("optimizer state ignored, Adam starts fresh: \(reason, privacy: .public)")
+        } else {
+            logger.info("optimizer state restored at Adam step \(state.adamStep, privacy: .public)")
+        }
     }
 
     private func runLeaveOneOut(heldOutIndex index: Int) async throws(TrainingError) -> TrainingOutcome {
@@ -175,6 +234,10 @@ public actor TrainingSession {
         latestHeldOut = nil
         heldOutTrainingView = heldOut
         currentPhase = .selection(heldOutView: heldOut.name)
+        if pendingOptimizerState != nil {
+            pendingOptimizerState = nil
+            logger.notice("optimizer state ignored: leave-one-out runs start with fresh Adam state")
+        }
 
         switch try await runSelection(excluding: index) {
         case .cancelled(let outcome):
@@ -188,10 +251,10 @@ public actor TrainingSession {
         currentPhase = .final(stopIteration: stopIteration)
         let trainer = try startTrainer(dataset: dataset)
         let (end, rate) = try await train(trainer, limit: stopIteration)
-        let cloud = try complete(trainer, end: end, rate: rate, total: stopIteration)
+        let (cloud, optimizer) = try complete(trainer, end: end, rate: rate, total: stopIteration)
         return TrainingOutcome(cloud: cloud, heldOutView: heldOut.name, bestIteration: scheduler?.bestIteration,
                                heldOut: scheduler?.bestMetrics, iterations: trainer.iteration,
-                               refinedCameras: try refinedCameras(of: trainer))
+                               refinedCameras: try refinedCameras(of: trainer), optimizerState: optimizer)
     }
 
     /// Refined training cameras of the final run, or nil when pose refinement is off.
@@ -274,6 +337,11 @@ public actor TrainingSession {
             if let depth = report.depthLoss {
                 lastDepthLoss = depth.loss
             }
+            // Autosave (v1.5): not in the selection run, and not at the limit, where the run's checkpoint is written.
+            if let handler = autosaveHandler, configuration.autosaveInterval > 0, !isSelectionPhase,
+               iteration % configuration.autosaveInterval == 0, iteration < limit {
+                try writeAutosave(trainer, handler: handler)
+            }
             let isPreviewStep = configuration.previewInterval > 0 && iteration % configuration.previewInterval == 0
             let isEvalStep = configuration.evalInterval > 0 && iteration % configuration.evalInterval == 0
             var preview: GaussianCloud?
@@ -306,9 +374,18 @@ public actor TrainingSession {
         }
     }
 
-    /// Terminal event of a run that is not run 1, and its stream end. Returns the run's cloud.
-    private func complete(_ trainer: GPUTrainer, end: LoopEnd, rate: Double, total: Int) throws(TrainingError) -> GaussianCloud {
+    /// Hands the cloud and optimizer state at the current iteration to the autosave handler.
+    private func writeAutosave(_ trainer: GPUTrainer, handler: AutosaveHandler) throws(TrainingError) {
         let cloud = try trainer.snapshot()
+        let optimizer = try trainer.exportOptimizerState()
+        handler(TrainingAutosave(iteration: trainer.iteration, cloud: cloud, optimizerState: optimizer))
+    }
+
+    /// Terminal event of a run that is not run 1, and its stream end. Returns the run's cloud and optimizer state.
+    private func complete(_ trainer: GPUTrainer, end: LoopEnd, rate: Double,
+                          total: Int) throws(TrainingError) -> (cloud: GaussianCloud, optimizer: OptimizerState) {
+        let cloud = try trainer.snapshot()
+        let optimizer = try trainer.exportOptimizerState()
         lastGoodPreview = cloud
         if end == .cancelled {
             emit(.cancelled, trainer: trainer, rate: rate, preview: cloud, total: total)
@@ -317,7 +394,7 @@ public actor TrainingSession {
             emit(.finished, trainer: trainer, rate: rate, preview: cloud, total: total)
         }
         continuation.finish()
-        return cloud
+        return (cloud, optimizer)
     }
 
     // MARK: - Helpers

@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import SplatCore
+import SplatIO
 import SplatMetal
 
 // Metal training loop (Phase 3 Task 15, Phase 4 Task 17). Mirrors `CPUTrainer.step` in SplatCore in order and in
@@ -152,6 +153,10 @@ public final class GPUTrainer {
     /// with a depth prior.
     private var renderedDepthBuffer: MTLBuffer?
     private var depthGradientBuffer: MTLBuffer?
+    /// Adam steps taken before this trainer's first iteration. Zero for a fresh run; a continuation round restored
+    /// from an optimizer state starts from the lineage's count (`restore(from:continuing:)`). The step of iteration
+    /// `index` is `adamStepBase + index + 1`.
+    private var adamStepBase = 0
     /// Anti-aliasing (Mip-Splatting). The sampling-rate kernel exists only when `antiAliasing.isEnabled`; the
     /// buffer holds ν per Gaussian and is shared with `renderer.samplingRateBuffer`.
     private let samplingRateKernel: GPUSamplingRate?
@@ -925,6 +930,129 @@ public final class GPUTrainer {
     }
 }
 
+// MARK: - Optimizer state (v1.5)
+
+extension GPUTrainer {
+    /// Copies the Adam moments, the iteration counter, and the appearance and pose-refinement state to the CPU. Waits
+    /// for the GPU first, applies pending pose gradients, and throws if the most recent step's losses are non-finite.
+    /// Densification statistics are not part of the state: a resumed run starts its current densification window with
+    /// empty statistics (the moments themselves are exact).
+    public func exportOptimizerState() throws(TrainingError) -> OptimizerState {
+        try guarded { () throws(TrainingError) -> OptimizerState in
+            _ = try self.synchronize()
+            let count: Int = self.store.count
+            // Moments count as live only once an Adam step has run. Before that they are zero, so the count is set here.
+            self.adamState.m.count = count
+            self.adamState.v.count = count
+            let firstMoment: GaussianMoments = self.adamState.m.snapshotArrays()
+            let secondMoment: GaussianMoments = self.adamState.v.snapshotArrays()
+            let appearanceBlock: AppearanceOptimizerBlock? = self.appearance?.snapshotState()
+            var poseBlock: PoseOptimizerBlock?
+            if let refiner = self.poseRefiner {
+                poseBlock = self.makePoseBlock(refiner: refiner)
+            }
+            return OptimizerState(
+                gaussianCount: count,
+                shDegree: self.store.shDegree,
+                iteration: self.iteration,
+                adamStep: self.adamStepBase + self.iteration,
+                configurationHash: OptimizerState.configurationHash(self.configuration),
+                firstMoment: firstMoment,
+                secondMoment: secondMoment,
+                appearance: appearanceBlock,
+                pose: poseBlock)
+        }
+    }
+
+    /// Loads an exported state into this trainer, which must be fresh (no step taken). Two modes:
+    /// - `continuing == false`: the same run resumes at the state's iteration. The configuration hash must match, the
+    ///   Adam step continues from the state, and the view sampler is replayed to the state's position, so the next
+    ///   views are the ones the uninterrupted run would have visited.
+    /// - `continuing == true`: a continuation round. Its own schedules start at iteration 0 as usual, but the moments,
+    ///   the appearance and pose state and the Adam step counter continue from the state.
+    /// Returns nil when the state was loaded. Otherwise it returns the reason and changes nothing, and the caller
+    /// trains with fresh Adam state.
+    public func restore(from state: OptimizerState, continuing: Bool) throws(TrainingError) -> String? {
+        try guarded { () throws(TrainingError) -> String? in
+            precondition(self.iteration == 0 && self.pending.isEmpty, "optimizer state is restored into a fresh trainer")
+            if let reason = state.incompatibility(gaussianCount: self.store.count, shDegree: self.store.shDegree,
+                                                  viewCount: self.views.count,
+                                                  appearance: self.appearance != nil,
+                                                  poseRefinement: self.poseRefiner != nil) {
+                return reason
+            }
+            if !continuing {
+                guard state.configurationHash == OptimizerState.configurationHash(self.configuration) else {
+                    return "the optimizer state belongs to another configuration"
+                }
+                guard state.adamStep >= state.iteration else {
+                    return "the optimizer state's Adam step is behind its iteration"
+                }
+            }
+
+            self.adamState.m.upload(arrays: state.firstMoment)
+            self.adamState.v.upload(arrays: state.secondMoment)
+            if let block = state.appearance, let appearance = self.appearance {
+                appearance.restoreState(block)
+            }
+            if let block = state.pose, let refiner = self.poseRefiner {
+                self.restorePoses(block, refiner: refiner)
+            }
+            if continuing {
+                self.adamStepBase = state.adamStep
+            } else {
+                self.iteration = state.iteration
+                self.adamStepBase = state.adamStep - state.iteration
+                for _ in 0..<state.iteration {
+                    _ = self.sampler.next()
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Pose block of the trainer's cameras and the refiner's Adam state. The caller has waited for the GPU.
+    private func makePoseBlock(refiner: GPUPoseRefiner) -> PoseOptimizerBlock {
+        let states: [PoseAdamState] = refiner.snapshotStates()
+        var poses: [Float] = []
+        poses.reserveCapacity(cameras.count * 12)
+        for camera in cameras {
+            let r: Matrix3 = camera.rotation
+            poses += [r.c0.x, r.c0.y, r.c0.z, r.c1.x, r.c1.y, r.c1.z, r.c2.x, r.c2.y, r.c2.z]
+            poses += [camera.translation.x, camera.translation.y, camera.translation.z]
+        }
+        var firstMoment: [Double] = []
+        var secondMoment: [Double] = []
+        firstMoment.reserveCapacity(states.count * 6)
+        secondMoment.reserveCapacity(states.count * 6)
+        for state in states {
+            firstMoment += state.firstMoment
+            secondMoment += state.secondMoment
+        }
+        return PoseOptimizerBlock(poses: poses, firstMoment: firstMoment, secondMoment: secondMoment,
+                                  steps: states.map { $0.step })
+    }
+
+    /// Puts the restored refined poses into the cameras and the restored Adam state into the refiner.
+    private func restorePoses(_ block: PoseOptimizerBlock, refiner: GPUPoseRefiner) {
+        var restored: [PoseAdamState] = []
+        restored.reserveCapacity(cameras.count)
+        for view in 0..<cameras.count {
+            let p: Int = view * 12
+            let c0 = SIMD3<Float>(block.poses[p], block.poses[p + 1], block.poses[p + 2])
+            let c1 = SIMD3<Float>(block.poses[p + 3], block.poses[p + 4], block.poses[p + 5])
+            let c2 = SIMD3<Float>(block.poses[p + 6], block.poses[p + 7], block.poses[p + 8])
+            cameras[view].rotation = Matrix3(c0: c0, c1: c1, c2: c2)
+            cameras[view].translation = SIMD3<Float>(block.poses[p + 9], block.poses[p + 10], block.poses[p + 11])
+            let m: Int = view * 6
+            restored.append(PoseAdamState(firstMoment: Array(block.firstMoment[m..<(m + 6)]),
+                                          secondMoment: Array(block.secondMoment[m..<(m + 6)]),
+                                          step: block.steps[view]))
+        }
+        refiner.restoreStates(restored)
+    }
+}
+
 // MARK: - Pseudo-views (Task 18, P9), held-out evaluation
 
 // Command-buffer contract of a pseudo iteration (CPUTrainer step 4, GPU order):
@@ -1040,7 +1168,7 @@ extension GPUTrainer {
         let rates = configuration.learningRates(iteration: index, sceneRadius: sceneExtent.radius)
         try metalCall { () throws(MetalError) -> Void in
             try self.adam.encode(parameters: self.store, gradients: auxiliary.gradients, state: self.adamState,
-                                 rates: rates, step: index + 1, hyper: self.configuration.adam,
+                                 rates: rates, step: self.adamStepBase + index + 1, hyper: self.configuration.adam,
                                  commandBuffer: auxiliary.commandBuffer)
         }
         for term in terms(.postOptimizer) {

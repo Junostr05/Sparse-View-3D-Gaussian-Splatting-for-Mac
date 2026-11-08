@@ -22,10 +22,16 @@ public struct CheckpointRecord: Codable, Sendable, Equatable {
     public var heldOutSSIM: Double?
     /// Iteration with the best held-out score, when early stopping was used.
     public var bestIteration: Int?
+    /// True when `checkpoints/optimizer.bin` holds this checkpoint's optimizer state, so continuing from it resumes
+    /// the Adam moments exactly ("exact resume"). Optional: older checkpoints and checkpoints without it are `nil`.
+    public var hasOptimizerState: Bool?
+    /// True when this checkpoint was promoted from an interrupted run's autosave (v1.5).
+    public var recovered: Bool?
 
     public init(iteration: Int, gaussianCount: Int, psnr: Double?, date: Date,
                 heldOutView: String? = nil, heldOutPSNR: Double? = nil,
-                heldOutSSIM: Double? = nil, bestIteration: Int? = nil) {
+                heldOutSSIM: Double? = nil, bestIteration: Int? = nil,
+                hasOptimizerState: Bool? = nil, recovered: Bool? = nil) {
         self.iteration = iteration
         self.gaussianCount = gaussianCount
         self.psnr = psnr
@@ -34,6 +40,8 @@ public struct CheckpointRecord: Codable, Sendable, Equatable {
         self.heldOutPSNR = heldOutPSNR
         self.heldOutSSIM = heldOutSSIM
         self.bestIteration = bestIteration
+        self.hasOptimizerState = hasOptimizerState
+        self.recovered = recovered
     }
 }
 
@@ -195,6 +203,8 @@ public enum ProjectLayout {
     public static let previewDirectory = "preview"
     /// JPEG cover of the project, rendered from the latest checkpoint. Optional: older projects have none.
     public static let coverImage = "preview/cover.jpg"
+    /// Optimizer state of the latest checkpoint (`OptimizerState`). Written with every checkpoint of a run.
+    public static let optimizerState = "checkpoints/optimizer.bin"
 
     /// `depth/<name>.sdpt` for the image stored as `name`.
     public static func depthPath(forImage name: String) -> String {
@@ -624,15 +634,51 @@ public enum ProjectBundle {
     }
 
     /// Stores `cloud` as the latest checkpoint and appends `record` to the manifest.
-    /// Deletions of the previous checkpoint are dropped, because they refer to its Gaussians.
+    /// Deletions of the previous checkpoint are dropped, because they refer to its Gaussians. The optimizer state of
+    /// the previous checkpoint is dropped too. With `optimizer`, that state is stored as the new checkpoint's, and
+    /// the record says so (`hasOptimizerState`); without it, the record says the checkpoint has no exact resume.
     public static func withCheckpoint(_ contents: ProjectContents,
                                       cloud: GaussianCloud,
-                                      record: CheckpointRecord) -> ProjectContents {
+                                      record: CheckpointRecord,
+                                      optimizer: OptimizerState? = nil) -> ProjectContents {
         var result = contents
+        var stored = record
         result.files[ProjectLayout.latestCheckpoint] = PLYWriter.write(cloud)
         result.files[ProjectLayout.deletedIndices] = nil
         result.manifest.edits = nil
-        result.manifest.checkpoints.append(record)
+        if let optimizer {
+            result.files[ProjectLayout.optimizerState] = optimizer.encode()
+            stored.hasOptimizerState = true
+        } else {
+            result.files[ProjectLayout.optimizerState] = nil
+            stored.hasOptimizerState = nil
+        }
+        result.manifest.checkpoints.append(stored)
+        return result
+    }
+
+    /// The optimizer state of the latest checkpoint, decoded on request. Nil when the package has none. Only
+    /// the callers that continue training decode it; the bytes stay in `contents` either way.
+    /// Throws `ProjectError.corruptCheckpoint` when the file does not decode.
+    public static func optimizerState(_ contents: ProjectContents) throws(ProjectError) -> OptimizerState? {
+        guard let data = contents.files[ProjectLayout.optimizerState] else {
+            return nil
+        }
+        do {
+            return try OptimizerState(decoding: data)
+        } catch {
+            throw .corruptCheckpoint("optimizer state: \(error)")
+        }
+    }
+
+    /// Removes the stored optimizer state and marks the latest checkpoint as having none. Continuing from it then
+    /// restarts Adam, as before v1.5. Used by the library clean-up.
+    public static func withoutOptimizerState(_ contents: ProjectContents) -> ProjectContents {
+        var result = contents
+        result.files[ProjectLayout.optimizerState] = nil
+        if let last = result.manifest.checkpoints.indices.last {
+            result.manifest.checkpoints[last].hasOptimizerState = false
+        }
         return result
     }
 

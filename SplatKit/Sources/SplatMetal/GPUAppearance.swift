@@ -171,6 +171,41 @@ public final class GPUAppearance {
         updateEncoder.endEncoding()
     }
 
+    /// Gains, biases, Adam moments and step counts of every view, copied from the GPU. The GPU must be idle.
+    public func snapshotState() -> AppearanceOptimizerBlock {
+        let values: Int = viewCount * Self.valuesPerView
+        return AppearanceOptimizerBlock(parameters: Self.read(parameters, count: values),
+                                        firstMoment: Self.read(firstMoments, count: values),
+                                        secondMoment: Self.read(secondMoments, count: values),
+                                        stepCounts: stepCounts)
+    }
+
+    /// Replaces the gains, biases, moments and step counts with `block`, which must describe `viewCount` views. The
+    /// GPU must be idle with respect to these buffers.
+    public func restoreState(_ block: AppearanceOptimizerBlock) {
+        let values: Int = viewCount * Self.valuesPerView
+        precondition(block.viewCount == viewCount && block.parameters.count == values
+                         && block.firstMoment.count == values && block.secondMoment.count == values,
+                     "appearance state does not match \(viewCount) views")
+        Self.write(block.parameters, to: parameters)
+        Self.write(block.firstMoment, to: firstMoments)
+        Self.write(block.secondMoment, to: secondMoments)
+        stepCounts = block.stepCounts
+    }
+
+    private static func read(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        guard count > 0 else { return [] }
+        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: pointer, count: count))
+    }
+
+    private static func write(_ values: [Float], to buffer: MTLBuffer) {
+        guard !values.isEmpty else { return }
+        values.withUnsafeBytes { raw in
+            buffer.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+        }
+    }
+
     /// Gains and biases of every view, copied from the GPU. The GPU must be idle with respect to these buffers.
     public func readParameters() -> [AppearanceParameters] {
         let pointer = parameters.contents().bindMemory(to: Float.self, capacity: viewCount * Self.valuesPerView)

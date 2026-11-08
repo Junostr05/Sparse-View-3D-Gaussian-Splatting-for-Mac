@@ -52,12 +52,23 @@ extension CPURasterizer {
 
 /// Adam state of one camera pose: first and second moments of the six components (rotation, then translation).
 public struct PoseAdamState: Sendable, Equatable {
-    var firstMoment = [Double](repeating: 0, count: 6)
-    var secondMoment = [Double](repeating: 0, count: 6)
+    /// First moment of (ω, τ). Six values.
+    public internal(set) var firstMoment = [Double](repeating: 0, count: 6)
+    /// Second moment of (ω, τ). Six values.
+    public internal(set) var secondMoment = [Double](repeating: 0, count: 6)
     /// Applied updates so far (the bias-correction step counter).
     public internal(set) var step = 0
 
     public init() {}
+
+    /// State read back from an optimizer snapshot (`OptimizerState`). Both moments must hold six values.
+    public init(firstMoment: [Double], secondMoment: [Double], step: Int) {
+        precondition(firstMoment.count == 6 && secondMoment.count == 6, "pose moments hold six values each")
+        precondition(step >= 0, "pose step counter is non-negative")
+        self.firstMoment = firstMoment
+        self.secondMoment = secondMoment
+        self.step = step
+    }
 }
 
 /// Pose correction helpers: exponential map, folding into a `Camera`, and the Adam update of δ.

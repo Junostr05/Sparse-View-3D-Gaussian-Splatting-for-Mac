@@ -42,6 +42,18 @@ final class GPUPoseRefiner {
         states = [PoseAdamState](repeating: PoseAdamState(), count: viewCount)
     }
 
+    /// Adam state of every view's pose, in view order. Call only when no gradient is pending (after a wait).
+    func snapshotStates() -> [PoseAdamState] {
+        states
+    }
+
+    /// Replaces the Adam state of every view's pose. Call on a fresh refiner, before any gradient is accumulated.
+    func restoreStates(_ restored: [PoseAdamState]) {
+        precondition(restored.count == states.count, "one pose state per view")
+        precondition(pendingCount == 0, "pose state is restored only before any gradient is pending")
+        states = restored
+    }
+
     /// True when some view has a gradient that `applyPending` has not consumed yet.
     var hasPendingGradient: Bool {
         pendingCount > 0
