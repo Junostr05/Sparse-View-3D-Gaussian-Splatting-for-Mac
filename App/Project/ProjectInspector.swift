@@ -217,6 +217,7 @@ struct ProjectInspector: View {
                     LabeledContent("Depth loss", value: String(format: "%.4f", depthLoss))
                 }
             }
+            TrainingDashboardView(model: model)
         }
     }
 
