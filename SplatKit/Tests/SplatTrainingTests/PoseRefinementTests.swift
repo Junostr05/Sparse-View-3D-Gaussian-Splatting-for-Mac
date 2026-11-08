@@ -72,7 +72,7 @@ struct PoseRefinementTests {
     }
 
     private func configuration(refinement: Bool) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 1
         configuration.shDegreeInterval = 0
         configuration.iterations = 300

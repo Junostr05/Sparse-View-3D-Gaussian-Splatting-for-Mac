@@ -66,11 +66,11 @@ final class ViewerModel {
     // MARK: Viewport overlays. Drawn by `ViewportOverlay`; per session only, not stored in the project.
 
     /// Ground grid below the scene.
-    var showsGrid = true
+    var showsGrid = false
     /// Axes gizmo, and the axis lines through the origin.
-    var showsAxes = true
+    var showsAxes = false
     /// Frustum pyramids of the estimated cameras.
-    var showsCameras = false
+    var showsCameras = true
     /// Camera names at the camera centres. Only shown together with `showsCameras`.
     var showsCameraNames = false
 

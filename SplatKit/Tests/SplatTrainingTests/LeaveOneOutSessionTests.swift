@@ -37,7 +37,7 @@ struct LeaveOneOutSessionTests {
     /// Phase 3 style configuration with densification off and no PSNR evaluation; early stopping at
     /// every 100 iterations with patience 2 and no stop before `minimumIterations`.
     private func makeConfiguration(iterations: Int, minimumIterations: Int = 200) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = iterations
         configuration.logInterval = 20

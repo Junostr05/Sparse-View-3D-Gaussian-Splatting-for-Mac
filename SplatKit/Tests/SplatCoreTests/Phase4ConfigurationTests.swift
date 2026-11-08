@@ -6,7 +6,8 @@ import SplatCore
 
     @Test func defaultsMatchArchitecture() {
         let config = TrainingConfiguration()
-        #expect(config.regularizers == [.depthPearson, .depthL1, .anisotropy, .isolationPrune])
+        // User decision 2026-11-08: every regularizer is on by default.
+        #expect(config.regularizers == Set(RegularizerKind.allCases))
         #expect(RegularizerKind.allCases.count == 6)
         #expect(config.artifacts.maxAxisRatio == 10)
         #expect(config.earlyStopping.minimumViews == 4)
@@ -15,8 +16,8 @@ import SplatCore
         #expect(config.densification.opacityResetInterval == 0)
         #expect(config.configurationRevision == TrainingConfiguration.currentRevision)
         #expect(TrainingConfiguration.currentRevision == 2)
-        #expect(!config.isEnabled(.pseudoViews))
-        #expect(!config.isEnabled(.scaleCap))
+        #expect(config.isEnabled(.pseudoViews))
+        #expect(config.isEnabled(.scaleCap))
         #expect(!config.earlyStopping.isEnabled)
         #expect(config.denseInit.isEnabled)
     }
@@ -201,11 +202,11 @@ import SplatCore
         let json = Data("{\"iterations\": 123}".utf8)
         let configuration = try JSONDecoder().decode(TrainingConfiguration.self, from: json)
         #expect(configuration.iterations == 123)
-        // Exposure compensation is the one v1.2 feature that is on by default.
+        // All four v1.2 features are on by default (user decision 2026-11-08).
         #expect(configuration.appearance.isEnabled)
-        #expect(!configuration.mcmc.isEnabled)
-        #expect(!configuration.antiAliasing.isEnabled)
-        #expect(!configuration.poseRefinement.isEnabled)
+        #expect(configuration.mcmc.isEnabled)
+        #expect(configuration.antiAliasing.isEnabled)
+        #expect(configuration.poseRefinement.isEnabled)
     }
 
     @Test func v12SettingsRoundTrip() throws {

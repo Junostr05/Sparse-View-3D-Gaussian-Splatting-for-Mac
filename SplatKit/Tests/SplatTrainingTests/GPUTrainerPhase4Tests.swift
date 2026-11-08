@@ -45,7 +45,7 @@ private func priorWithNonFinitePixels(_ depth: DepthMap) -> DepthPrior {
 
 /// Phase 4 configuration with densification off and a loss read at every step.
 private func phase4Configuration(iterations: Int, regularizers: Set<RegularizerKind>) -> TrainingConfiguration {
-    var configuration = TrainingConfiguration()
+    var configuration = TrainingConfiguration.testBaseline()
     // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
     configuration.appearance.isEnabled = false
     configuration.iterations = iterations

@@ -34,7 +34,7 @@ private func pseudoDataset(_ scene: SyntheticScene) -> TrainingDataset {
 /// Configuration with densification and isolation off, a loss read at every step, and pseudo-views from
 /// iteration 0 every step (so a single step is a pseudo step).
 private func pseudoConfiguration(iterations: Int, regularizers: Set<RegularizerKind>) -> TrainingConfiguration {
-    var configuration = TrainingConfiguration()
+    var configuration = TrainingConfiguration.testBaseline()
     configuration.iterations = iterations
     configuration.shDegree = 0
     configuration.seed = 11

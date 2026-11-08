@@ -20,7 +20,7 @@ struct ContinuedTrainingTests {
     }
 
     private func baseConfiguration() -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 1
         configuration.iterations = 60
         configuration.logInterval = 10

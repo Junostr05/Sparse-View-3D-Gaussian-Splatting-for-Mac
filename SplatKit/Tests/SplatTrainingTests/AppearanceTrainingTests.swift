@@ -12,7 +12,7 @@ import SplatMetal
 struct AppearanceTrainingTests {
 
     private func makeConfiguration(appearance: Bool, startIteration: Int = 0) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = 400
         configuration.logInterval = 0

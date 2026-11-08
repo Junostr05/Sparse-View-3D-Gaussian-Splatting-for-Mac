@@ -1,7 +1,7 @@
 import SwiftUI
 import SplatCore
 
-/// The "Quality" inspector group: four experimental training features, all off by default. Plain `Form`
+/// The "Quality" inspector group: four training features, all on by default (user decision 2026-11-08). Plain `Form`
 /// controls, edited through the same document bindings as the Sparse-View section and disabled while training.
 /// Expert mode only; collapses as one group.
 struct QualitySettingsSection: View {
@@ -11,7 +11,7 @@ struct QualitySettingsSection: View {
 
     var body: some View {
         Section(isExpanded: isExpanded) {
-            Text("Experimental: measured on synthetic scenes only, not yet on real photos.")
+            Text("All four are on by default. Measured on synthetic scenes and 13 real photos: only exposure compensation showed a clear gain; the others were neutral, and pose refinement with MCMC needs the small default learning rates.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -25,21 +25,21 @@ struct QualitySettingsSection: View {
             Toggle("Anti-aliasing", isOn: antiAliasingBinding)
                 .disabled(model.isTraining)
                 .help("Mip-Splatting filter that reduces shimmering when zooming out.")
-            Text("Mip-Splatting filter: fewer artifacts when zooming out. Exports contain the filter. No measurable change in PSNR on test scenes.")
+            Text("Mip-Splatting filter: fewer artifacts when zooming out. Exports contain the filter. No measurable change in PSNR on test scenes. On by default.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("MCMC densification", isOn: mcmcBinding)
                 .disabled(model.isTraining)
                 .help("Moves and adds Gaussians within the budget instead of cloning and splitting them.")
-            Text("Moves and adds Gaussians within the budget instead of cloning and splitting. No reliable PSNR change on test scenes; it uses about three times more Gaussians.")
+            Text("Moves and adds Gaussians within the budget instead of cloning and splitting. No reliable PSNR change on test scenes; it uses about three times more Gaussians and trains slower. On by default.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("Refine camera poses", isOn: poseRefinementBinding)
                 .disabled(model.isTraining)
                 .help("Corrects small errors in the camera poses while training.")
-            Text("Corrects small pose errors while training. No measurable gain on test scenes yet; leave off unless the poses are known to be inaccurate.")
+            Text("Corrects small pose errors while training. No measurable gain on test scenes yet. On by default; switch it off if the poses are known to be exact.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

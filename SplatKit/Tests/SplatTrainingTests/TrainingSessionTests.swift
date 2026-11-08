@@ -26,7 +26,7 @@ struct TrainingSessionTests {
     @Test
     func streamReportsProgressAndFinishes() async throws {
         let (dataset, initial) = try makeScene(initialCount: 150)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = 40
         configuration.logInterval = 10
@@ -57,7 +57,7 @@ struct TrainingSessionTests {
         // Densifies at 10, 20, ... The run is far longer than the test needs, so the cancellation (after
         // the third progress event) is what ends it. Densification is forced by a zero gradient threshold.
         let (dataset, initial) = try makeScene(initialCount: 100)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = 100_000
         configuration.logInterval = 5
@@ -98,7 +98,7 @@ struct TrainingSessionTests {
     @Test
     func pauseStopsIterating() async throws {
         let (dataset, initial) = try makeScene(initialCount: 100)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         // Long enough that the run is still going while the test pauses it.
         configuration.iterations = 400

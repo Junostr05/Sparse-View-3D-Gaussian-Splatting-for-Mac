@@ -27,7 +27,7 @@ struct MCMCTrainingTests {
     /// MCMC on, classic densification on with zero threshold (so it would clone everything if it ran), and the
     /// Phase 4 regularizers off so that the count only changes through MCMC.
     private func mcmcConfiguration(iterations: Int, maxGaussians: Int) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = iterations
         configuration.logInterval = 10
@@ -212,7 +212,7 @@ struct MCMCTrainingTests {
     @Test func disabledMCMCIgnoresItsSettings() throws {
         let (dataset, initial) = try makeScene(initialCount: 80)
         let context = try MetalContext.makeDefault()
-        var baseline = TrainingConfiguration()
+        var baseline = TrainingConfiguration.testBaseline()
         baseline.shDegree = 0
         baseline.iterations = 40
         baseline.logInterval = 10

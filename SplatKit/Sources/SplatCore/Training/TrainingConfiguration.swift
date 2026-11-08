@@ -282,7 +282,7 @@ public struct AppearanceSettings: Codable, Sendable, Equatable {
 /// split, dead Gaussians are relocated onto live ones, new Gaussians are added up to the budget, and the
 /// positions get gradient-scaled noise. Replaces the classic densification when enabled.
 public struct MCMCSettings: Codable, Sendable, Equatable {
-    public var isEnabled = false
+    public var isEnabled = true
     public var startIteration = 500
     public var stopIteration = 25_000
     public var interval = 100
@@ -321,7 +321,7 @@ public struct MCMCSettings: Codable, Sendable, Equatable {
 /// Anti-aliasing after Mip-Splatting (v1.2): a 3D smoothing filter limits every Gaussian to what the training
 /// cameras can resolve, and a 2D box-like filter with compensation replaces the fixed 0.3 px dilation.
 public struct AntiAliasingSettings: Codable, Sendable, Equatable {
-    public var isEnabled = false
+    public var isEnabled = true
     /// Variance of the 3D filter, in squared pixels at the training resolution (Mip-Splatting: 0.2).
     public var filter3DVariance: Float = 0.2
     /// Variance added to the projected 2D covariance (Mip-Splatting: 0.1; the classic dilation is 0.3).
@@ -348,7 +348,7 @@ public struct AntiAliasingSettings: Codable, Sendable, Equatable {
 /// Joint camera pose refinement (v1.2): every training camera gets a small learned rotation and translation
 /// correction, optimized with the Gaussians. Helps poses that are slightly off (for example pose-free ones).
 public struct PoseRefinementSettings: Codable, Sendable, Equatable {
-    public var isEnabled = false
+    public var isEnabled = true
     /// Rotation learning rate in radians per Adam step.
     public var rotationLearningRate: Float = 2e-5
     /// Translation learning rate, multiplied by the scene radius.
@@ -394,10 +394,10 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var logInterval = 10
     public var evalInterval = 500
     public var previewInterval = 200
-    /// Phase 4 features switched on. Defaults to the set that measured positive or neutral
-    /// (decision 14 revised 2026-11-07): scale cap and pseudo-views are off.
+    /// Phase 4 features switched on. User decision 2026-11-08: every regularizer is on by default, including scale
+    /// cap and pseudo-views, although the synthetic benchmark measured both as neutral to harmful (decision 14).
     public static let defaultRegularizers: Set<RegularizerKind> = [
-        .depthPearson, .depthL1, .anisotropy, .isolationPrune
+        .depthPearson, .depthL1, .anisotropy, .scaleCap, .isolationPrune, .pseudoViews
     ]
     public var regularizers: Set<RegularizerKind> = TrainingConfiguration.defaultRegularizers
     /// Leave-one-out: names of views excluded from training and used for evaluation.

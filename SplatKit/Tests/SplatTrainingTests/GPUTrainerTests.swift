@@ -70,7 +70,7 @@ struct GPUTrainerTests {
                                   cameras: [makeCamera(width: 64, height: 64),
                                             makeCamera(width: 64, height: 64, shift: 1.0)])
         let initial = try makeRandomCloud(count: 500, seed: 97, shDegree: 0)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -105,7 +105,7 @@ struct GPUTrainerTests {
                                   cameras: [makeCamera(width: 48, height: 48),
                                             makeCamera(width: 48, height: 48, shift: 0.2)])
         let initial = try makeRandomCloud(count: 500, seed: 97, shDegree: 0)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -155,7 +155,7 @@ struct GPUTrainerTests {
                                   cameras: [makeCamera(width: 32, height: 32),
                                             makeCamera(width: 32, height: 32, shift: 0.2)])
         let initial = try makeRandomCloud(count: 100, seed: 52, shDegree: 0)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -195,7 +195,7 @@ struct GPUTrainerTests {
         let target = CPURasterizer.render(groundTruth, camera: camera, settings: settings)
         let dataset = TrainingDataset(views: [TrainingView(name: "comparison", camera: camera, image: target)])
         let initial = try comparisonInitialCloud()
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -248,7 +248,7 @@ struct GPUTrainerTests {
         let away = makeCamera(width: 32, height: 32, shift: 100)
         let blank = RGBImage(width: 32, height: 32, pixels: [SIMD3<Float>](repeating: .zero, count: 32 * 32))
         let dataset = TrainingDataset(views: [TrainingView(name: "away", camera: away, image: blank)])
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -282,7 +282,7 @@ struct GPUTrainerTests {
                                   cameras: [makeCamera(width: 64, height: 48),
                                             makeCamera(width: 32, height: 32, shift: 0.1)])
         let initial = try makeRandomCloud(count: 150, seed: 22, shDegree: 0)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0
@@ -314,7 +314,7 @@ struct GPUTrainerTests {
                                   cameras: [makeCamera(width: 32, height: 32)])
         views[0].image.pixels[0] = SIMD3<Float>(Float.nan, 0, 0)
         let initial = try makeRandomCloud(count: 100, seed: 32, shDegree: 0)
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         // The CPU reference trainer has no appearance compensation (on by default in the GPU trainer).
         configuration.appearance.isEnabled = false
         configuration.shDegree = 0

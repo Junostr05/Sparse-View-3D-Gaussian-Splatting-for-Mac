@@ -146,7 +146,7 @@ private func sceneExtent(_ scene: SyntheticScene) -> SceneExtent {
 
 /// Degree-0 configuration with no preview or evaluation readbacks during training.
 private func makeConfiguration(iterations: Int, regularizers: Set<RegularizerKind>) -> TrainingConfiguration {
-    var configuration = TrainingConfiguration()
+    var configuration = TrainingConfiguration.testBaseline()
     configuration.iterations = iterations
     configuration.shDegree = 0
     configuration.seed = 11

@@ -11,7 +11,7 @@ import SplatMetal
 struct AntiAliasingTrainerTests {
 
     private func antiAliasedConfiguration(iterations: Int) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
         configuration.shDegree = 0
         configuration.iterations = iterations
         configuration.logInterval = 25

@@ -131,3 +131,19 @@ private func maxAbsDifference(_ a: [Float], _ b: [Float]) -> Float {
     }
     return worst
 }
+
+
+extension TrainingConfiguration {
+    /// The configuration most trainer tests were written against: the Phase 4 regularizer set and none of the
+    /// v1.2 features (exposure compensation, MCMC, anti-aliasing, pose refinement), which are on in the app defaults
+    /// since 2026-11-08 but are not implemented by the CPU reference trainer.
+    static func testBaseline() -> TrainingConfiguration {
+        var configuration = TrainingConfiguration()
+        configuration.regularizers = [.depthPearson, .depthL1, .anisotropy, .isolationPrune]
+        configuration.appearance.isEnabled = false
+        configuration.mcmc.isEnabled = false
+        configuration.antiAliasing.isEnabled = false
+        configuration.poseRefinement.isEnabled = false
+        return configuration
+    }
+}
