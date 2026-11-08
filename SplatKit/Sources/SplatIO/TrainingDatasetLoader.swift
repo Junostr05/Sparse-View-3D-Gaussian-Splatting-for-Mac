@@ -24,8 +24,9 @@ public enum TrainingDatasetLoader {
                                   points3D: Data?,
                                   imageData: (String) -> Data?,
                                   maxImageSide: Int,
-                                  decode: ImageDecoder) throws(DatasetError) -> TrainingDataset {
-        let specs = try colmapSpecs(cameras: cameras, images: images)
+                                  decode: ImageDecoder,
+                                  excluding excluded: Set<String> = []) throws(DatasetError) -> TrainingDataset {
+        let specs = try colmapSpecs(cameras: cameras, images: images).filter { !excluded.contains($0.name) }
         let views = try loadViews(specs,
                                   imageData: imageData,
                                   maxImageSide: maxImageSide,
@@ -42,8 +43,9 @@ public enum TrainingDatasetLoader {
     public static func loadARKit(capture: Data,
                                  imageData: (String) -> Data?,
                                  maxImageSide: Int,
-                                 decode: ImageDecoder) throws(DatasetError) -> TrainingDataset {
-        let specs = try arkitSpecs(capture: capture)
+                                 decode: ImageDecoder,
+                                 excluding excluded: Set<String> = []) throws(DatasetError) -> TrainingDataset {
+        let specs = try arkitSpecs(capture: capture).filter { !excluded.contains($0.name) }
         let views = try loadViews(specs,
                                   imageData: imageData,
                                   maxImageSide: maxImageSide,

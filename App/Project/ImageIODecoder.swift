@@ -20,6 +20,38 @@ nonisolated enum ImageIODecoder {
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw DecodeError.unreadableImage
         }
+        return try rgbImage(from: image)
+    }
+
+    /// Decodes a downscaled copy whose long side is at most `maxSide` pixels. ImageIO reduces the image while
+    /// it decodes, so a large photo never exists at full size. EXIF orientation is applied.
+    static func decodeThumbnail(_ data: Data, maxSide: Int) throws -> RGBImage {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = thumbnailImage(source, maxSide: maxSide) else {
+            throw DecodeError.unreadableImage
+        }
+        return try rgbImage(from: image)
+    }
+
+    /// A small image for display, or `nil` when the data is not an image.
+    static func thumbnail(_ data: Data, maxSide: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        return thumbnailImage(source, maxSide: maxSide)
+    }
+
+    private static func thumbnailImage(_ source: CGImageSource, maxSide: Int) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxSide
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
+    /// Draws `image` into an 8-bit sRGB bitmap and converts it to `RGBImage`.
+    private static func rgbImage(from image: CGImage) throws -> RGBImage {
         let width: Int = image.width
         let height: Int = image.height
         guard width > 0, height > 0 else {
