@@ -63,6 +63,17 @@ final class ViewerModel {
     var isInspectorPresented = true
     var renderState: RenderState = .preparing
 
+    // MARK: Viewport overlays. Drawn by `ViewportOverlay`; per session only, not stored in the project.
+
+    /// Ground grid below the scene.
+    var showsGrid = true
+    /// Axes gizmo, and the axis lines through the origin.
+    var showsAxes = true
+    /// Frustum pyramids of the estimated cameras.
+    var showsCameras = false
+    /// Camera names at the camera centres. Only shown together with `showsCameras`.
+    var showsCameraNames = false
+
     // MARK: Editing state. The behaviour is in ViewerModel+Editing.swift.
 
     /// The base cloud the edit history refers to. Replaced by `replaceCloud(_:)`.
@@ -141,10 +152,13 @@ final class ViewerModel {
     /// Latest frame statistics, assigned at most every 0.5 s.
     private(set) var stats: FrameStats?
 
-    @ObservationIgnored private let bounds: Bounds
+    @ObservationIgnored let bounds: Bounds
     @ObservationIgnored private var lastStatsTime: ContinuousClock.Instant?
     /// One view per camera, built from `cameras` and the current up axis.
     @ObservationIgnored private var cameraViews: [ViewCamera] = []
+    /// Overlay geometry for the bounds, the up axis and the cameras. Built by `viewportOverlayScene`, cleared
+    /// whenever the camera views are rebuilt.
+    @ObservationIgnored var overlayCache: ViewportOverlayScene?
     /// Smooth path through `cameraViews`. `nil` when there are no cameras.
     @ObservationIgnored private var flight: ViewFlight?
     /// The running flight or playback task. Cancelled by every new request and by manual input.
@@ -221,6 +235,7 @@ final class ViewerModel {
 
     /// Rebuilds the cached camera views and the flight through them. Called at init and when the up axis changes.
     private func rebuildCameraViews() {
+        overlayCache = nil
         cameraViews = cameras.indices.map { cameraView(at: $0) }
         flight = cameraViews.isEmpty ? nil : ViewFlight(keyframes: cameraViews)
     }

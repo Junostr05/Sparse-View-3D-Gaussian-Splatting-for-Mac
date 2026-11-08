@@ -160,6 +160,7 @@ struct ProjectInspector: View {
                 set: { viewer.anchorsToCursorDepth = $0 }
             ))
             ViewerShortcutsButton()
+            ViewportOverlayControls(model: viewer)
             if !viewer.cameras.isEmpty {
                 Picker("Camera", selection: cameraSelection) {
                     ForEach(viewer.cameras.indices, id: \.self) { index in

@@ -16,6 +16,9 @@ struct ViewerContent: View {
                 ViewportView(model: model, session: session)
                     .accessibilityLabel("3D viewport")
                     .overlay {
+                        ViewportOverlay(model: model)
+                    }
+                    .overlay {
                         EditOverlay(model: model)
                     }
                     .overlay(alignment: .bottom) {
