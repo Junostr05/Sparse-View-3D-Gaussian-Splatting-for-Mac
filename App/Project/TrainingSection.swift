@@ -21,7 +21,8 @@ struct TrainingSection: View {
             if let progress = model.progress {
                 progressRows(progress)
             }
-            // DASHBOARD INSERTION POINT: the training dashboard (`TrainingDashboardView`) goes here, after the progress rows.
+            // The live charts and figures; hidden until a run has produced history.
+            TrainingDashboardView(model: model)
         }
     }
 

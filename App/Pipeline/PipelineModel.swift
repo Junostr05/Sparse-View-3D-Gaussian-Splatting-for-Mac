@@ -27,6 +27,21 @@ nonisolated enum PipelineWork {
         }
     }
 
+    /// Reads the given image files, as dropped onto the window. Each file's security scope is held for the read only.
+    @concurrent
+    static func scanPhotos(urls: [URL]) async throws -> [CapturedFrame] {
+        var scoped: [URL] = []
+        for url in urls where url.startAccessingSecurityScopedResource() {
+            scoped.append(url)
+        }
+        defer {
+            for url in scoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try PhotoFolderImporter.load(urls: urls, maxSide: frameMaxSide)
+    }
+
     /// Scores the candidate frames of a video. The caller holds the security scope of `url`.
     @concurrent
     static func scoreVideo(url: URL, sampleInterval: Double) async throws -> [VideoCandidate] {
@@ -366,6 +381,28 @@ final class PipelineModel {
         work = Task {
             do {
                 let frames: [CapturedFrame] = try await PipelineWork.scanPhotos(folder: folder)
+                guard gen == self.generation else { return }
+                self.photoFrames = frames
+                self.adoptCandidates(Self.photoItems(frames))
+                self.isScanning = false
+            } catch {
+                guard gen == self.generation else { return }
+                self.failScan(error)
+            }
+        }
+    }
+
+    /// Reads the given image files, as a drop of files does. Like `importPhotos(folder:)`, no access is kept.
+    func importPhotos(urls: [URL]) {
+        discard()
+        let gen: Int = beginGeneration()
+        source = .photos(folderName: "Dropped photos")
+        poseSummary = nil
+        usesAllFrames = true
+        isScanning = true
+        work = Task {
+            do {
+                let frames: [CapturedFrame] = try await PipelineWork.scanPhotos(urls: urls)
                 guard gen == self.generation else { return }
                 self.photoFrames = frames
                 self.adoptCandidates(Self.photoItems(frames))

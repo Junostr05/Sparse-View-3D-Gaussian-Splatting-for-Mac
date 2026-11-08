@@ -1,3 +1,4 @@
+import Metal
 import Observation
 import SwiftUI
 import SplatCore
@@ -207,6 +208,12 @@ final class ProjectModel {
     private(set) var totalIterations = 0
     /// 1-based number of the round in progress, 0 when no continuation runs.
     private(set) var round = 0
+    /// Recorded progress of the current run, for the training dashboard. Reset by a new run and by an import.
+    private(set) var history = TrainingHistory()
+    /// True while the current run has no iteration target (an endless continuation).
+    private(set) var isEndlessRun = false
+    /// Memory the default Metal device has allocated, in bytes. Refreshed with each progress event.
+    private(set) var gpuMemoryBytes: Int = 0
     var errorMessage: String?
     /// Non-fatal notes from the last import or run, such as depth files that were missing or unreadable.
     var warningMessage: String?
@@ -230,9 +237,20 @@ final class ProjectModel {
     @ObservationIgnored private var iterationOffset = 0
     /// Set by `stop()`. Ends an endless continuation between rounds, when no session is running to cancel.
     @ObservationIgnored private var stopRequested = false
+    /// The default Metal device, read for its allocated memory. Created once, not per progress event.
+    @ObservationIgnored private static let metalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
 
     var isPaused: Bool {
         progress?.state == .paused
+    }
+
+    /// Cumulative iteration target of the current run: stored iterations plus the run's total. `nil` without
+    /// progress, and for an endless continuation.
+    var runTotalIterations: Int? {
+        guard let progress, !isEndlessRun else {
+            return nil
+        }
+        return iterationOffset + progress.totalIterations
     }
 
     // MARK: - Import
@@ -286,6 +304,7 @@ final class ProjectModel {
         document.wrappedValue.contents = contents
         viewer = nil
         progress = nil
+        history.reset()
         errorMessage = nil
         warningMessage = nil
         depthStatuses = nil
@@ -350,6 +369,8 @@ final class ProjectModel {
         let contents: ProjectContents = document.wrappedValue.contents
         errorMessage = nil
         progress = nil
+        history.reset()
+        isEndlessRun = false
         heldOutViewName = nil
         iterationOffset = 0
         totalIterations = 0
@@ -377,6 +398,8 @@ final class ProjectModel {
         guard !isTraining, canContinue(contents) else { return }
         errorMessage = nil
         progress = nil
+        history.reset()
+        isEndlessRun = continuation.isEndless
         heldOutViewName = nil
         iterationOffset = 0
         totalIterations = 0
@@ -541,10 +564,32 @@ final class ProjectModel {
         var stored: TrainingProgress = event
         stored.preview = nil
         progress = stored
+        recordHistory(event)
 
         if let cloud = event.preview {
             viewer?.replaceCloud(cloud)
             editsTargetCheckpoint = false
+        }
+    }
+
+    /// Adds one event to the dashboard history. Paused events stop the clock, the others restart it. A failed event
+    /// records nothing. `totalIterations` already holds the cumulative iteration when this runs.
+    private func recordHistory(_ event: TrainingProgress) {
+        let now: Double = ProcessInfo.processInfo.systemUptime
+        switch event.state {
+        case .paused:
+            history.pause(at: now)
+        case .running, .finished, .cancelled:
+            history.resume(at: now)
+            let sample = TrainingHistory.Sample(iteration: totalIterations,
+                                                loss: event.loss,
+                                                psnr: event.psnr,
+                                                gaussianCount: event.gaussianCount,
+                                                iterationsPerSecond: event.iterationsPerSecond)
+            history.append(sample, at: now)
+            gpuMemoryBytes = Self.metalDevice?.currentAllocatedSize ?? 0
+        case .failed:
+            break
         }
     }
 

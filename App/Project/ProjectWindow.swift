@@ -10,6 +10,10 @@ struct ProjectWindow: View {
     @State private var model = ProjectModel()
     @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
+    /// True while a drag hovers over the window.
+    @State private var isDropTargeted = false
+    /// A drop that replaces the current capture, waiting for the user's confirmation.
+    @State private var pendingDrop: DropAction?
 
     var body: some View {
         let contents: ProjectContents = document.wrappedValue.contents
@@ -49,6 +53,55 @@ struct ProjectWindow: View {
         .commandPalette { openWindow in
             CommandRegistry.projectWindowCommands(viewer: model.viewer, project: model, document: document,
                                                   openWindow: openWindow)
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            handleDrop(urls)
+            return true
+        } isTargeted: { isDropTargeted = $0 }
+        .overlay {
+            if isDropTargeted {
+                ProjectDropHighlight()
+            }
+        }
+        .alert("Replace the current capture?", isPresented: isConfirmingReplace) {
+            Button("Replace", role: .destructive) {
+                if let action = pendingDrop {
+                    pendingDrop = nil
+                    ProjectDropRouter.perform(action, replacing: true, document: document, model: model, pipeline: pipeline)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDrop = nil
+            }
+        } message: {
+            Text("The images, poses and trained models in this project are replaced by the dropped items. Training settings stay.")
+        }
+    }
+
+    private var isConfirmingReplace: Binding<Bool> {
+        Binding(get: { pendingDrop != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingDrop = nil
+                    }
+                })
+    }
+
+    /// Classifies a drop. An empty project imports at once; a project with images asks before it is replaced.
+    private func handleDrop(_ urls: [URL]) {
+        let action: DropAction = ProjectDropRouter.classify(urls)
+        let decision: ProjectDropRouter.Decision = ProjectDropRouter.decide(
+            action,
+            hasCapture: !document.wrappedValue.contents.manifest.imageFiles.isEmpty,
+            isTraining: model.isTraining
+        )
+        switch decision {
+        case .perform(let performed):
+            ProjectDropRouter.perform(performed, replacing: false, document: document, model: model, pipeline: pipeline)
+        case .confirmReplace(let pending):
+            pendingDrop = pending
+        case .refuse(let message):
+            model.errorMessage = message
         }
     }
 
