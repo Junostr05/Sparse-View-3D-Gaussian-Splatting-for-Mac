@@ -25,7 +25,9 @@ struct OptimizerResumeTests {
 
     /// SH degree 1 for every step, no densification (its statistics are not part of the state), no autosave.
     private func makeConfiguration(iterations: Int) -> TrainingConfiguration {
-        var configuration = TrainingConfiguration()
+        var configuration = TrainingConfiguration.testBaseline()
+        // The state tests expect the appearance parameters (the original default when they were written).
+        configuration.appearance.isEnabled = true
         configuration.shDegree = 1
         configuration.shDegreeInterval = 0
         configuration.iterations = iterations
