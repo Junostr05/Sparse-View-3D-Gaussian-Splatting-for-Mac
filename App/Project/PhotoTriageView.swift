@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SplatCore
+import SplatDepth
 import SplatIO
 
 /// Runs photo triage for one project: decodes each photo at a reduced size, measures it, asks `PhotoTriage` for

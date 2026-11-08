@@ -8,14 +8,14 @@ import SplatCore
 /// The image is drawn into an 8-bit RGBX sRGB bitmap, so embedded color profiles are converted to
 /// sRGB and any alpha is composited over black. `nonisolated` so the decode runs on the caller's
 /// executor (the training preparation runs it off the main actor).
-nonisolated enum ImageIODecoder {
+public nonisolated enum ImageIODecoder {
     enum DecodeError: Error, Equatable {
         case unreadableImage
         case emptyImage
         case bitmapCreationFailed
     }
 
-    static func decode(_ data: Data) throws -> RGBImage {
+    public static func decode(_ data: Data) throws -> RGBImage {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw DecodeError.unreadableImage
@@ -25,7 +25,7 @@ nonisolated enum ImageIODecoder {
 
     /// Decodes a downscaled copy whose long side is at most `maxSide` pixels. ImageIO reduces the image while
     /// it decodes, so a large photo never exists at full size. EXIF orientation is applied.
-    static func decodeThumbnail(_ data: Data, maxSide: Int) throws -> RGBImage {
+    public static func decodeThumbnail(_ data: Data, maxSide: Int) throws -> RGBImage {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = thumbnailImage(source, maxSide: maxSide) else {
             throw DecodeError.unreadableImage
@@ -34,7 +34,7 @@ nonisolated enum ImageIODecoder {
     }
 
     /// A small image for display, or `nil` when the data is not an image.
-    static func thumbnail(_ data: Data, maxSide: Int) -> CGImage? {
+    public static func thumbnail(_ data: Data, maxSide: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             return nil
         }

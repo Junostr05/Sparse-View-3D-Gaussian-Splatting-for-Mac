@@ -31,7 +31,7 @@ targets += [
     // Phase 3 Task 15. Nonisolated default isolation: never set defaultIsolation(MainActor.self) here.
     .target(
         name: "SplatTraining",
-        dependencies: ["SplatCore", "SplatIO", "SplatMetal"]
+        dependencies: ["SplatCore", "SplatMetal", "SplatIO", "SplatDepth"]
     ),
     .testTarget(
         name: "SplatTrainingTests",

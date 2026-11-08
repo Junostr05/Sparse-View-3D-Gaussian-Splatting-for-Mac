@@ -9,6 +9,8 @@ struct ProjectWindow: View {
     let name: String
     /// The package folder on disk, where autosaves are written. Nil for a document that is not saved yet.
     let packageURL: URL?
+    /// The app's training queue, used by the command palette.
+    let queue: TrainingQueue
     @State private var model = ProjectModel()
     @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
@@ -59,10 +61,19 @@ struct ProjectWindow: View {
         }
         .onDisappear {
             pipeline.close()
+            if let url = packageURL {
+                ActiveProjectTraining.set(url, training: false)
+            }
+        }
+        .onChange(of: model.isTraining, initial: false) { (_, training: Bool) in
+            // The training queue skips a project while its window trains it.
+            if let url = packageURL {
+                ActiveProjectTraining.set(url, training: training)
+            }
         }
         .commandPalette { openWindow in
             CommandRegistry.projectWindowCommands(viewer: model.viewer, project: model, document: document,
-                                                  openWindow: openWindow)
+                                                  openWindow: openWindow, queue: queue, projectURL: packageURL)
         }
         .dropDestination(for: URL.self) { urls, _ in
             handleDrop(urls)

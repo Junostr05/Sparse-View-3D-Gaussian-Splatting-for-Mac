@@ -35,6 +35,30 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.4.0"
         CURRENT_PROJECT_VERSION: "1"
+  sparsesplat:
+    type: tool
+    platform: macOS
+    sources:
+      - CLI
+    dependencies:
+      - package: SplatKit
+        product: SplatCore
+      - package: SplatKit
+        product: SplatIO
+      - package: SplatKit
+        product: SplatMetal
+      - package: SplatKit
+        product: SplatTraining
+      - package: SplatKit
+        product: SplatDepth
+    settings:
+      base:
+        PRODUCT_NAME: sparsesplat
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.junostr05.SparseSplat.sparsesplat
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: NO
+        MARKETING_VERSION: "1.4.0"
+        CURRENT_PROJECT_VERSION: "1"
 schemes:
   SparseSplat:
     build:
@@ -48,3 +72,7 @@ schemes:
       config: Debug
     archive:
       config: Release
+  sparsesplat:
+    build:
+      targets:
+        sparsesplat: all
