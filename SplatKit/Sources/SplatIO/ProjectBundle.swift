@@ -191,6 +191,10 @@ public enum ProjectLayout {
     /// Camera poses refined by training, as `RefinedPoseFile` JSON. Lives under `poses/`, so every import
     /// (which replaces that directory) removes it.
     public static let refinedPoses = "poses/refined.json"
+    /// Directory of files the app derives from the project, such as the library cover.
+    public static let previewDirectory = "preview"
+    /// JPEG cover of the project, rendered from the latest checkpoint. Optional: older projects have none.
+    public static let coverImage = "preview/cover.jpg"
 
     /// `depth/<name>.sdpt` for the image stored as `name`.
     public static func depthPath(forImage name: String) -> String {
@@ -632,6 +636,20 @@ public enum ProjectBundle {
         return result
     }
 
+    // MARK: - Cover
+
+    /// The stored cover, or `nil` when the package has none.
+    public static func cover(_ contents: ProjectContents) -> Data? {
+        contents.files[ProjectLayout.coverImage]
+    }
+
+    /// Stores `jpeg` as the cover. Covers are written after a checkpoint, so earlier covers are replaced.
+    public static func withCover(_ contents: ProjectContents, jpeg: Data) -> ProjectContents {
+        var result = contents
+        result.files[ProjectLayout.coverImage] = jpeg
+        return result
+    }
+
     // MARK: - Deletions
 
     /// Stores the deleted Gaussian indices of the latest checkpoint. Duplicates are removed and the
@@ -722,6 +740,8 @@ public enum ProjectBundle {
             "poses/",
             "checkpoints/",
             "edits/",
+            // The cover shows the checkpoint that is replaced here, so it goes too.
+            ProjectLayout.previewDirectory + "/",
         ]
         var result = contents
         result.files = contents.files.filter { path, _ in

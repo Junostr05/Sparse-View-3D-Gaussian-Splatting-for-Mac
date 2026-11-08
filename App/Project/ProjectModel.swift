@@ -627,6 +627,10 @@ final class ProjectModel {
                 viewer?.replaceCameras(named)
             }
             document.wrappedValue.contents = contents
+            // The library shows this checkpoint as the project's cover. The viewer holds the stored cloud now.
+            if let viewer, let cover = ProjectCoverRenderer.jpeg(of: viewer) {
+                document.wrappedValue.contents = ProjectBundle.withCover(document.wrappedValue.contents, jpeg: cover)
+            }
         case .running, .paused, .failed:
             break
         }
