@@ -7,6 +7,8 @@ struct ProjectWindow: View {
     let document: Binding<ProjectDocument>
     /// The package name without extension, used as the default export name.
     let name: String
+    /// The package folder on disk, where autosaves are written. Nil for a document that is not saved yet.
+    let packageURL: URL?
     @State private var model = ProjectModel()
     @State private var pipeline = PipelineModel()
     @State private var isInspectorPresented = true
@@ -48,7 +50,12 @@ struct ProjectWindow: View {
                 .inspectorColumnWidth(min: 240, ideal: 300, max: 380)
         }
         .task {
+            model.packageURL = packageURL
+            await model.checkForRecovery(contents: contents)
             await model.restoreCheckpoint(contents, document: document)
+        }
+        .safeAreaInset(edge: .top) {
+            RecoveryBanner(model: model, document: document)
         }
         .onDisappear {
             pipeline.close()

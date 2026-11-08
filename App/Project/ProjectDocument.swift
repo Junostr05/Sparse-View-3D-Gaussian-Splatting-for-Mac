@@ -48,12 +48,14 @@ nonisolated struct ProjectDocument: FileDocument {
             guard let data = encoded[path] else { continue }
             try Self.insert(data, path: path, into: root)
         }
+        try Self.keepAutosave(from: configuration.existingFile, latest: contents.manifest.checkpoints.last, into: root)
         return root
     }
 
     // MARK: - Package flattening
 
-    /// Walks the wrapper tree and stores every regular file under its slash-separated path.
+    /// Walks the wrapper tree and stores every regular file under its slash-separated path. Autosave files are left out:
+    /// they are read from and written to the package on disk, never held in `contents`.
     private static func collectFiles(from wrapper: FileWrapper,
                                      path: String,
                                      into files: inout [String: Data]) throws {
@@ -62,6 +64,8 @@ nonisolated struct ProjectDocument: FileDocument {
                 let childPath: String = path.isEmpty ? name : path + "/" + name
                 try collectFiles(from: child, path: childPath, into: &files)
             }
+        } else if AutosaveLayout.isAutosavePath(path) {
+            return
         } else if let data = wrapper.regularFileContents {
             files[path] = data
         } else {
@@ -89,6 +93,25 @@ nonisolated struct ProjectDocument: FileDocument {
         let file = FileWrapper(regularFileWithContents: data)
         file.preferredFilename = name
         _ = parent.addFileWrapper(file)
+    }
+
+    /// Copies the autosave files of the package on disk into the new package, while they are still needed: the
+    /// autosave is newer than the checkpoint being saved (`RecoverySelection`). Once a save stores a checkpoint at
+    /// least as new, the autosave is not carried, so the save removes it.
+    private static func keepAutosave(from existing: FileWrapper?, latest: CheckpointRecord?,
+                                     into root: FileWrapper) throws {
+        guard let existing, let folder = existing.fileWrappers?["checkpoints"], let files = folder.fileWrappers,
+              let manifestData = files["autosave.json"]?.regularFileContents,
+              let manifest = try? AutosaveStore.decodeManifest(manifestData),
+              RecoverySelection.choose(autosave: manifest, latestCheckpoint: latest) == .autosave else {
+            return
+        }
+        for path in AutosaveLayout.files(generation: manifest.generation) {
+            let name = String(path.dropFirst("checkpoints/".count))
+            if let data = files[name]?.regularFileContents {
+                try insert(data, path: path, into: root)
+            }
+        }
     }
 
     private static func readableReason(for error: Error) -> String {

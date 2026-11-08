@@ -165,6 +165,24 @@ nonisolated enum ProjectImport {
         try ProjectBundle.latestCheckpoint(contents)
     }
 
+    /// The autosave manifest in the package folder, or nil when the package has no autosave.
+    @concurrent
+    static func autosaveManifest(_ packageURL: URL) async throws -> AutosaveManifest? {
+        try AutosaveStore.manifest(packageURL: packageURL)
+    }
+
+    /// The complete autosave of the package folder, read and checked, or nil when there is none.
+    @concurrent
+    static func loadAutosave(_ packageURL: URL) async throws -> AutosaveSnapshot? {
+        try AutosaveStore.read(packageURL: packageURL)
+    }
+
+    /// Deletes the autosave files of the package folder.
+    @concurrent
+    static func removeAutosave(_ packageURL: URL) async throws {
+        try AutosaveStore.remove(packageURL: packageURL)
+    }
+
     /// The cloud a continuation starts from: the stored latest checkpoint without its stored deletions.
     /// The deletions only apply while they belong to that checkpoint, as in `restoreCheckpoint`.
     @concurrent
@@ -221,6 +239,13 @@ final class ProjectModel {
     private(set) var depthStatuses: [DepthStatusRow]?
     /// The viewport model. Created from the stored checkpoint, or from the initial cloud of a run.
     private(set) var viewer: ViewerModel?
+
+    /// An autosave of an interrupted run that is newer than the latest checkpoint. Offered by the recovery banner.
+    private(set) var pendingRecovery: AutosaveManifest?
+    /// The package folder of the open project. Autosaves are written into its `checkpoints/` folder. Nil when unsaved.
+    @ObservationIgnored var packageURL: URL?
+    /// Writes the autosaves of the session in progress.
+    @ObservationIgnored private var autosaveWriter: AutosaveWriter?
 
     @ObservationIgnored private var session: TrainingSession?
     /// The task running the current session. Its value is the session's outcome, nil when the run threw.
@@ -427,7 +452,8 @@ final class ProjectModel {
             // Each run builds its own initial cloud from its own dataset (see `DepthPreparedRun.initializer`).
             let trainingSession = TrainingSession(dataset: depth.dataset,
                                                   configuration: depth.configuration,
-                                                  initializer: depth.initializer)
+                                                  initializer: depth.initializer,
+                                                  autosave: makeAutosaveHandler(offset: 0))
             _ = await consume(trainingSession, viewNames: depth.dataset.views.map(\.name), document: document)
         } catch {
             errorMessage = Self.describe(error)
@@ -444,6 +470,14 @@ final class ProjectModel {
     private func runContinuation(contents: ProjectContents, document: Binding<ProjectDocument>) async {
         do {
             var cloud: GaussianCloud = try await ProjectImport.continuationStart(contents)
+            // Exact resume (v1.5): the stored optimizer state continues the Adam moments. A state that does not read is
+            // skipped with a warning; the rounds then start with fresh Adam state, as before.
+            var carried: OptimizerState?
+            do {
+                carried = try ProjectBundle.optimizerState(contents)
+            } catch {
+                warningMessage = "The stored optimizer state could not be read, so Adam starts fresh."
+            }
             // Depth is prepared once for all rounds, as in `runTraining`. The continuation starts from the refined poses,
             // so its rounds refine them further and its checkpoint matches them.
             let depth: DepthPreparedRun = try await prepareDepth(contents: contents, document: document,
@@ -463,14 +497,18 @@ final class ProjectModel {
                 )
                 let roundSession = TrainingSession(dataset: depth.dataset,
                                                    initialCloud: cloud,
-                                                   configuration: roundConfiguration)
+                                                   configuration: roundConfiguration,
+                                                   optimizerState: carried,
+                                                   autosave: makeAutosaveHandler(offset: iterationOffset))
                 // `consume` has already stored this round's checkpoint and refined poses when it returns.
-                guard let terminal = await consume(roundSession, viewNames: depth.dataset.views.map(\.name),
-                                                   document: document).terminal,
+                let result = await consume(roundSession, viewNames: depth.dataset.views.map(\.name), document: document)
+                guard let terminal = result.terminal,
                       terminal.state == .finished,
                       let finalCloud = terminal.preview else {
                     break
                 }
+                // The next round continues the moments this round ended with.
+                carried = result.outcome?.optimizerState
                 iterationOffset += terminal.iteration
                 totalIterations = iterationOffset
                 cloud = finalCloud
@@ -542,6 +580,10 @@ final class ProjectModel {
         }
         // The stream ends when the run returns, so its outcome (the refined cameras) is ready here.
         let outcome: TrainingOutcome? = await task.value
+        // The stream has ended, so no further autosave is handed in. Queued autosaves are written before the writer ends.
+        let writer: AutosaveWriter? = autosaveWriter
+        autosaveWriter = nil
+        await writer?.finish()
         if let terminal {
             storeCheckpoint(for: terminal, outcome: outcome, viewNames: viewNames, document: document)
         }
@@ -617,9 +659,11 @@ final class ProjectModel {
                                           heldOutPSNR: event.heldOut?.psnr,
                                           heldOutSSIM: event.heldOut?.ssim,
                                           bestIteration: event.bestIteration)
+            // The optimizer state of the run is stored with its checkpoint, so the next continuation resumes exactly.
             var contents: ProjectContents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
                                                                          cloud: cloud,
-                                                                         record: record)
+                                                                         record: record,
+                                                                         optimizer: outcome?.optimizerState)
             if let refined = outcome?.refinedCameras, refined.count == viewNames.count {
                 let named: [NamedCamera] = zip(viewNames, refined).map { NamedCamera(name: $0.0, camera: $0.1) }
                 contents = ProjectBundle.withRefinedPoses(contents, cameras: named)
@@ -664,6 +708,86 @@ final class ProjectModel {
     func stop() {
         stopRequested = true
         runTask?.cancel()
+    }
+
+    // MARK: - Autosave and recovery (v1.5)
+
+    /// Looks for an autosave in the package folder when the project opens, and offers it when it is newer than the
+    /// latest checkpoint (`RecoverySelection`).
+    func checkForRecovery(contents: ProjectContents) async {
+        guard let packageURL, !isTraining else { return }
+        do {
+            let autosave: AutosaveManifest? = try await ProjectImport.autosaveManifest(packageURL)
+            let choice: RecoveryChoice = RecoverySelection.choose(autosave: autosave,
+                                                                  latestCheckpoint: contents.manifest.checkpoints.last)
+            pendingRecovery = choice == .autosave ? autosave : nil
+        } catch {
+            warningMessage = "The autosave of an interrupted run could not be read: \(Self.describe(error))"
+        }
+    }
+
+    /// Stores the autosave as the latest checkpoint, with its optimizer state (exact resume), and marks the record as
+    /// recovered. The autosave files stay until a save stores a checkpoint at least as new, so an unsaved recovery
+    /// is offered again after a relaunch.
+    func recoverAutosave(document: Binding<ProjectDocument>) async {
+        guard let packageURL, !isTraining, pendingRecovery != nil else { return }
+        do {
+            guard let snapshot = try await ProjectImport.loadAutosave(packageURL) else {
+                pendingRecovery = nil
+                return
+            }
+            let record = CheckpointRecord(iteration: snapshot.manifest.iteration,
+                                          gaussianCount: snapshot.cloud.count,
+                                          psnr: nil,
+                                          date: snapshot.manifest.date,
+                                          recovered: true)
+            var contents: ProjectContents = ProjectBundle.withCheckpoint(document.wrappedValue.contents,
+                                                                         cloud: snapshot.cloud,
+                                                                         record: record,
+                                                                         optimizer: snapshot.optimizer)
+            // The recovered checkpoint replaces what the viewer shows, and the cover follows it.
+            document.wrappedValue.contents = contents
+            pendingRecovery = nil
+            viewer = nil
+            progress = nil
+            await restoreCheckpoint(contents, document: document)
+            if let viewer, let cover = ProjectCoverRenderer.jpeg(of: viewer) {
+                contents = ProjectBundle.withCover(document.wrappedValue.contents, jpeg: cover)
+                document.wrappedValue.contents = contents
+            }
+        } catch {
+            errorMessage = "The autosave could not be recovered: \(Self.describe(error))"
+        }
+    }
+
+    /// Deletes the autosave files of the package. The banner goes away at once.
+    func discardAutosave() {
+        guard let packageURL else { return }
+        pendingRecovery = nil
+        Task {
+            do {
+                try await ProjectImport.removeAutosave(packageURL)
+            } catch {
+                self.errorMessage = "The autosave could not be deleted: \(Self.describe(error))"
+            }
+        }
+    }
+
+    /// The autosave handler of one session. Each autosave goes through a background writer into the package's autosave
+    /// files. `offset` is the number of iterations the session starts after (the stored checkpoint and finished rounds),
+    /// so the autosave records the cumulative count. Nil without a package folder.
+    private func makeAutosaveHandler(offset: Int) -> AutosaveHandler? {
+        guard let packageURL else { return nil }
+        let writer = AutosaveWriter(packageURL: packageURL)
+        autosaveWriter = writer
+        return { autosave in
+            let manifest = AutosaveManifest(
+                iteration: offset + autosave.iteration,
+                date: Date(),
+                gaussianCount: autosave.cloud.count,
+                configurationHash: AutosaveManifest.hashText(autosave.optimizerState.configurationHash))
+            writer.submit(AutosaveSnapshot(manifest: manifest, cloud: autosave.cloud, optimizer: autosave.optimizerState))
+        }
     }
 
     // MARK: - Messages

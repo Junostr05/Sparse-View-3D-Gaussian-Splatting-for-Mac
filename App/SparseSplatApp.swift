@@ -28,7 +28,8 @@ struct SparseSplatApp: App {
         // Documents open from the library, Finder or Open. Launching the app never opens them.
         DocumentGroup(newDocument: ProjectDocument()) { file in
             ProjectWindow(document: file.$document,
-                          name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene")
+                          name: file.fileURL?.deletingPathExtension().lastPathComponent ?? "Scene",
+                          packageURL: file.fileURL)
         }
         .defaultLaunchBehavior(.suppressed)
 
