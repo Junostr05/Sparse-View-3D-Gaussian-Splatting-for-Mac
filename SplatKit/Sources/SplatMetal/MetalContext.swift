@@ -88,7 +88,14 @@ public final class MetalContext {
         return created
     }
 
-    func makeComputeEncoder(_ commandBuffer: MTLCommandBuffer) throws(MetalError) -> MTLComputeCommandEncoder {
+    func makeComputeEncoder(_ commandBuffer: MTLCommandBuffer,
+                            file: StaticString = #fileID, line: UInt = #line) throws(MetalError) -> MTLComputeCommandEncoder {
+        if let profiler = GPUStageProfiler.shared {
+            guard let encoder = profiler.makeEncoder(commandBuffer, label: "\(file):\(line)") else {
+                throw .commandFailed("cannot create compute encoder")
+            }
+            return encoder
+        }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw .commandFailed("cannot create compute encoder")
         }

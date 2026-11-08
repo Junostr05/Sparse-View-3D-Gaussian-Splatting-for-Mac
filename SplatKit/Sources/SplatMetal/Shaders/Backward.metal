@@ -79,11 +79,26 @@ kernel void rasterizeBackward(
         lastSorted = lastContributor[pixel];
     }
 
-    uint rangeCount = rangeEnd - rangeStart;
+    // Samples at or past a pixel's cut-off contribute nothing and leave its reverse state unchanged, so the walk
+    // can stop at the largest cut-off of the tile (v1.5): batches behind every pixel's cut-off are skipped. The batch
+    // grid stays anchored at rangeStart, so every remaining sample is visited in the same order as before.
+    threadgroup uint sTileLast[SPLAT_TILE * SPLAT_TILE / 32];
+    uint simdLast = simd_max(lastSorted);
+    if (lane == 0u) {
+        sTileLast[lid / 32u] = simdLast;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint tileLast = 0u;
+    for (uint s = 0u; s < uint(SPLAT_TILE * SPLAT_TILE / 32); ++s) {
+        tileLast = max(tileLast, sTileLast[s]);
+    }
+    uint walkEnd = clamp(tileLast, rangeStart, rangeEnd);
+
+    uint rangeCount = walkEnd - rangeStart;
     uint batchCount = (rangeCount + batch - 1u) / batch;
     for (uint bi = batchCount; bi > 0u; --bi) {
         uint batchStart = rangeStart + (bi - 1u) * batch;
-        uint n = min(batch, rangeEnd - batchStart);
+        uint n = min(batch, walkEnd - batchStart);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (lid < n) {
@@ -106,6 +121,7 @@ kernel void rasterizeBackward(
             float r4 = 0.0f, r5 = 0.0f, r6 = 0.0f;   // dL/dconic
             float r7 = 0.0f, r8 = 0.0f;              // dL/dmean2D
             float r9 = 0.0f;                         // dL/dz (camera depth), depth mode only
+            bool contributed = false;
 
             // Only samples that were blended in the forward pass (sorted index below the pixel's
             // cut-off) and pass the same gating as the forward pass contribute.
@@ -118,6 +134,7 @@ kernel void rasterizeBackward(
                     float rawAlpha = co.w * e;
                     float alpha = min(0.999f, rawAlpha);
                     if (alpha >= 1.0f / 255.0f) {
+                        contributed = true;
                         float oneMinusAlpha = 1.0f - alpha;
                         float Ti = T / oneMinusAlpha;          // transmittance before this sample
                         float weight = alpha * Ti;
@@ -159,6 +176,11 @@ kernel void rasterizeBackward(
                 }
             }
 
+            // A simdgroup in which no lane blended this sample would only add exact zeros: skip it (v1.5). The
+            // branch is uniform per simdgroup, so the simd_sum calls below still see every lane.
+            if (!simd_any(contributed)) {
+                continue;
+            }
             float s0 = simd_sum(r0);
             float s1 = simd_sum(r1);
             float s2 = simd_sum(r2);
@@ -169,20 +191,21 @@ kernel void rasterizeBackward(
             float s7 = simd_sum(r7);
             float s8 = simd_sum(r8);
             float s9 = simd_sum(r9);
-            if (lane == 0u) {
-                device atomic<float>* slot = accum + 12u * gaussian;
-                addGradient(slot + 0, s0);
-                addGradient(slot + 1, s1);
-                addGradient(slot + 2, s2);
-                addGradient(slot + 3, s3);
-                addGradient(slot + 4, s4);
-                addGradient(slot + 5, s5);
-                addGradient(slot + 6, s6);
-                addGradient(slot + 7, s7);
-                addGradient(slot + 8, s8);
-                if (depthMode) {
-                    addGradient(slot + 9, s9);
-                }
+            // The sums are uniform across the simdgroup: lane k adds slot k, so the atomics issue in parallel
+            // instead of one after another from lane 0. Same values, same slots.
+            uint slotCount = depthMode ? 10u : 9u;
+            if (lane < slotCount) {
+                float value = s0;
+                value = lane == 1u ? s1 : value;
+                value = lane == 2u ? s2 : value;
+                value = lane == 3u ? s3 : value;
+                value = lane == 4u ? s4 : value;
+                value = lane == 5u ? s5 : value;
+                value = lane == 6u ? s6 : value;
+                value = lane == 7u ? s7 : value;
+                value = lane == 8u ? s8 : value;
+                value = lane == 9u ? s9 : value;
+                addGradient(accum + 12u * gaussian + lane, value);
             }
         }
     }
