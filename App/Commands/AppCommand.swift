@@ -143,6 +143,10 @@ enum CommandRegistry {
                     keywords: ["again"], enabled: viewer.canRedo) {
                 viewer.performEdit(.redo)
             },
+            command("edit.cleanUp", "Clean Up Assistant\u{2026}", category: "Edit",
+                    keywords: ["floaters", "artifacts", "noise", "outliers", "transparent", "huge", "needles"]) {
+                viewer.presentedCleanup = true
+            },
         ]
     }
 

@@ -31,6 +31,9 @@ struct ProjectWindow: View {
                     EditModeToggle(model: viewer)
                 }
                 ToolbarItem {
+                    CleanUpButton(model: viewer)
+                }
+                ToolbarItem {
                     ExportButton(model: viewer, defaultName: name, onFailure: { model.errorMessage = $0 })
                 }
             }
