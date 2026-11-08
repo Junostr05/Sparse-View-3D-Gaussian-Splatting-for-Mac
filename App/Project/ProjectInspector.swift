@@ -48,8 +48,22 @@ struct ProjectInspector: View {
                         .foregroundStyle(.red)
                 }
             }
+            Section {
+                Text(Self.versionText)
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    /// "SparseSplat 1.2.0 (1)" from the bundle's version and build number.
+    private static var versionText: String {
+        let info: [String: Any] = Bundle.main.infoDictionary ?? [:]
+        let version: String = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build: String = info["CFBundleVersion"] as? String ?? "?"
+        return "SparseSplat \(version) (\(build))"
     }
 
     // MARK: - Sections
