@@ -107,11 +107,13 @@ public enum ImageLoss {
                 ssimSum += s
                 l1Sum += abs(xs[i] - ys[i])
 
-                // Closed-form SSIM backward, g = −λ/N (see plan Task 3).
-                let muTerm: Double = 2 * my / a1 - 2 * my / a2 - 2 * mx / b1 + 2 * mx / b2
-                m0[i] = ssimGradientScale * s * muTerm
+                // Closed-form SSIM backward, g = −λ/N (see plan Task 3). The divisions by a1 and a2 are cancelled
+                // analytically (s = a1·a2 / (b1·b2)): a2 = 2σxy + C2 crosses zero for anticorrelated windows, and the
+                // forms s·2μy/a2 and 2s/a2 are 0·∞ = NaN there. Same arithmetic as `ssimMapsV` in Loss.metal.
+                let muTerm: Double = 2 * my * (a2 - a1) / denominator + s * (2 * mx / b2 - 2 * mx / b1)
+                m0[i] = ssimGradientScale * muTerm
                 m1[i] = ssimGradientScale * (-s / b2)
-                m2[i] = ssimGradientScale * (2 * s / a2)
+                m2[i] = ssimGradientScale * (2 * a1 / denominator)
             }
 
             let g0 = blur(m0, width: width, height: height, taps: taps)

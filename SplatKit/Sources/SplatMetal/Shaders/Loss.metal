@@ -138,15 +138,16 @@ kernel void ssimMapsV(texture2d<float, access::read> rendered [[texture(0)]],
             float s = numerator / denominator;
             pixelS += s;
 
-            float term1 = 2.0f * my / a1;
-            float term2 = 2.0f * my / a2;
-            float term3 = 2.0f * mx / b1;
-            float term4 = 2.0f * mx / b2;
-            float muTerm = term1 - term2 - term3 + term4;
+            // Backward terms with the divisions by a1 and a2 cancelled analytically (s = a1·a2 / (b1·b2)):
+            // s·2μy/a1 = 2μy·a2/(b1·b2), s·2μy/a2 = 2μy·a1/(b1·b2), 2s/a2 = 2a1/(b1·b2). a2 = 2σxy + C2 crosses zero
+            // where render and target are anticorrelated (and a1 where a compensated render is negative), so the old
+            // forms s·2μy/a2 and 2s/a2 gave 0·∞ = NaN when a2 rounded to exactly 0. Only b1 ≥ C1 and b2 ≈ ≥ C2
+            // remain as divisors.
+            float muTerm = 2.0f * my * (a2 - a1) / denominator + s * (2.0f * mx / b2 - 2.0f * mx / b1);
 
-            float m0 = ssimScale * s * muTerm;
+            float m0 = ssimScale * muTerm;
             float m1 = ssimScale * (-s / b2);
-            float m2 = ssimScale * (2.0f * s / a2);
+            float m2 = ssimScale * (2.0f * a1 / denominator);
 
             maps[(c * 3u + 0u) * n + idx] = m0;
             maps[(c * 3u + 1u) * n + idx] = m1;

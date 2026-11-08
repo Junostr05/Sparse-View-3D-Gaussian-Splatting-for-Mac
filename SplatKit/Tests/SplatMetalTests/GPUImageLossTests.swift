@@ -181,6 +181,74 @@ struct GPUImageLossTests {
         #expect(largest <= 1e-6, "gradient magnitude \(largest) is not zero")
     }
 
+    /// Regression (real-photo `nonFiniteLoss`): where render and target are anticorrelated, a₂ = 2σxy + C₂ crosses
+    /// zero. The backward used to divide by a₂ (in `2s/a₂` and `s·2μy/a₂`, which cancel analytically), so a window
+    /// whose a₂ rounded to exactly 0 wrote NaN into the SSIM maps, and the 11×11 blur spread it over 121 pixels of
+    /// the gradient. Here each 24-row block has its own levels: render μx + r·d + jitter and target μy − d/r for a ±a
+    /// checkerboard d, with a² swept across the columns through C₂/2, so σxy ≈ −a² meets −C₂/2 within float rounding in
+    /// many windows (on an M-series GPU, 13 windows round a₂ to exactly 0, which failed this test before the fix).
+    @Test func gradientIsFiniteWhereSSIMCovarianceTermCrossesZero() throws {
+        let context = try makeTestContext()
+        let width = 512
+        let height = 384
+        var rng = SplitMix64(seed: 77)
+        let halfC2: Double = Double(ImageLoss.c2) / 2
+        var renderedPixels: [SIMD3<Float>] = []
+        var targetPixels: [SIMD3<Float>] = []
+        renderedPixels.reserveCapacity(width * height)
+        targetPixels.reserveCapacity(width * height)
+        let blockRows = 24
+        let blocks = height / blockRows
+        var levels: [[SIMD3<Double>]] = []
+        for _ in 0..<blocks {
+            var block: [SIMD3<Double>] = []
+            for _ in 0..<3 {
+                let meanX: Double = Double.random(in: 0.1...0.9, using: &rng)
+                let meanY: Double = Double.random(in: 0.1...0.9, using: &rng)
+                let ratio: Double = Double.random(in: 0.3...3, using: &rng)
+                block.append(SIMD3<Double>(meanX, meanY, ratio))
+            }
+            levels.append(block)
+        }
+        for y in 0..<height {
+            for x in 0..<width {
+                let sweep: Double = (Double(x) / Double(width - 1) - 0.5) * 2e-3
+                let sign: Double = (x + y) % 2 == 0 ? 1 : -1
+                var r = SIMD3<Float>(repeating: 0)
+                var t = SIMD3<Float>(repeating: 0)
+                for c in 0..<3 {
+                    let level: SIMD3<Double> = levels[min(y / blockRows, blocks - 1)][c]
+                    let amplitude: Double = (halfC2 * (1 + sweep)).squareRoot()
+                    let d: Double = sign * amplitude
+                    let jitter: Double = Double.random(in: -1e-4...1e-4, using: &rng)
+                    r[c] = Float(level.x + d * level.z + jitter)
+                    t[c] = Float(level.y - d / level.z)
+                }
+                renderedPixels.append(r)
+                targetPixels.append(t)
+            }
+        }
+        let rendered = RGBImage(width: width, height: height, pixels: renderedPixels)
+        let target = RGBImage(width: width, height: height, pixels: targetPixels)
+        let lambda: Float = 0.2
+
+        let gpu = try runGPULoss(context: context, rendered: rendered, target: target, lambda: lambda)
+        var nonFinite = 0
+        for g in gpu.gradient {
+            for c in 0..<3 where !g[c].isFinite {
+                nonFinite += 1
+            }
+        }
+        #expect(gpu.value.loss.isFinite, "loss \(gpu.value.loss) is not finite")
+        #expect(nonFinite == 0, "\(nonFinite) non-finite gradient components")
+
+        let cpu = ImageLoss.evaluate(rendered: rendered, target: target, lambda: lambda)
+        #expect(cpu.gradient.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite },
+                "CPU reference gradient is not finite")
+        expectScalar(gpu.value.loss, cpu.loss, "loss")
+        expectGradient(gpu.gradient, cpu.gradient)
+    }
+
     /// Forward render, loss and backward in one command buffer. The parameter gradients must match
     /// `CPURasterizer.backward` fed with `ImageLoss.evaluate`'s gradient.
     @Test func gradientFeedsEncodeBackward() throws {
