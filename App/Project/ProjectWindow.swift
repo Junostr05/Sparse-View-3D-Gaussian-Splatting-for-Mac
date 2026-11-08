@@ -48,30 +48,21 @@ struct ProjectWindow: View {
         }
     }
 
-    /// The viewport is content (no glass). Before a model exists, the frame strip shows pending frames,
-    /// and an empty state explains what to do.
+    /// The viewport is content (no glass). Until a model exists, the guided card names the current step, and the
+    /// frame strip of pending frames sits below it.
     @ViewBuilder
     private func detail(for contents: ProjectContents) -> some View {
         if let viewer = model.viewer {
             ViewerContent(model: viewer)
         } else if contents.manifest.imageFiles.isEmpty && pipeline.hasCandidates {
-            FrameStripView(pipeline: pipeline)
-        } else if contents.manifest.imageFiles.isEmpty {
-            ContentUnavailableView(
-                "Add a photo folder, a video or a pose capture",
-                systemImage: "square.and.arrow.down",
-                description: Text("""
-                    Photos: a folder of images. Video: a movie file, sampled into frames.
-                    COLMAP: a folder with sparse/0 (cameras.bin, images.bin, optional points3D.bin) and an images folder.
-                    ARKit: a folder with capture.json and the images it names.
-                    """)
-            )
+            VStack(spacing: 0) {
+                GuidedStartView(document: document, model: model, pipeline: pipeline)
+                    .frame(maxHeight: 340)
+                Divider()
+                FrameStripView(pipeline: pipeline)
+            }
         } else {
-            ContentUnavailableView(
-                "No model yet",
-                systemImage: "cube.transparent",
-                description: Text("Press Train in the inspector to reconstruct the scene.")
-            )
+            GuidedStartView(document: document, model: model, pipeline: pipeline)
         }
     }
 }

@@ -5,16 +5,118 @@ import SplatDepth
 import SplatIO
 import UniformTypeIdentifiers
 
+/// The kinds of capture the user can add. Each one opens its importer and runs its import.
+enum CaptureKind: Hashable {
+    case photos
+    case video
+    case colmap
+    case arkit
+}
+
+/// Presents the capture importers for `choice` and runs the matching import. The inspector's input section and the
+/// guided start card both attach it, so both entry points run the same imports.
+struct CaptureImporters: ViewModifier {
+    @Binding var choice: CaptureKind?
+    let document: Binding<ProjectDocument>
+    let project: ProjectModel
+    let pipeline: PipelineModel
+
+    func body(content: Content) -> some View {
+        content
+            .fileImporter(isPresented: isPresented(.photos), allowedContentTypes: [.folder]) { result in
+                handlePhotos(result)
+            }
+            .fileImporter(isPresented: isPresented(.video), allowedContentTypes: [.movie]) { result in
+                handleVideo(result)
+            }
+            .fileImporter(isPresented: isPresented(.colmap), allowedContentTypes: [.folder]) { result in
+                handlePoseFolder(result, arkit: false)
+            }
+            .fileImporter(isPresented: isPresented(.arkit), allowedContentTypes: [.folder]) { result in
+                handlePoseFolder(result, arkit: true)
+            }
+    }
+
+    /// `true` while `kind` is the chosen capture. Dismissing the panel clears the choice.
+    private func isPresented(_ kind: CaptureKind) -> Binding<Bool> {
+        Binding(
+            get: { choice == kind },
+            set: { presented in
+                if !presented, choice == kind {
+                    choice = nil
+                }
+            }
+        )
+    }
+
+    private func handlePhotos(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            pipeline.importPhotos(folder: url)
+        case .failure(let error):
+            pipeline.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func handleVideo(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            pipeline.importVideo(url: url)
+        case .failure(let error):
+            pipeline.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func handlePoseFolder(_ result: Result<URL, Error>, arkit: Bool) {
+        switch result {
+        case .success(let url):
+            if arkit {
+                project.importARKit(folder: url, into: document)
+            } else {
+                project.importCOLMAP(folder: url, into: document)
+            }
+        case .failure(let error):
+            project.errorMessage = error.localizedDescription
+        }
+    }
+}
+
+extension View {
+    /// Attaches the capture importers. See `CaptureImporters`.
+    func captureImporters(choice: Binding<CaptureKind?>,
+                          document: Binding<ProjectDocument>,
+                          project: ProjectModel,
+                          pipeline: PipelineModel) -> some View {
+        modifier(CaptureImporters(choice: choice, document: document, project: project, pipeline: pipeline))
+    }
+}
+
+extension PipelineModel {
+    /// Why "Estimate Poses" is unavailable, or `nil` when it can run. Shown as a footnote under the button.
+    var poseDisabledReason: String? {
+        if isScanning {
+            return "Wait until the frames are read."
+        }
+        if isEstimating {
+            return nil
+        }
+        if scanFailed {
+            return "The frames could not be read. Choose the capture again."
+        }
+        if plan == nil || (plan?.selectedCount ?? 0) == 0 {
+            return "Select at least one frame first."
+        }
+        return nil
+    }
+}
+
 /// Sections of the inspector for the input stage: the entry points while nothing is pending, then the frame
 /// selection and the pose estimation. Shown while the project has no images.
 struct PipelineInspector: View {
     let document: Binding<ProjectDocument>
     let project: ProjectModel
     let pipeline: PipelineModel
-    @State private var isChoosingPhotos = false
-    @State private var isChoosingVideo = false
-    @State private var isChoosingCOLMAP = false
-    @State private var isChoosingARKit = false
+    @State private var choice: CaptureKind?
 
     var body: some View {
         Group {
@@ -25,18 +127,7 @@ struct PipelineInspector: View {
                 posesSection
             }
         }
-        .fileImporter(isPresented: $isChoosingPhotos, allowedContentTypes: [.folder]) { result in
-            handlePhotos(result)
-        }
-        .fileImporter(isPresented: $isChoosingVideo, allowedContentTypes: [.movie]) { result in
-            handleVideo(result)
-        }
-        .fileImporter(isPresented: $isChoosingCOLMAP, allowedContentTypes: [.folder]) { result in
-            handlePoseFolder(result, arkit: false)
-        }
-        .fileImporter(isPresented: $isChoosingARKit, allowedContentTypes: [.folder]) { result in
-            handlePoseFolder(result, arkit: true)
-        }
+        .captureImporters(choice: $choice, document: document, project: project, pipeline: pipeline)
     }
 
     // MARK: - Sections
@@ -44,17 +135,24 @@ struct PipelineInspector: View {
     private var entrySection: some View {
         Section("Add a Capture") {
             Button("Photos\u{2026}") {
-                isChoosingPhotos = true
+                choice = .photos
             }
+            .help("A folder of photos. Frames are picked from them.")
             Button("Video\u{2026}") {
-                isChoosingVideo = true
+                choice = .video
             }
+            .help("A movie file. It is sampled into frames.")
             Button("Import COLMAP\u{2026}") {
-                isChoosingCOLMAP = true
+                choice = .colmap
             }
+            .help("A COLMAP folder with sparse/0 and an images folder. Its poses are used as they are.")
             Button("Import ARKit Capture\u{2026}") {
-                isChoosingARKit = true
+                choice = .arkit
             }
+            .help("A folder with capture.json and the images it names.")
+            Text("Photos and video need poses. COLMAP and ARKit captures bring their own.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -115,6 +213,7 @@ struct PipelineInspector: View {
                 }
             }
             .disabled(pipeline.isEstimating)
+            .help("How the camera poses are found. Automatic falls back to Depth Anything 3 when its package is installed.")
             if pipeline.isEstimating {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -127,6 +226,12 @@ struct PipelineInspector: View {
                 }
                 .buttonStyle(.glassProminent)
                 .disabled(!pipeline.canEstimatePoses)
+                .help("Finds the camera pose of every selected frame.")
+                if let reason = pipeline.poseDisabledReason {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             Text("Apple Photogrammetry registers the selected frames on this Mac. Automatic falls back to Depth Anything 3 when its package is installed. If the frames still cannot be registered, import a COLMAP folder instead.")
                 .font(.footnote)
@@ -169,38 +274,6 @@ struct PipelineInspector: View {
         return "\(selected.formatted()) of \(total.formatted())"
     }
 
-    // MARK: - Import handlers
-
-    private func handlePhotos(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let url):
-            pipeline.importPhotos(folder: url)
-        case .failure(let error):
-            pipeline.errorMessage = error.localizedDescription
-        }
-    }
-
-    private func handleVideo(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let url):
-            pipeline.importVideo(url: url)
-        case .failure(let error):
-            pipeline.errorMessage = error.localizedDescription
-        }
-    }
-
-    private func handlePoseFolder(_ result: Result<URL, Error>, arkit: Bool) {
-        switch result {
-        case .success(let url):
-            if arkit {
-                project.importARKit(folder: url, into: document)
-            } else {
-                project.importCOLMAP(folder: url, into: document)
-            }
-        case .failure(let error):
-            project.errorMessage = error.localizedDescription
-        }
-    }
 }
 
 /// The four pipeline steps with a status each. Steps that a COLMAP or ARKit import does without are skipped.
@@ -349,21 +422,37 @@ private struct StepRow: View {
 
 /// Depth Model section: the depth estimator picker and one row per downloadable depth model, with its state,
 /// download with progress and cancel, and removal. Training uses the picked estimator when the depth prior is on.
+extension DepthEstimatorKind {
+    /// Short name for the estimator picker, so it fits the inspector width. The full model name and size are in the rows.
+    var pickerTitle: String {
+        switch self {
+        case .depthAnythingV2Small: "Depth Anything V2"
+        case .moge2Small: "MoGe-2"
+        }
+    }
+}
+
 struct DepthModelSection: View {
     let pipeline: PipelineModel
     let document: Binding<ProjectDocument>
     let isTraining: Bool
+    let isExpanded: Binding<Bool>
 
     var body: some View {
         let selected: DepthEstimatorKind = document.wrappedValue.contents.manifest.training.depthPrior.estimator
-        Section("Depth Model") {
+        Section(isExpanded: isExpanded) {
             Picker("Depth estimator", selection: estimatorBinding) {
                 ForEach(DepthEstimatorKind.allCases, id: \.self) { kind in
-                    Text(kind.descriptor.displayName).tag(kind)
+                    Text(kind.pickerTitle).tag(kind)
                 }
             }
             .disabled(isTraining)
-            if !pipeline.isDepthReady(selected) {
+            .help("The model that estimates depth for each photo. Its name and size are listed below.")
+            if isTraining {
+                Text("Stop the run to change the depth estimator.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if !pipeline.isDepthReady(selected) {
                 Text("Download the model first to use it for depth.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -374,6 +463,8 @@ struct DepthModelSection: View {
             ForEach(PipelineModel.depthDescriptors, id: \.id) { descriptor in
                 DepthModelRow(pipeline: pipeline, descriptor: descriptor, isTraining: isTraining)
             }
+        } header: {
+            Text("Depth Model")
         }
         .task {
             await pipeline.refreshDepthStatus()
@@ -481,6 +572,7 @@ private struct DepthModelRow: View {
 /// by the user, and removal. The model is not published, so it can only be imported.
 struct PoseFreeModelSection: View {
     let pipeline: PipelineModel
+    let isExpanded: Binding<Bool>
     @State private var isConfirmingRemoval = false
 
     /// `.mlpackage` directory packages. Falls back to the generic package type when the extension is not registered.
@@ -488,7 +580,7 @@ struct PoseFreeModelSection: View {
 
     var body: some View {
         let descriptor: ModelDescriptor = PipelineModel.da3Descriptor
-        Section("Pose-Free Model") {
+        Section(isExpanded: isExpanded) {
             LabeledContent(descriptor.displayName, value: statusText)
             Text("Fallback when Apple Photogrammetry cannot register the photos. It estimates poses without a calibrated camera and is less accurate than Apple Photogrammetry. It is not published yet: convert it with Tools/da3/convert_da3.py and import the package.")
                 .font(.footnote)
@@ -498,16 +590,25 @@ struct PoseFreeModelSection: View {
             }
             .buttonStyle(.bordered)
             .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
+            .help("Import a converted Depth Anything 3 package (.mlpackage) from disk.")
+            if pipeline.isEstimating {
+                Text("Wait until the pose estimation finishes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if pipeline.da3PackageURL != nil {
                 Button("Remove", role: .destructive) {
                     isConfirmingRemoval = true
                 }
+                .buttonStyle(.bordered)
                 .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
             }
             if let error = pipeline.da3Error {
                 Text(error)
                     .foregroundStyle(.red)
             }
+        } header: {
+            Text("Pose-Free Model")
         }
         .task {
             await pipeline.refreshDA3Package()

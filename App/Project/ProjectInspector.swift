@@ -3,38 +3,72 @@ import SplatCore
 import SplatIO
 import SplatTraining
 
-/// The project inspector: pipeline steps and input sections while the project has no images, the capture
-/// summary, the Sparse-View Quality settings and training controls after that. The depth model row sits between them.
+/// How much of the project inspector is shown. Basic keeps the essentials; Expert shows every setting.
+/// Stored in `@AppStorage("inspectorMode")`.
+enum InspectorMode: String, CaseIterable, Identifiable {
+    case basic
+    case expert
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .basic: "Basic"
+        case .expert: "Expert"
+        }
+    }
+}
+
+/// The project inspector. Basic mode: pipeline steps, the capture summary, training and the viewport quick controls.
+/// Expert mode adds the depth and pose-free models, the sparse-view and quality settings and every viewport control,
+/// in groups that collapse. The input stage (no images yet) shows the pipeline inspector in both modes.
 struct ProjectInspector: View {
     let document: Binding<ProjectDocument>
     let model: ProjectModel
     let pipeline: PipelineModel
+    @AppStorage("inspectorMode") private var mode: InspectorMode = .basic
+    @AppStorage("inspector.depthModelExpanded") private var isDepthModelExpanded: Bool = false
+    @AppStorage("inspector.poseFreeModelExpanded") private var isPoseFreeModelExpanded: Bool = false
+    @AppStorage("inspector.sparseViewExpanded") private var isSparseViewExpanded: Bool = true
+    @AppStorage("inspector.qualityExpanded") private var isQualityExpanded: Bool = false
+    @AppStorage("inspector.viewportExpanded") private var isViewportExpanded: Bool = true
     /// Only used by the footer's "Check for Updates" button. Nothing is checked until the user presses it.
     @State private var updateChecker = UpdateChecker()
 
     var body: some View {
         let manifest: ProjectManifest = document.wrappedValue.contents.manifest
+        let hasImages: Bool = !manifest.imageFiles.isEmpty
         Form {
-            PipelineStepList(manifest: manifest, pipeline: pipeline, project: model)
-            if manifest.imageFiles.isEmpty {
-                PipelineInspector(document: document, project: model, pipeline: pipeline)
-            } else {
-                captureSection(manifest: manifest)
+            modeSection
+            if hasErrors {
+                errorSection
             }
-            DepthModelSection(pipeline: pipeline, document: document, isTraining: model.isTraining)
-            PoseFreeModelSection(pipeline: pipeline)
-            if !manifest.imageFiles.isEmpty {
-                SparseViewSettingsSection(document: document, model: model, pipeline: pipeline)
-                QualitySettingsSection(document: document, model: model)
-                trainingSection
+            PipelineStepList(manifest: manifest, pipeline: pipeline, project: model)
+            if hasImages {
+                captureSection(manifest: manifest)
+                TrainingSection(document: document, model: model, mode: mode)
+            } else {
+                PipelineInspector(document: document, project: model, pipeline: pipeline)
+            }
+            if mode == .expert {
+                DepthModelSection(pipeline: pipeline,
+                                  document: document,
+                                  isTraining: model.isTraining,
+                                  isExpanded: $isDepthModelExpanded)
+                PoseFreeModelSection(pipeline: pipeline, isExpanded: $isPoseFreeModelExpanded)
+                if hasImages {
+                    SparseViewSettingsSection(document: document,
+                                              model: model,
+                                              pipeline: pipeline,
+                                              isExpanded: $isSparseViewExpanded)
+                    QualitySettingsSection(document: document, model: model, isExpanded: $isQualityExpanded)
+                }
             }
             if let viewer = model.viewer {
-                viewportSection(viewer)
-            }
-            if let message = model.errorMessage {
-                Section {
-                    Text(message)
-                        .foregroundStyle(.red)
+                if mode == .expert {
+                    expertViewportSection(viewer)
+                } else {
+                    basicViewportSection(viewer)
                 }
             }
             if let message = model.warningMessage {
@@ -44,29 +78,86 @@ struct ProjectInspector: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if let message = pipeline.errorMessage {
-                Section {
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-            }
-            Section {
-                VStack(spacing: 4) {
-                    Text(Self.versionText)
-                        .font(.footnote)
-                        .foregroundStyle(.tertiary)
-                    Button("Check for Updates") {
-                        Task { await updateChecker.check(currentVersion: Self.currentVersion) }
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.footnote)
-                    .disabled(updateChecker.state == .checking)
-                    updateStatus
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
-            }
+            footerSection
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: - Mode and errors
+
+    private var modeSection: some View {
+        Section {
+            Picker("Mode", selection: $mode) {
+                ForEach(InspectorMode.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .help("Basic shows the essentials. Expert shows every setting, in groups you can collapse.")
+            Text(mode == .basic
+                 ? "Showing the essentials. Expert shows every setting."
+                 : "Showing every setting. Groups can be collapsed.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var hasErrors: Bool {
+        model.errorMessage != nil || pipeline.errorMessage != nil
+    }
+
+    /// Errors from the project and the pipeline in one red banner. Each message has a Dismiss button.
+    private var errorSection: some View {
+        Section {
+            if let message = model.errorMessage {
+                errorRow(message) {
+                    model.errorMessage = nil
+                }
+            }
+            if let message = pipeline.errorMessage {
+                errorRow(message) {
+                    pipeline.errorMessage = nil
+                }
+            }
+        }
+    }
+
+    private func errorRow(_ message: String, dismiss: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+                Text(message)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("Dismiss", action: dismiss)
+                .buttonStyle(.bordered)
+                .accessibilityHint("Hides this error message.")
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footerSection: some View {
+        Section {
+            VStack(spacing: 4) {
+                Text(Self.versionText)
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                Button("Check for Updates") {
+                    Task { await updateChecker.check(currentVersion: Self.currentVersion) }
+                }
+                .buttonStyle(.borderless)
+                .font(.footnote)
+                .disabled(updateChecker.state == .checking)
+                .help("Looks for a newer release on GitHub. Nothing is checked until you press this.")
+                updateStatus
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
     }
 
     /// The result of the last "Check for Updates" press. Empty until the button has been pressed.
@@ -113,7 +204,7 @@ struct ProjectInspector: View {
         return info["CFBundleShortVersionString"] as? String ?? "?"
     }
 
-    // MARK: - Sections
+    // MARK: - Capture
 
     private func captureSection(manifest: ProjectManifest) -> some View {
         Section("Capture") {
@@ -130,17 +221,34 @@ struct ProjectInspector: View {
         }
     }
 
-    /// Up axis, standard views and, when the project has estimated cameras, the camera picker,
-    /// the fly-through slider and playback. The start up axis follows the capture source.
-    private func viewportSection(_ viewer: ViewerModel) -> some View {
-        let selection = Binding<UpAxis>(get: { viewer.upAxis }, set: { viewer.upAxis = $0 })
-        let cameraSelection = Binding<Int>(get: { viewer.activeCameraIndex ?? 0 },
-                                           set: { viewer.goToCamera($0) })
-        let flightSelection = Binding<Double>(get: { viewer.flightPosition },
-                                              set: { viewer.scrub(to: $0) })
-        let lastPosition: Double = Double(max(viewer.cameras.count - 1, 0))
-        return Section("Viewport") {
-            Picker("Up Axis", selection: selection) {
+    // MARK: - Viewport
+
+    /// Basic viewport: the up axis, the display mode, and the camera picker with the fly-through slider.
+    private func basicViewportSection(_ viewer: ViewerModel) -> some View {
+        Section("Viewport") {
+            Picker("Up Axis", selection: upAxisBinding(viewer)) {
+                ForEach(UpAxis.allCases, id: \.self) { axis in
+                    Text(axis.displayName).tag(axis)
+                }
+            }
+            .help("The direction that points up in the scene. The start value follows the capture source.")
+            Picker("Display", selection: displayModeBinding(viewer)) {
+                ForEach(ViewerDisplayMode.allCases, id: \.self) { displayMode in
+                    Text(displayMode.title).tag(displayMode)
+                }
+            }
+            .help("How the scene is drawn. Expert mode adds point size, heatmap and the other display options.")
+            cameraRows(viewer, includesPlayback: false)
+        }
+    }
+
+    /// Expert viewport: every viewport control in one group that collapses. The order follows the basic one.
+    private func expertViewportSection(_ viewer: ViewerModel) -> some View {
+        Section(isExpanded: $isViewportExpanded) {
+            Text("Scene view, camera flights, overlays and export.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Picker("Up Axis", selection: upAxisBinding(viewer)) {
                 ForEach(UpAxis.allCases, id: \.self) { axis in
                     Text(axis.displayName).tag(axis)
                 }
@@ -156,24 +264,52 @@ struct ProjectInspector: View {
                 Divider()
                 Button(viewer.isFlying ? "Leave Fly Mode" : "Fly Mode") { viewer.toggleFlying() }
             }
+            .help("Jump to a standard view, or fly through the scene with the keyboard.")
             Toggle("Pivot at cursor depth", isOn: Binding(
                 get: { viewer.anchorsToCursorDepth },
                 set: { viewer.anchorsToCursorDepth = $0 }
             ))
+            .help("Orbit and zoom around the surface under the cursor instead of the centre of the scene.")
             ViewerShortcutsButton()
             ViewportOverlayControls(model: viewer)
             ViewportExportControls(viewer: viewer)
-            if !viewer.cameras.isEmpty {
-                Picker("Camera", selection: cameraSelection) {
-                    ForEach(viewer.cameras.indices, id: \.self) { index in
-                        Text(viewer.cameras[index].name).tag(index)
-                    }
+            cameraRows(viewer, includesPlayback: true)
+        } header: {
+            Text("Viewport")
+        }
+    }
+
+    private func upAxisBinding(_ viewer: ViewerModel) -> Binding<UpAxis> {
+        Binding(get: { viewer.upAxis }, set: { viewer.upAxis = $0 })
+    }
+
+    private func displayModeBinding(_ viewer: ViewerModel) -> Binding<ViewerDisplayMode> {
+        Binding(get: { viewer.displayMode }, set: { viewer.displayMode = $0 })
+    }
+
+    /// The camera picker and the fly-through slider, and in expert mode the playback button. Shown only when the
+    /// project has estimated cameras.
+    @ViewBuilder
+    private func cameraRows(_ viewer: ViewerModel, includesPlayback: Bool) -> some View {
+        if !viewer.cameras.isEmpty {
+            let cameraSelection = Binding<Int>(get: { viewer.activeCameraIndex ?? 0 },
+                                               set: { viewer.goToCamera($0) })
+            let flightSelection = Binding<Double>(get: { viewer.flightPosition },
+                                                  set: { viewer.scrub(to: $0) })
+            let lastPosition: Double = Double(max(viewer.cameras.count - 1, 0))
+            Picker("Camera", selection: cameraSelection) {
+                ForEach(viewer.cameras.indices, id: \.self) { index in
+                    Text(viewer.cameras[index].name).tag(index)
                 }
-                if viewer.cameras.count > 1 {
-                    Slider(value: flightSelection, in: 0...lastPosition) {
-                        Text("Fly through")
-                    }
+            }
+            .help("Look through one of the estimated cameras.")
+            if viewer.cameras.count > 1 {
+                Slider(value: flightSelection, in: 0...lastPosition) {
+                    Text("Fly through")
                 }
+                .help("Move the view along the camera path.")
+            }
+            if includesPlayback {
                 Button {
                     viewer.togglePlayback()
                 } label: {
@@ -185,151 +321,12 @@ struct ProjectInspector: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewer.cameras.count < 2)
+                .help(viewer.cameras.count < 2 ? "Needs at least two cameras." : "Play the camera path as a flight.")
             }
         }
-    }
-
-    private var trainingSection: some View {
-        Section("Training") {
-            presetPicker
-            trainingControls
-            if model.isContinuing {
-                LabeledContent("Round", value: "\(model.round)")
-                LabeledContent("Total iterations", value: model.totalIterations.formatted())
-            }
-            if let progress = model.progress {
-                ProgressView(value: Double(progress.iteration),
-                             total: Double(max(progress.totalIterations, 1)))
-                LabeledContent("Iteration", value: "\(progress.iteration) of \(progress.totalIterations)")
-                LabeledContent("Loss", value: progress.loss.map { String(format: "%.4f", $0) } ?? "\u{2014}")
-                LabeledContent("PSNR", value: progress.psnr.map { String(format: "%.2f dB", $0) } ?? "\u{2014}")
-                LabeledContent("Gaussians", value: progress.gaussianCount.formatted())
-                LabeledContent("Iterations/s", value: String(format: "%.1f", progress.iterationsPerSecond))
-                LabeledContent("Phase", value: Self.phaseLabel(progress.phase))
-                if let heldOut = progress.heldOut {
-                    LabeledContent("Held-out PSNR", value: String(format: "%.2f dB", heldOut.psnr))
-                    LabeledContent("Held-out SSIM", value: String(format: "%.3f", heldOut.ssim))
-                }
-                if let best = progress.bestIteration {
-                    LabeledContent("Best iteration", value: best.formatted())
-                }
-                if let depthLoss = progress.depthLoss {
-                    LabeledContent("Depth loss", value: String(format: "%.4f", depthLoss))
-                }
-            }
-        }
-    }
-
-    /// Fast, Standard or Quality. Shows "Custom" when the stored settings match none of them.
-    private var presetPicker: some View {
-        let configuration: TrainingConfiguration = document.wrappedValue.contents.manifest.training
-        return Picker("Preset", selection: presetBinding) {
-            ForEach(TrainingPreset.allCases, id: \.self) { preset in
-                Text(Self.presetTitle(preset)).tag(Optional(preset))
-            }
-            if Self.preset(for: configuration) == nil {
-                Text("Custom").tag(TrainingPreset?.none)
-            }
-        }
-        .disabled(model.isTraining)
-    }
-
-    private var presetBinding: Binding<TrainingPreset?> {
-        Binding(
-            get: { Self.preset(for: document.wrappedValue.contents.manifest.training) },
-            set: { newValue in
-                guard let preset = newValue else { return }
-                preset.apply(to: &document.wrappedValue.contents.manifest.training)
-            }
-        )
-    }
-
-    /// One primary action (Train). While a run is active, Pause or Resume and Stop use the default style.
-    /// With a stored checkpoint, Continue Training is the primary action and Retrain from Scratch is bordered.
-    @ViewBuilder
-    private var trainingControls: some View {
-        if model.isTraining {
-            HStack {
-                Button(model.isPaused ? "Resume" : "Pause") {
-                    model.togglePause()
-                }
-                Button("Stop") {
-                    model.stop()
-                }
-            }
-        } else if model.canContinue(document.wrappedValue.contents) {
-            Button("Continue Training") {
-                model.continueTraining(document: document)
-            }
-            .buttonStyle(.glassProminent)
-            Button("Retrain from Scratch") {
-                model.startTraining(document: document)
-            }
-            .buttonStyle(.bordered)
-            continueOptions
-        } else {
-            Button("Train") {
-                model.startTraining(document: document)
-            }
-            .buttonStyle(.glassProminent)
-        }
-    }
-
-    /// Round length, endless mode and Gaussian growth for "Continue Training".
-    private var continueOptions: some View {
-        let settings = Bindable(model)
-        return DisclosureGroup("Continue Options") {
-            Picker("Iterations per round", selection: settings.continuation.roundIterations) {
-                ForEach(Self.roundChoices, id: \.self) { iterations in
-                    Text(iterations.formatted()).tag(iterations)
-                }
-            }
-            Toggle("Train until stopped", isOn: settings.continuation.isEndless)
-            Text("Rounds repeat until you press Stop. The model is saved after every round.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Toggle("Add more Gaussians", isOn: settings.continuation.addGaussians)
-            Picker("Gaussian limit", selection: settings.continuation.maxGaussians) {
-                ForEach(Self.gaussianLimitChoices, id: \.self) { limit in
-                    Text(limit.formatted()).tag(limit)
-                }
-            }
-            .disabled(!model.continuation.addGaussians)
-            Text("The device memory budget can still cap the limit.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        .disabled(model.isTraining)
     }
 
     // MARK: - Helpers
-
-    /// Iterations per continuation round offered in the picker.
-    private static let roundChoices: [Int] = [1_000, 2_000, 5_000, 10_000, 20_000]
-    /// Gaussian ceilings offered when "Add more Gaussians" is on. The device memory budget can still cap them.
-    private static let gaussianLimitChoices: [Int] = [1_000_000, 2_000_000, 3_000_000, 5_000_000]
-
-    private static func preset(for configuration: TrainingConfiguration) -> TrainingPreset? {
-        TrainingPreset.allCases.first { preset in
-            preset.maxImageSide == configuration.maxImageSide && preset.iterations == configuration.iterations
-        }
-    }
-
-    /// What the run is doing now: the plain run, the held-out iteration choice, or the final retrain.
-    private static func phaseLabel(_ phase: TrainingPhase) -> String {
-        switch phase {
-        case .single:
-            return "Training"
-        case .selection(let heldOutView):
-            return "Choosing iteration (holding out \(heldOutView))"
-        case .final(let stopIteration):
-            return "Final training to \(stopIteration.formatted())"
-        }
-    }
-
-    private static func presetTitle(_ preset: TrainingPreset) -> String {
-        "\(preset.rawValue.capitalized) (\(preset.maxImageSide) px, \(preset.iterations.formatted()) iterations)"
-    }
 
     private func sourceName(_ manifest: ProjectManifest) -> String {
         switch manifest.inputKind {

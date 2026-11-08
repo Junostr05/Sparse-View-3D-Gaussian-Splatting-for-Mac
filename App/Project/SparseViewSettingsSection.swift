@@ -6,11 +6,12 @@ import SplatTraining
 
 /// The "Sparse-View Quality" inspector section: depth prior, artifact regularizers, pseudo-views and
 /// leave-one-out early stopping, plus the depth import and the per-image depth status. Plain `Form`
-/// controls; the Train button stays the only prominent action.
+/// controls; the Train button stays the only prominent action. Expert mode only; collapses as one group.
 struct SparseViewSettingsSection: View {
     let document: Binding<ProjectDocument>
     let model: ProjectModel
     let pipeline: PipelineModel
+    let isExpanded: Binding<Bool>
 
     @State private var isImportingDepth: Bool = false
 
@@ -32,15 +33,16 @@ struct SparseViewSettingsSection: View {
         let imageCount: Int = contents.manifest.imageFiles.count
         let minimumViews: Int = configuration.earlyStopping.minimumViews
 
-        Section("Sparse-View Quality") {
+        Section(isExpanded: isExpanded) {
             Toggle("Depth prior", isOn: depthBinding)
                 .disabled(model.isTraining || (!depthAvailable && !depthOn))
+                .help("Uses a depth estimate for each view to keep the shapes plausible when there are few photos.")
             if depthAvailable {
                 Text("Guides the shape of each view with depth.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                Text("No depth: import depth maps or install the depth model")
+                Text("Needs depth. Import depth maps, or download the depth model under Depth Model.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -51,29 +53,39 @@ struct SparseViewSettingsSection: View {
             }
             .labelsHidden()
             .disabled(model.isTraining || !depthOn)
+            .help("How strongly depth guides the shapes. Only used while the depth prior is on.")
+            if !depthOn {
+                Text("Turn on the depth prior to change the weight.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
             Toggle("Artifact regularizers", isOn: artifactBinding)
                 .disabled(model.isTraining)
+                .help("Penalizes needle-like and isolated Gaussians, which show up as floaters.")
             Text("Limits needle-like and isolated Gaussians.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("Scale cap", isOn: kindBinding(.scaleCap))
                 .disabled(model.isTraining)
+                .help("Limits how large a single Gaussian can grow. Off by default because it hurt sharpness.")
             Text("Caps oversized Gaussians. Can cost sharpness.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("Pseudo-views", isOn: kindBinding(.pseudoViews))
                 .disabled(model.isTraining)
+                .help("Adds training views between neighbouring cameras, so the sides of the scene get constrained.")
             Text("Trains on views between neighbouring cameras. Adds training time.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("Early stopping (leave-one-out)", isOn: earlyStoppingBinding)
                 .disabled(model.isTraining || imageCount < minimumViews)
+                .help("Holds out one photo at a time to find the iteration that generalizes best.")
             if imageCount < minimumViews {
-                Text("Needs at least \(minimumViews) images")
+                Text("Needs at least \(minimumViews) images. Early stopping is unavailable for this project.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -85,11 +97,20 @@ struct SparseViewSettingsSection: View {
             Button("Import Depth Maps\u{2026}") {
                 isImportingDepth = true
             }
+            .buttonStyle(.bordered)
             .disabled(model.isTraining)
+            .help("Use depth maps you already have, one per photo, instead of the depth model.")
+            if model.isTraining {
+                Text("Import depth maps after the run finishes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
             DisclosureGroup("Depth status") {
                 depthStatusRows
             }
+        } header: {
+            Text("Sparse-View Quality")
         }
         .fileImporter(isPresented: $isImportingDepth, allowedContentTypes: [.folder]) { result in
             handleDepthFolder(result)
@@ -114,7 +135,7 @@ struct SparseViewSettingsSection: View {
                 }
             }
         } else {
-            Text("Not checked yet")
+            Text("Not checked yet. Depth is checked when training starts.")
                 .foregroundStyle(.secondary)
         }
     }
