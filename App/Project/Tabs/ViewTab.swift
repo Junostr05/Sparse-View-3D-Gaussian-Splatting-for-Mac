@@ -24,7 +24,20 @@ struct ViewTab: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            // INTEGRATION POINT: view tab (crop and floor tools, cleanup assistant)
+            if let viewer = model.viewer {
+                Section("Clean Up") {
+                    Button("Clean Up Assistant\u{2026}") {
+                        viewer.presentedCleanup = true
+                    }
+                    .disabled(!viewer.canEdit)
+                    .help("Find huge, transparent or isolated Gaussians and delete them in one undoable step.")
+                    Text(viewer.canEdit ? "Proposes floaters and artifacts; nothing is deleted until you confirm."
+                                        : "Not available while a run or an export is in progress.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            // INTEGRATION POINT: view tab (crop and floor tools)
         }
         .formStyle(.grouped)
     }
