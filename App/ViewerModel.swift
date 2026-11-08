@@ -82,6 +82,9 @@ final class ViewerModel {
     var videoExport: ViewerVideoExportJob?
     /// Export sheet the viewport presents. Set by the viewport bar and the command palette, and cleared when the sheet closes.
     var presentedExport: PresentedExport?
+    /// Asks the export button to open its sheet on a given choice, for example from the command palette.
+    /// `ExportButton` clears it after it has opened the sheet.
+    var exportRequest: ExportChoice?
 
     /// The export sheets that `ViewerContent` presents.
     enum PresentedExport: Identifiable {

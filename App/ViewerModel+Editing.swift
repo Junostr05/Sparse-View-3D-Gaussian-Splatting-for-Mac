@@ -239,4 +239,19 @@ extension ViewerModel {
             try CloudExporter.export(cloud, as: format)
         }.value
     }
+
+    /// Encodes the displayed cloud (with the deletions applied) as a self-contained web page, off the main actor.
+    /// The page starts from the current view and uses the viewer's background colour.
+    func exportWebPage(maxGaussians: Int, title: String) async throws -> WebViewerExport {
+        let cloud: GaussianCloud = scene.cloud
+        let camera = WebViewerCamera(position: view.eye, target: view.pivot, up: upAxis.vector, fovY: view.fovY)
+        let options = WebViewerOptions(maxGaussians: maxGaussians,
+                                       title: title,
+                                       camera: camera,
+                                       background: background.color,
+                                       upAxis: upAxis)
+        return try await Task.detached(priority: .userInitiated) {
+            try WebViewerExporter.export(cloud: cloud, options: options)
+        }.value
+    }
 }
