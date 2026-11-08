@@ -82,6 +82,8 @@ final class ViewerModel {
     var videoExport: ViewerVideoExportJob?
     /// Export sheet the viewport presents. Set by the viewport bar and the command palette, and cleared when the sheet closes.
     var presentedExport: PresentedExport?
+    /// The Clean Up Assistant sheet (`CleanupAssistantView`). Set by the edit toolbar and the command palette.
+    var presentedCleanup = false
 
     /// The export sheets that `ViewerContent` presents.
     enum PresentedExport: Identifiable {

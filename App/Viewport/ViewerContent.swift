@@ -60,6 +60,9 @@ struct ViewerContent: View {
                 ViewerVideoExportSheet(viewer: model)
             }
         }
+        .sheet(isPresented: Bindable(model).presentedCleanup) {
+            CleanupAssistantView(viewer: model)
+        }
         .task(id: ObjectIdentifier(model)) {
             model.prepareRenderer()
         }

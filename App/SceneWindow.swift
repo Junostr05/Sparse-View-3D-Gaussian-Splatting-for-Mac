@@ -28,6 +28,9 @@ struct SceneWindow: View {
                     EditModeToggle(model: model)
                 }
                 ToolbarItem {
+                    CleanUpButton(model: model)
+                }
+                ToolbarItem {
                     ExportButton(model: model, defaultName: name, onFailure: { exportError = $0 })
                 }
                 ToolbarItem {

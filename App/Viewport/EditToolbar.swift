@@ -15,6 +15,21 @@ struct EditModeToggle: View {
     }
 }
 
+/// Opens the Clean Up Assistant, which proposes floaters and artifacts for deletion. Disabled while editing is locked.
+struct CleanUpButton: View {
+    let model: ViewerModel
+
+    var body: some View {
+        Button {
+            model.presentedCleanup = true
+        } label: {
+            Label("Clean Up", systemImage: "sparkles")
+        }
+        .disabled(!model.canEdit)
+        .help("Find floaters and artifacts and propose them for deletion. Nothing is deleted until you confirm.")
+    }
+}
+
 /// Opens the export sheet for the displayed cloud, with the deletions applied.
 struct ExportButton: View {
     let model: ViewerModel

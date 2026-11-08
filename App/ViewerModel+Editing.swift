@@ -102,6 +102,13 @@ extension ViewerModel {
         selection.invert()
     }
 
+    /// Replaces the selection with `mask`, over display indices. Used by the Clean Up Assistant to show and select
+    /// its proposal. Ignored unless editing is allowed and the mask covers the displayed cloud.
+    func setSelection(_ mask: SelectionMask) {
+        guard canEdit, mask.count == displayedCount else { return }
+        selection = mask
+    }
+
     /// Runs a selection or history command. Commands are ignored when editing is not allowed.
     func performEdit(_ command: EditCommand) {
         switch command {
