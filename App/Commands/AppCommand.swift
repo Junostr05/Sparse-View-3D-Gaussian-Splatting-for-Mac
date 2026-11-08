@@ -46,6 +46,18 @@ enum CommandRegistry {
                                 keywords: ["fit", "scene", "reset"]) {
             viewer.apply(.frameAll)
         })
+        commands.append(command("tools.crop", "Crop Box", category: "Tools",
+                                keywords: ["crop", "box", "clip", "trim"]) {
+            viewer.activeTool = viewer.activeTool == .crop ? .none : .crop
+        })
+        commands.append(command("tools.floor", "Set Floor", category: "Tools",
+                                keywords: ["floor", "ground", "level", "plane", "up"]) {
+            viewer.activeTool = viewer.activeTool == .floor ? .none : .floor
+        })
+        commands.append(command("tools.measure", "Measure Distance", category: "Tools",
+                                keywords: ["measure", "distance", "scale", "length", "ruler"]) {
+            viewer.activeTool = viewer.activeTool == .measure ? .none : .measure
+        })
         let presets: [(ViewPreset, String, String)] = [
             (.front, "Front View", "1"),
             (.back, "Back View", "\u{2303}1"),

@@ -51,6 +51,8 @@ struct ExportSheet: View {
         self.onFailure = onFailure
         _choice = State(initialValue: initialChoice)
     }
+    /// Apply the floor, scale and crop to the export. On by default, so an edited scene exports as it is shown.
+    @State private var applyEdits = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -62,6 +64,10 @@ struct ExportSheet: View {
                 }
             }
             .pickerStyle(.inline)
+            if model.hasSceneEdits {
+                Toggle("Apply scene transform and crop", isOn: $applyEdits)
+                    .help("Export the scene with its floor, scale and crop applied, and without the Gaussians outside the crop box.")
+            }
             if choice == .cloud(.splat) {
                 Text("The .splat format keeps only the base colour of each Gaussian. View-dependent colour from the higher-order spherical harmonics is dropped.")
                     .font(.footnote)
@@ -135,7 +141,7 @@ struct ExportSheet: View {
     private func encode() async throws -> Data {
         switch choice {
         case .cloud(let format):
-            return try await model.exportData(format)
+            return try await model.exportData(format, applyEdits: applyEdits && model.hasSceneEdits)
         case .webPage:
             let export = try await model.exportWebPage(maxGaussians: max(1, maxGaussians), title: defaultName)
             return export.data

@@ -37,6 +37,13 @@ struct ViewerContent: View {
                                 .transition(.opacity)
                         }
                     }
+                    .overlay(alignment: .bottomLeading) {
+                        if model.activeTool != .none, !isEditing {
+                            ViewportToolsControls(model: model)
+                                .padding(16)
+                                .transition(.opacity)
+                        }
+                    }
                     .overlay(alignment: .top) {
                         if model.isFlying {
                             FlyModeHUD(model: model)

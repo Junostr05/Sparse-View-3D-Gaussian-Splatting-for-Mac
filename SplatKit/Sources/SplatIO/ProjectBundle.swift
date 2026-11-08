@@ -201,6 +201,10 @@ public enum ProjectLayout {
     public static let depthDirectory = "depth"
     /// Deleted Gaussian indices of the latest checkpoint, as `DeletionListCodec` data.
     public static let deletedIndices = "edits/deleted.bin"
+    /// Scene transform (rotation, translation, scale) of the viewer, as `SceneTransform` JSON. Optional; absent means identity.
+    public static let sceneTransform = "edits/transform.json"
+    /// Crop box in the transformed scene, as `CropBox` JSON. Optional; absent means no crop.
+    public static let cropBox = "edits/crop.json"
     /// Camera poses refined by training, as `RefinedPoseFile` JSON. Lives under `poses/`, so every import
     /// (which replaces that directory) removes it.
     public static let refinedPoses = "poses/refined.json"
@@ -758,6 +762,51 @@ public enum ProjectBundle {
             throw .corruptManifest("edits record says \(record.deletedCount) deletions, file holds \(deleted.count)")
         }
         return (record.baseGaussianCount, deleted)
+    }
+
+    // MARK: - Scene transform and crop
+
+    /// Stores the viewer's scene transform. `nil` or the identity removes the file, so a project without
+    /// a transform is byte-for-byte what it was before. Training and checkpoints never read this file.
+    public static func withSceneTransform(_ contents: ProjectContents, _ transform: SceneTransform?) throws -> ProjectContents {
+        var result = contents
+        guard let transform, !transform.isIdentity else {
+            result.files[ProjectLayout.sceneTransform] = nil
+            return result
+        }
+        result.files[ProjectLayout.sceneTransform] = try transform.jsonData()
+        return result
+    }
+
+    /// The stored scene transform, or `nil` when the project has none.
+    public static func sceneTransform(_ contents: ProjectContents) throws(ProjectError) -> SceneTransform? {
+        guard let data = contents.files[ProjectLayout.sceneTransform] else { return nil }
+        do throws(SceneTransformError) {
+            return try SceneTransform.decode(jsonData: data)
+        } catch {
+            throw .corruptManifest("\(ProjectLayout.sceneTransform): \(error)")
+        }
+    }
+
+    /// Stores the crop box. `nil` removes the file.
+    public static func withCropBox(_ contents: ProjectContents, _ box: CropBox?) throws -> ProjectContents {
+        var result = contents
+        guard let box else {
+            result.files[ProjectLayout.cropBox] = nil
+            return result
+        }
+        result.files[ProjectLayout.cropBox] = try box.jsonData()
+        return result
+    }
+
+    /// The stored crop box, or `nil` when the project has none.
+    public static func cropBox(_ contents: ProjectContents) throws(ProjectError) -> CropBox? {
+        guard let data = contents.files[ProjectLayout.cropBox] else { return nil }
+        do throws(SceneTransformError) {
+            return try CropBox.decode(jsonData: data)
+        } catch {
+            throw .corruptManifest("\(ProjectLayout.cropBox): \(error)")
+        }
     }
 
     // MARK: - Helpers

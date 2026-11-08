@@ -28,6 +28,23 @@ final class SplatMTKView: MTKView {
     var onBrushCursor: ((CGPoint?) -> Void)?
     /// A selection or history command from an edit key.
     var onEditCommand: ((EditCommand) -> Void)?
+    /// Set from the model: a viewport tool is active and takes the clicks and crop handle drags that it claims.
+    var isToolActive = false
+    /// A press with a tool active. The outcome decides whether the press is a click, a handle drag or an orbit.
+    var onToolPress: ((CGPoint, CGSize) -> ToolPressOutcome)?
+    var onToolDrag: ((CGPoint, CGSize, _ shift: Bool, _ option: Bool) -> Void)?
+    var onToolRelease: (() -> Void)?
+    var onToolClick: ((CGPoint, CGSize) -> Void)?
+    /// Escape while a tool is active.
+    var onToolCancel: (() -> Void)?
+    /// What the current press is doing with the active tool. Points are in view points, top-left origin.
+    private enum ToolPointer {
+        case idle
+        case pendingClick(CGPoint)
+        case dragging
+    }
+    private var toolPointer: ToolPointer = .idle
+    private static let escapeKeyCode: UInt16 = 53
     /// Start of a gesture at a point (view points, top-left origin) in a view of the given size. Called on every
     /// press and on the first event of a drag or scroll after 0.3 s without one.
     var onBeginInteraction: ((CGPoint, CGSize) -> Void)?
@@ -215,11 +232,43 @@ final class SplatMTKView: MTKView {
             onBrushStroke?([point], event.modifierFlags.contains(.shift))
             return
         }
+        // An active viewport tool takes its clicks and handle drags. Option always orbits and pans.
+        if isToolActive, !event.modifierFlags.contains(.option) {
+            let point: CGPoint = topLeftPoint(of: event)
+            let outcome: ToolPressOutcome = onToolPress?(point, bounds.size) ?? .passThrough
+            switch outcome {
+            case .passThrough:
+                break
+            case .pendingClick:
+                toolPointer = .pendingClick(point)
+                return
+            case .dragHandle:
+                toolPointer = .dragging
+                return
+            }
+        }
         noteInteraction(event, isPress: true)
         super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        switch toolPointer {
+        case .dragging:
+            onToolDrag?(topLeftPoint(of: event), bounds.size,
+                        event.modifierFlags.contains(.shift), event.modifierFlags.contains(.option))
+            return
+        case .pendingClick(let start):
+            // A press that moves is an orbit, not a click.
+            let now: CGPoint = topLeftPoint(of: event)
+            if hypot(now.x - start.x, now.y - start.y) < 4 {
+                return
+            }
+            // The press was held back for the tool; start the orbit now, as a press would have.
+            toolPointer = .idle
+            noteInteraction(event, isPress: true)
+        case .idle:
+            break
+        }
         if let last = strokeLast {
             let point: SIMD2<Float> = drawablePoint(of: event)
             strokeLast = point
@@ -234,6 +283,15 @@ final class SplatMTKView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        switch toolPointer {
+        case .idle:
+            break
+        case .pendingClick(let point):
+            onToolClick?(point, bounds.size)
+        case .dragging:
+            onToolRelease?()
+        }
+        toolPointer = .idle
         strokeLast = nil
         super.mouseUp(with: event)
     }
@@ -357,6 +415,10 @@ final class SplatMTKView: MTKView {
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) {
             super.keyDown(with: event)
+            return
+        }
+        if isToolActive, event.keyCode == Self.escapeKeyCode {
+            onToolCancel?()
             return
         }
         if event.keyCode == Self.graveKeyCode, event.modifierFlags.contains(.shift) {

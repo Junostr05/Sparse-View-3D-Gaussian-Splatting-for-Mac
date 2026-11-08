@@ -192,8 +192,9 @@ final class ViewerModel {
     /// Latest frame statistics, assigned at most every 0.5 s.
     private(set) var stats: FrameStats?
 
-    /// Bounds of the scene the camera framing and the display normalisation use. Set once at init.
-    @ObservationIgnored let bounds: Bounds
+    /// Bounds of the displayed scene the camera framing and the display normalisation use. Recomputed when the
+    /// scene transform changes (`setSceneTransform`).
+    @ObservationIgnored var bounds: Bounds
     @ObservationIgnored private var lastStatsTime: ContinuousClock.Instant?
     /// One view per camera, built from `cameras` and the current up axis. The flight the viewer plays runs through them.
     @ObservationIgnored private(set) var cameraViews: [ViewCamera] = []
@@ -205,17 +206,59 @@ final class ViewerModel {
     /// The running flight or playback task. Cancelled by every new request and by manual input.
     @ObservationIgnored private var motionTask: Task<Void, Never>?
 
-    init(scene: LoadedScene, upAxis: UpAxis = .negativeY, cameras: [NamedCamera] = []) {
-        self.scene = scene
-        let count: Int = scene.cloud.count
+    // MARK: Scene transform, crop and measuring tools. The behaviour is in ViewerModel+SceneTools.swift.
+
+    /// The transform of the stored scene (floor, scale). The displayed cloud, `cameras` and `bounds` are in its frame.
+    var sceneTransform: SceneTransform = .identity
+    /// The crop box, in the frame of the displayed scene. Gaussians outside it are culled by the crop clip and
+    /// removed by "Delete Outside".
+    var crop: CropBox?
+    /// True while the crop tool is active, the crop box is shown and the Gaussians outside it are hidden.
+    var clipsToCropBox = true
+    /// The tool that captures clicks in the viewport. `.none` leaves every click to orbit, pan and select.
+    var activeTool: ViewerTool = .none {
+        didSet {
+            guard activeTool != oldValue else { return }
+            floorPoints = []
+            measurePoints = []
+            cropDrag = nil
+            if activeTool == .crop, crop == nil {
+                setCrop(CropBox(center: bounds.center, halfExtents: bounds.extent * 0.4))
+            }
+        }
+    }
+    /// Surfaces picked for the floor, up to six, in the displayed scene's frame.
+    var floorPoints: [SIMD3<Float>] = []
+    /// Points of the measuring tool: none, one, or the two ends of the measured segment.
+    var measurePoints: [SIMD3<Float>] = []
+    /// The unit the measured lengths are shown in once the scene is metric.
+    var measureUnit: LengthUnit = .metre
+    /// Crop handle being dragged, between the press and the release of the mouse.
+    @ObservationIgnored var cropDrag: CropDragState?
+    /// Called after every change of the scene transform or the crop box, so the project can store them.
+    @ObservationIgnored var onSceneEditsChanged: ((SceneTransform, CropBox?) -> Void)?
+    /// The cameras as the viewer shows them, in the frame of the displayed scene. Replaced by `replaceCameras`.
+    @ObservationIgnored var baseCameras: [NamedCamera] = []
+
+    init(scene: LoadedScene,
+         upAxis: UpAxis = .negativeY,
+         cameras: [NamedCamera] = [],
+         sceneTransform: SceneTransform = .identity,
+         crop: CropBox? = nil) {
+        self.sceneTransform = sceneTransform
+        self.crop = crop
         self.baseCloud = scene.cloud
+        let count: Int = scene.cloud.count
         self.history = EditHistory(baseCount: count)
         self.displayIndexToBase = Array(0..<count)
         self.selection = SelectionMask(count: count)
-        let bounds = scene.cloud.robustBounds()
+        let shown: GaussianCloud = (try? sceneTransform.apply(to: scene.cloud)) ?? scene.cloud
+        self.scene = LoadedScene(cloud: shown, removedNonFinite: scene.removedNonFinite)
+        let bounds = shown.robustBounds()
         self.bounds = bounds
         self.upAxis = upAxis
-        self.cameras = cameras
+        self.baseCameras = cameras
+        self.cameras = cameras.map { NamedCamera(name: $0.name, camera: $0.camera.transformed(by: sceneTransform)) }
         self.shDegreeLimit = scene.cloud.shDegree
         self.view = ViewCamera.framing(bounds, upAxis: upAxis)
         rebuildCameraViews()
@@ -275,17 +318,19 @@ final class ViewerModel {
     }
 
     /// Rebuilds the cached camera views and the flight through them. Called at init and when the up axis changes.
-    private func rebuildCameraViews() {
+    func rebuildCameraViews() {
         overlayCache = nil
         cameraViews = cameras.indices.map { cameraView(at: $0) }
         flight = cameraViews.isEmpty ? nil : ViewFlight(keyframes: cameraViews)
     }
 
     /// Replaces the camera list, for example with the refined poses a training run stored. Stops any flight
-    /// or playback still running through the old cameras.
+    /// or playback still running through the old cameras. The poses are in the stored frame; the viewer shows
+    /// them in the frame of the scene transform.
     func replaceCameras(_ cameras: [NamedCamera]) {
         stopMotion()
-        self.cameras = cameras
+        baseCameras = cameras
+        self.cameras = cameras.map { NamedCamera(name: $0.name, camera: $0.camera.transformed(by: sceneTransform)) }
         if let index = activeCameraIndex, index >= cameras.count {
             activeCameraIndex = nil
         }
@@ -464,7 +509,7 @@ final class ViewerModel {
         motionTask = Task { await self.runFlight(from: start, to: target, duration: duration) }
     }
 
-    private func stopMotion() {
+    func stopMotion() {
         motionTask?.cancel()
         motionTask = nil
         if isPlaying {
