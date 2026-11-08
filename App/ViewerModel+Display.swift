@@ -90,6 +90,8 @@ extension ViewerModel {
     /// shows (without the overlays). Synchronous: the GPU has finished when this returns.
     @discardableResult
     func renderFrame(with renderer: SplatRenderer, camera: Camera, to texture: MTLTexture) throws(MetalError) -> FrameStats {
+        // The crop clip is viewer-only: it is set here and nowhere in training.
+        renderer.setCrop(cropClip)
         var settings = RasterSettings()
         settings.shDegreeLimit = shDegreeLimit
         settings.background = background.color

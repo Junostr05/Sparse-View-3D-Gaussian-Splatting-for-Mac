@@ -45,12 +45,20 @@ struct SamplingUniforms {
     var counts: SIMD4<UInt32>
 }
 
-/// MSL `ViewModeUniforms`, 32 bytes. Read by `projectGaussians` only; mode 0 is the normal splat rendering.
+/// MSL `ViewModeUniforms`, 112 bytes. Read by `projectGaussians` only; mode 0 with no crop is the normal splat rendering.
 struct ViewModeUniforms {
     /// x: projection mode (0 splat, 1 points, 2 shapes, 3 heatmap), y: 1 = colour override is bound, z, w: unused.
     var modeInfo: SIMD4<UInt32>
     /// x: point disc radius in pixels, y: opacity scale (shapes), z: scale scale (non-splat modes), w: unused.
     var styleInfo: SIMD4<Float>
+    /// xyz: crop box centre in the rendered scene, w: 1 = crop on (Gaussians outside the box are culled), 0 = off.
+    var cropCentre: SIMD4<Float>
+    /// xyz: crop box half extents along its own axes, w: unused.
+    var cropHalfExtents: SIMD4<Float>
+    /// Rows of the world-to-box rotation (xyz); `local = (row·(p − centre))` per axis, w: unused.
+    var cropRow0: SIMD4<Float>
+    var cropRow1: SIMD4<Float>
+    var cropRow2: SIMD4<Float>
 }
 
 /// MSL `DepthColormapUniforms`, 48 bytes. Read by the `depthColormap` kernel of the depth view.

@@ -171,12 +171,39 @@ public final class SplatRenderer {
         projectionCode != 0 && display.colorOverride != nil && uploadedColorOverride != nil
     }
 
+    /// Viewer crop box in the rendered scene (`setCrop`). `nil` is off, which is what training and checkpoints use.
+    private(set) var crop: CropBox?
+
+    /// Sets or clears the viewer crop. Gaussians whose centre lies outside the box are culled in the projection of
+    /// every forward pass until it is cleared. Training never calls this, so its passes are unchanged.
+    public func setCrop(_ crop: CropBox?) {
+        self.crop = crop
+    }
+
     private func makeViewModeUniforms() -> ViewModeUniforms {
         let mode: UInt32 = projectionCode
         let overrideFlag: UInt32 = colorOverrideActive ? 1 : 0
+        var cropCentre: SIMD4<Float> = .zero
+        var cropHalfExtents: SIMD4<Float> = .zero
+        var cropRow0: SIMD4<Float> = .zero
+        var cropRow1: SIMD4<Float> = .zero
+        var cropRow2: SIMD4<Float> = .zero
+        if let crop {
+            let rows: [SIMD3<Float>] = crop.localRows
+            cropCentre = SIMD4<Float>(crop.center.x, crop.center.y, crop.center.z, 1)
+            cropHalfExtents = SIMD4<Float>(crop.halfExtents.x, crop.halfExtents.y, crop.halfExtents.z, 0)
+            cropRow0 = SIMD4<Float>(rows[0].x, rows[0].y, rows[0].z, 0)
+            cropRow1 = SIMD4<Float>(rows[1].x, rows[1].y, rows[1].z, 0)
+            cropRow2 = SIMD4<Float>(rows[2].x, rows[2].y, rows[2].z, 0)
+        }
         return ViewModeUniforms(modeInfo: SIMD4<UInt32>(mode, overrideFlag, 0, 0),
                                 styleInfo: SIMD4<Float>(display.pointRadiusPixels, display.opacityScale,
-                                                        display.scaleScale, 0))
+                                                        display.scaleScale, 0),
+                                cropCentre: cropCentre,
+                                cropHalfExtents: cropHalfExtents,
+                                cropRow0: cropRow0,
+                                cropRow1: cropRow1,
+                                cropRow2: cropRow2)
     }
 
     @discardableResult

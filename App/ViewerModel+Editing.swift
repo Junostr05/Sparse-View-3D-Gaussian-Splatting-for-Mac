@@ -187,7 +187,7 @@ extension ViewerModel {
     }
 
     /// Builds the displayed cloud from the base and the deletions, and clears the selection.
-    private func rebuildDisplayCloud() {
+    func rebuildDisplayCloud() {
         let display: GaussianCloud
         if history.deleted.isEmpty {
             display = baseCloud
@@ -217,12 +217,14 @@ extension ViewerModel {
 
     /// Makes `cloud` the displayed cloud and uploads it to the renderer when the renderer exists.
     /// The camera and the edit state are untouched.
+    /// `cloud` is in the stored frame; the displayed cloud is moved by `sceneTransform` (the identity leaves it as is).
     func presentCloud(_ cloud: GaussianCloud, removedNonFinite: Int) {
-        scene = LoadedScene(cloud: cloud, removedNonFinite: removedNonFinite)
+        let shown: GaussianCloud = (try? sceneTransform.apply(to: cloud)) ?? cloud
+        scene = LoadedScene(cloud: shown, removedNonFinite: removedNonFinite)
         displayOpacityCache = nil
         if case .ready(let session) = renderState {
             do throws(MetalError) {
-                try session.renderer.setCloud(cloud)
+                try session.renderer.setCloud(shown)
             } catch {
                 editingLogger.error("Uploading the cloud failed: \(String(describing: error))")
             }
@@ -232,9 +234,20 @@ extension ViewerModel {
 
     // MARK: - Export
 
-    /// Encodes the displayed cloud (with the deletions applied) in `format`, off the main actor.
-    func exportData(_ format: ExportFormat) async throws -> Data {
-        let cloud: GaussianCloud = scene.cloud
+    /// Encodes the cloud in `format`, off the main actor. With `applyEdits` the scene transform is applied (the
+    /// displayed cloud already has it) and the Gaussians outside the crop box are dropped. Without it the stored
+    /// cloud is exported as it was checkpointed, with only the deletions applied.
+    func exportData(_ format: ExportFormat, applyEdits: Bool) async throws -> Data {
+        let cloud: GaussianCloud
+        if applyEdits {
+            var edited: GaussianCloud = scene.cloud
+            if let crop {
+                edited = try edited.removing(crop.mask(for: edited))
+            }
+            cloud = edited
+        } else {
+            cloud = history.deleted.isEmpty ? baseCloud : try baseCloud.removing(history.deleted)
+        }
         return try await Task.detached(priority: .userInitiated) {
             try CloudExporter.export(cloud, as: format)
         }.value

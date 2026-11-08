@@ -28,6 +28,13 @@ kernel void projectGaussians(
     const bool useColorOverride = view.modeInfo.y != 0u;
 
     float3 pw = float3(positions[3 * gid], positions[3 * gid + 1], positions[3 * gid + 2]);
+    // Viewer crop (off for training and every export path that does not set it): Gaussians whose centre lies
+    // outside the box are culled, the same as the splats behind the near plane.
+    if (view.cropCentre.w > 0.5f) {
+        float3 offset = pw - view.cropCentre.xyz;
+        float3 local = float3(dot(view.cropRow0.xyz, offset), dot(view.cropRow1.xyz, offset), dot(view.cropRow2.xyz, offset));
+        if (any(fabs(local) > view.cropHalfExtents.xyz)) return;
+    }
     float3 pc = float3(dot(u.rotRow0.xyz, pw) + u.rotRow0.w,
                        dot(u.rotRow1.xyz, pw) + u.rotRow1.w,
                        dot(u.rotRow2.xyz, pw) + u.rotRow2.w);

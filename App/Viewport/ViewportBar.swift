@@ -13,6 +13,7 @@ struct ViewportBar: View {
             HStack(spacing: 10) {
                 displayControls
                 overlayMenu
+                toolsMenu
                 flyButton
                 frameAllButton
                 cameraMenu
@@ -78,6 +79,42 @@ struct ViewportBar: View {
         .labelStyle(.iconOnly)
         .help("Show or hide the grid, the axes and the cameras")
         .glassEffectID("overlays", in: glass)
+    }
+
+    // MARK: - Tools
+
+    /// Crop box, floor and measuring tools. The tool panel appears beside the viewport while one is active.
+    private var toolsMenu: some View {
+        Menu {
+            Button {
+                model.activeTool = model.activeTool == .crop ? .none : .crop
+            } label: {
+                Label("Crop Box", systemImage: model.activeTool == .crop ? "checkmark" : "crop")
+            }
+            Button {
+                model.activeTool = model.activeTool == .floor ? .none : .floor
+            } label: {
+                Label("Set Floor", systemImage: model.activeTool == .floor ? "checkmark" : "arrow.down.to.line")
+            }
+            Button {
+                model.activeTool = model.activeTool == .measure ? .none : .measure
+            } label: {
+                Label("Measure Distance", systemImage: model.activeTool == .measure ? "checkmark" : "ruler")
+            }
+            if model.activeTool != .none {
+                Divider()
+                Button("Leave Tool") {
+                    model.activeTool = .none
+                }
+            }
+        } label: {
+            Label("Tools", systemImage: "wrench.and.screwdriver")
+        }
+        .menuIndicator(.hidden)
+        .buttonStyle(.glass)
+        .labelStyle(.iconOnly)
+        .help("Crop box, floor and measuring tools. Escape leaves the active tool.")
+        .glassEffectID("tools", in: glass)
     }
 
     // MARK: - Fly mode and framing

@@ -342,9 +342,15 @@ final class ProjectModel {
                             document: Binding<ProjectDocument>,
                             baseIsCheckpoint: Bool) -> ViewerModel {
         editsTargetCheckpoint = baseIsCheckpoint
+        // The scene transform and crop are view settings of the project: stored beside the deletions, never read by
+        // training, and kept when a checkpoint is written.
+        let storedTransform: SceneTransform? = try? ProjectBundle.sceneTransform(contents)
+        let storedCrop: CropBox? = try? ProjectBundle.cropBox(contents)
         let model = ViewerModel(scene: LoadedScene(cloud: cloud, removedNonFinite: 0),
                                 upAxis: UpAxis.forProject(contents.manifest),
-                                cameras: (try? ProjectBundle.cameraPoses(contents, useRefinedPoses: true)) ?? [])
+                                cameras: (try? ProjectBundle.cameraPoses(contents, useRefinedPoses: true)) ?? [],
+                                sceneTransform: storedTransform ?? .identity,
+                                crop: storedCrop)
         // Editing is locked while a run is in progress; `runTraining` unlocks it at the end.
         model.isEditingAllowed = !isTraining
         model.onDeletionsChanged = { [weak self] baseCount, deleted in
@@ -352,6 +358,16 @@ final class ProjectModel {
             document.wrappedValue.contents = ProjectBundle.withDeletions(document.wrappedValue.contents,
                                                                          baseGaussianCount: baseCount,
                                                                          deleted: deleted)
+        }
+        model.onSceneEditsChanged = { transform, box in
+            var updated: ProjectContents = document.wrappedValue.contents
+            do {
+                updated = try ProjectBundle.withSceneTransform(updated, transform)
+                updated = try ProjectBundle.withCropBox(updated, box)
+            } catch {
+                return
+            }
+            document.wrappedValue.contents = updated
         }
         return model
     }

@@ -15,6 +15,8 @@ struct ExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var format: ExportFormat = .ply
     @State private var isWorking = false
+    /// Apply the floor, scale and crop to the export. On by default, so an edited scene exports as it is shown.
+    @State private var applyEdits = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -26,6 +28,10 @@ struct ExportSheet: View {
                 }
             }
             .pickerStyle(.inline)
+            if model.hasSceneEdits {
+                Toggle("Apply scene transform and crop", isOn: $applyEdits)
+                    .help("Export the scene with its floor, scale and crop applied, and without the Gaussians outside the crop box.")
+            }
             if format == .splat {
                 Text("The .splat format keeps only the base colour of each Gaussian. View-dependent colour from the higher-order spherical harmonics is dropped.")
                     .font(.footnote)
@@ -59,7 +65,7 @@ struct ExportSheet: View {
         defer { isWorking = false }
         let data: Data
         do {
-            data = try await model.exportData(format)
+            data = try await model.exportData(format, applyEdits: applyEdits && model.hasSceneEdits)
         } catch {
             onFailure("The scene could not be exported: \(error.localizedDescription)")
             dismiss()

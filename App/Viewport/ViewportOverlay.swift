@@ -35,7 +35,16 @@ struct ViewportOverlayScene {
 extension ViewerModel {
     /// Bounds of the scene, or `nil` when it has no Gaussians.
     var overlayBounds: Bounds? {
-        scene.cloud.count > 0 ? bounds : nil
+        guard scene.cloud.count > 0 else { return nil }
+        // After a rotation (a floor fit) the ground is the plane at height 0 of the up axis, so the grid is drawn
+        // there instead of at the lowest point of the bounds. A scale-only transform keeps the bounds.
+        guard sceneTransform.rotation != SceneTransform.identity.rotation else { return bounds }
+        let upIndex: Int = upAxis == .positiveZ ? 2 : 1
+        var lower: SIMD3<Float> = bounds.min
+        var upper: SIMD3<Float> = bounds.max
+        lower[upIndex] = 0
+        upper[upIndex] = Swift.max(upper[upIndex], 0)
+        return Bounds(min: lower, max: upper)
     }
 
     /// The overlay geometry. It is built on first use after the bounds, the up axis or the cameras changed.
@@ -67,6 +76,8 @@ struct ViewportOverlay: View {
         let activeCamera: Int? = model.activeCameraIndex
         let background: ViewerModel.Background = model.background
         let scene: ViewportOverlayScene = model.viewportOverlayScene
+        // The tool geometry (crop box, floor picks, measured segment) is read here so the overlay follows it.
+        let tools: ToolOverlayState = model.toolOverlayState
 
         Canvas { context, size in
             let width: Int = Int(size.width.rounded())
@@ -98,6 +109,9 @@ struct ViewportOverlay: View {
                     Self.drawNames(into: &context, scene: scene, projection: projection,
                                    eye: camera.eye, viewSize: viewSize, ink: ink)
                 }
+            }
+            if tools.tool != .none {
+                ViewportToolDrawing.draw(tools, into: &context, camera: projection, ink: ink)
             }
         }
         .allowsHitTesting(false)

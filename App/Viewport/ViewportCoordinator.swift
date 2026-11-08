@@ -66,6 +66,21 @@ final class ViewportCoordinator: NSObject, MTKViewDelegate {
         view.onEditCommand = { command in
             model.performEdit(command)
         }
+        view.onToolPress = { point, size in
+            model.toolPress(atViewPoint: point, viewSize: size)
+        }
+        view.onToolDrag = { point, size, shift, option in
+            model.toolDrag(atViewPoint: point, viewSize: size, shift: shift, option: option)
+        }
+        view.onToolRelease = {
+            model.toolRelease()
+        }
+        view.onToolClick = { point, size in
+            model.toolClick(atViewPoint: point, viewSize: size)
+        }
+        view.onToolCancel = {
+            model.activeTool = .none
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {

@@ -29,6 +29,10 @@ struct ViewportView: NSViewRepresentable {
         _ = model.displayColorRevision
         // Edit mode changes how the mouse and the keys are read, so it is part of the update too.
         nsView.isEditing = model.isEditingActive
+        // The viewport tools claim clicks while one is active; the crop handles are read from the model too.
+        _ = model.activeTool
+        _ = model.crop
+        nsView.isToolActive = model.activeTool != .none
         // Fly mode is owned by the model (menu, inspector, Shift + `); the view starts or stops the capture.
         _ = model.isFlying
         nsView.isFlying = model.isFlying
