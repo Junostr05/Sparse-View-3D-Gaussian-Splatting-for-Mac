@@ -82,4 +82,31 @@ struct AntiAliasingTrainerTests {
         print("trainingWithAntiAliasing: mean L1 before \(before), after \(after)")
         #expect(after <= 0.9 * before, "L1 went from \(before) to \(after)")
     }
+
+    /// Regression (crash report 2026-11-08): MCMC growth appends Gaussians, and the sampling rates must follow, or
+    /// the baked snapshot reads past the end of the sampling-rate buffer.
+    @Test func snapshotAfterMCMCGrowthIsFiniteAndCoversEveryGaussian() throws {
+        let context = try MetalContext.makeDefault()
+        let groundTruth = try makeRandomCloud(count: 300, seed: 11, shDegree: 0)
+        let views = try makeViews(context: context, groundTruth: groundTruth,
+                                  cameras: [makeCamera(width: 48, height: 48), makeCamera(width: 48, height: 48, shift: 0.5)])
+        let initial = try makeRandomCloud(count: 150, seed: 97, shDegree: 0)
+        var configuration = antiAliasedConfiguration(iterations: 120)
+        configuration.mcmc.isEnabled = true
+        configuration.mcmc.startIteration = 20
+        configuration.mcmc.interval = 20
+        configuration.mcmc.growthFraction = 0.5
+        configuration.maxGaussians = 600
+
+        let trainer = try GPUTrainer(context: context, dataset: TrainingDataset(views: views),
+                                     initialCloud: initial, configuration: configuration)
+        var lastCount = initial.count
+        for _ in 0..<120 {
+            _ = try trainer.step()
+            let snapshot = try trainer.snapshot()
+            lastCount = snapshot.count
+            #expect(allFinite(snapshot.logScales) && allFinite(snapshot.opacityLogits) && allFinite(snapshot.positions))
+        }
+        #expect(lastCount > initial.count, "MCMC growth did not add Gaussians in this run")
+    }
 }

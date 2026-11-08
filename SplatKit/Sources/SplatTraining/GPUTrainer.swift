@@ -634,6 +634,9 @@ public final class GPUTrainer {
             }
             gradients = try makeGradients()
         }
+        // Relocation moves Gaussians and growth appends new ones, so the anti-aliasing sampling rates (one per
+        // Gaussian) no longer match the store.
+        samplingRatesStale = true
         return result
     }
 
@@ -800,13 +803,20 @@ public final class GPUTrainer {
                          filter3DVariance: aa.filter3DVariance)
     }
 
+    /// True when the sampling-rate buffer holds one rate for every Gaussian of the store. A safety net for any
+    /// code path that changes the Gaussian count without marking the rates stale.
+    private var samplingRatesCoverStore: Bool {
+        guard let buffer = samplingRateBuffer else { return false }
+        return buffer.length >= store.count * MemoryLayout<Float>.size
+    }
+
     /// Recomputes ν when it is stale or when the sampling-rate interval falls on this iteration. The command buffer
     /// is committed here and runs before the forward pass that follows on the same queue, so no wait is needed.
     private func refreshSamplingRatesIfDue(iteration index: Int) throws(TrainingError) {
         guard let kernel = samplingRateKernel else { return }
         let interval = configuration.antiAliasing.samplingRateInterval
         let scheduled = interval > 0 && index % interval == 0
-        guard samplingRatesStale || scheduled else { return }
+        guard samplingRatesStale || scheduled || !samplingRatesCoverStore else { return }
         try encodeSamplingRates(kernel)
     }
 
@@ -835,14 +845,16 @@ public final class GPUTrainer {
         guard configuration.antiAliasing.isEnabled, let kernel = samplingRateKernel else {
             return cloud
         }
-        if samplingRatesStale {
+        if samplingRatesStale || !samplingRatesCoverStore {
             let commandBuffer = try encodeSamplingRates(kernel)
             commandBuffer.waitUntilCompleted()
             if commandBuffer.status == .error {
                 throw .metal(commandBuffer.error?.localizedDescription ?? "unknown GPU error")
             }
         }
-        guard let buffer = samplingRateBuffer, cloud.count > 0 else {
+        guard let buffer = samplingRateBuffer, cloud.count > 0,
+              buffer.length >= cloud.count * MemoryLayout<Float>.size else {
+            // Never read past the sampling-rate buffer (it once was smaller than the cloud and crashed the app).
             return cloud
         }
         let rates = buffer.contents().bindMemory(to: Float.self, capacity: cloud.count)
