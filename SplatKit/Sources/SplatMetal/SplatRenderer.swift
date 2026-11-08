@@ -465,7 +465,9 @@ public final class SplatRenderer {
 
     private func makeMipUniforms(settings: RasterSettings) -> MipFilterUniforms {
         let mip = settings.mipFilter
-        return MipFilterUniforms(info: SIMD4(mip.isEnabled ? 1 : 0, mip.filter3DVariance, 0, 0))
+        // z, w: DropGaussian rate and seed (24 bits, exact in a Float); rate 0 is off.
+        let seed = Float(settings.dropSeed & 0xFF_FFFF)
+        return MipFilterUniforms(info: SIMD4(mip.isEnabled ? 1 : 0, mip.filter3DVariance, settings.dropRate, seed))
     }
 
     /// The sampling-rate buffer when the mip filters are on (an error if it is missing), else any valid buffer,

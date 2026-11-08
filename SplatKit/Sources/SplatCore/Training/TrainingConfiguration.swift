@@ -372,6 +372,31 @@ public struct PoseRefinementSettings: Codable, Sendable, Equatable {
     }
 }
 
+/// DropGaussian-style random dropout (experimental, v1.5 held-out investigation; off by default): in every training
+/// iteration each Gaussian is left out of the forward and backward pass with probability p, and the opacity of the
+/// remaining ones is scaled by 1 / (1 − p). p ramps linearly from 0 to `finalRate` over the run. Evaluation, previews
+/// and exports never drop. `finalRate` 0 leaves every path unchanged. The CPU reference trainer does not implement it.
+public struct GaussianDropoutSettings: Codable, Sendable, Equatable {
+    public var finalRate: Float = 0
+
+    public init() {}
+
+    public var isEnabled: Bool { finalRate > 0 }
+
+    /// Drop probability at `iteration` of a run of `iterations` (linear ramp, clamped to [0, 0.9]).
+    public func rate(iteration: Int, iterations: Int) -> Float {
+        guard finalRate > 0, iterations > 0 else { return 0 }
+        let progress = Float(min(max(iteration, 0), iterations)) / Float(iterations)
+        return min(max(finalRate * progress, 0), 0.9)
+    }
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finalRate = try container.decodeIfPresent(Float.self, forKey: .finalRate) ?? GaussianDropoutSettings().finalRate
+    }
+}
+
 public struct TrainingConfiguration: Codable, Sendable, Equatable {
     /// Revision 1 is Phase 3 (no revision key). Revision 2 is Phase 4 (P14): a manifest
     /// without the key gets the new default regularizer set.
@@ -412,6 +437,9 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var mcmc = MCMCSettings()
     public var antiAliasing = AntiAliasingSettings()
     public var poseRefinement = PoseRefinementSettings()
+    /// Experimental DropGaussian dropout (see `GaussianDropoutSettings`). nil (the default) is off; optional so a
+    /// configuration without it encodes exactly as before (manifest JSON and `OptimizerState.configurationHash`).
+    public var dropout: GaussianDropoutSettings? = nil
     /// Iterations between autosaves of an interrupted run (v1.5). 0 turns autosave off. Not part of the
     /// configuration hash of an optimizer snapshot, so changing it keeps a snapshot usable.
     public var autosaveInterval = 2_000
@@ -486,6 +514,7 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
             ?? defaults.antiAliasing
         poseRefinement = try container.decodeIfPresent(PoseRefinementSettings.self, forKey: .poseRefinement)
             ?? defaults.poseRefinement
+        dropout = try container.decodeIfPresent(GaussianDropoutSettings.self, forKey: .dropout)
         autosaveInterval = try container.decodeIfPresent(Int.self, forKey: .autosaveInterval)
             ?? defaults.autosaveInterval
     }
