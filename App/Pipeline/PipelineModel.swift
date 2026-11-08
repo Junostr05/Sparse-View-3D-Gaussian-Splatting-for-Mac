@@ -326,8 +326,12 @@ final class PipelineModel {
         depthStates[descriptor.id] ?? DepthModelState()
     }
 
-    /// `true` when the depth model of `kind` is installed and verified.
+    /// `true` when the depth model of `kind` is installed and verified. Depth Anything 3 is ready when its
+    /// pose-free package is imported (it is not downloaded from the Depth Model section).
     func isDepthReady(_ kind: DepthEstimatorKind) -> Bool {
+        if kind.needsImportedPackage {
+            return da3PackageURL != nil
+        }
         if case .ready? = depthState(kind.descriptor).status {
             return true
         }

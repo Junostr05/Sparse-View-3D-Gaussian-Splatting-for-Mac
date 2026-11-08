@@ -102,12 +102,17 @@ public nonisolated enum DepthPipeline {
         var recorder: EstimatedDepthRecorder?
         if configuration.isEnabled(.depthPearson), let store {
             do {
-                if let provider = try DepthEstimatorFactory.installed(estimator, in: store) {
+                // Multi-view estimators (Depth Anything 3) run on all views of the dataset together.
+                if let provider = try DepthEstimatorFactory.installed(estimator, in: store, views: dataset.views) {
                     let created = EstimatedDepthRecorder(estimator: provider)
                     recorder = created
                     providers.append(created)
                 } else if cachedMaps.isEmpty {
-                    warnings.append("\(estimator.descriptor.displayName) is not installed. Download it in the Depth Model section.")
+                    if estimator.needsImportedPackage {
+                        warnings.append("\(estimator.descriptor.displayName) is not installed. Import the pose-free model package first.")
+                    } else {
+                        warnings.append("\(estimator.descriptor.displayName) is not installed. Download it in the Depth Model section.")
+                    }
                 }
             } catch {
                 warnings.append("The depth model could not be loaded: \(String(describing: error)).")
@@ -115,11 +120,32 @@ public nonisolated enum DepthPipeline {
         }
         let provider: (any DepthProvider)? = providers.isEmpty ? nil : FirstAvailableDepthProvider(providers)
 
-        let prepared = DepthPreparation.prepare(dataset,
+        var prepared = DepthPreparation.prepare(dataset,
                                                 provider: provider,
                                                 trustMetric: contents.manifest.source == .arkit,
                                                 settings: configuration.depthPrior,
                                                 seed: configuration.seed)
+
+        // v1.5 normal prior: MoGe-2 normals on the views that have a depth prior. Not cached; MoGe runs per run.
+        if configuration.normalPrior.isEnabled && configuration.isEnabled(.depthPearson) {
+            var normalEstimator: MoGeDepthEstimator?
+            if let store {
+                do {
+                    normalEstimator = try MoGeDepthEstimator.installed(in: store, descriptor: ModelCatalog.moge2SmallInt8)
+                } catch {
+                    warnings.append("MoGe-2 could not be loaded for the normal prior: \(String(describing: error)).")
+                }
+            }
+            if let normalEstimator {
+                let withNormals = NormalPreparation.attach(prepared.dataset, provider: normalEstimator)
+                prepared.dataset = withNormals.dataset
+                if withNormals.failed > 0 {
+                    warnings.append("No normal prior for \(withNormals.failed) view(s): MoGe-2 gave no usable normals.")
+                }
+            } else {
+                warnings.append("The normal prior needs MoGe-2. Download it in the Depth Model section.")
+            }
+        }
 
         // Memory cap as in Phase 3, plus the depth buffers (and pseudo-view priors) of this run.
         guard let device = MTLCreateSystemDefaultDevice() else {

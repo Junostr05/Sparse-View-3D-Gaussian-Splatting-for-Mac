@@ -21,13 +21,15 @@ public enum DepthMapError: Error, Equatable {
 /// | 0 | 4 | magic `"SDPT"` |
 /// | 4 | 2 | `UInt16` version, currently 1 |
 /// | 6 | 1 | `UInt8` kind: 0 metric, 1 relative depth, 2 relative inverse depth |
-/// | 7 | 1 | `UInt8` flags: bit 0 confidence plane present, bit 1 estimated by a model |
+/// | 7 | 1 | `UInt8` flags: bit 0 confidence plane present, bit 1 estimated by a model, bit 2 weight plane present |
 /// | 8 | 4 | `UInt32` width, 1...16384 |
 /// | 12 | 4 | `UInt32` height, 1...16384 |
 /// | 16 | 8 | reserved, zero |
 /// | 24 | 4·w·h | `Float32` values, row-major; non-finite or ≤ 0 is invalid |
 /// | after values | w·h | optional `UInt8` confidence (ARKit 0/1/2) |
+/// | after confidence | 4·w·h | optional `Float32` per-pixel loss weights (model confidence, v1.5) |
 ///
+/// Files without bit 2 are unchanged from the original layout.
 /// The file length must match the header exactly.
 public enum DepthMapCodec {
     public static let fileExtension = "sdpt"
@@ -38,6 +40,7 @@ public enum DepthMapCodec {
     static let maximumSide: Int = 16384
     static let confidenceFlag: UInt8 = 1 << 0
     static let estimatedFlag: UInt8 = 1 << 1
+    static let weightsFlag: UInt8 = 1 << 2
 
     /// Serialises `map`. A map whose value count does not match its size is a programming error.
     public static func encode(_ map: DepthMap) -> Data {
@@ -45,6 +48,9 @@ public enum DepthMapCodec {
         precondition(map.values.count == count, "DepthMap values do not match its size")
         if let confidence = map.confidence {
             precondition(confidence.count == count, "DepthMap confidence does not match its size")
+        }
+        if let weights = map.weights {
+            precondition(weights.count == count, "DepthMap weights do not match its size")
         }
 
         var flags: UInt8 = 0
@@ -54,9 +60,12 @@ public enum DepthMapCodec {
         if map.isEstimated {
             flags |= estimatedFlag
         }
+        if map.weights != nil {
+            flags |= weightsFlag
+        }
 
         var bytes: [UInt8] = []
-        let payloadCount: Int = map.confidence == nil ? count * 4 : count * 5
+        let payloadCount: Int = count * 4 + (map.confidence == nil ? 0 : count) + (map.weights == nil ? 0 : count * 4)
         bytes.reserveCapacity(headerSize + payloadCount)
         bytes.append(contentsOf: magic)
         appendUInt16(formatVersion, to: &bytes)
@@ -71,6 +80,11 @@ public enum DepthMapCodec {
         }
         if let confidence = map.confidence {
             bytes.append(contentsOf: confidence)
+        }
+        if let weights = map.weights {
+            for weight in weights {
+                appendUInt32(weight.bitPattern, to: &bytes)
+            }
         }
         return Data(bytes)
     }
@@ -99,6 +113,7 @@ public enum DepthMapCodec {
         let flags: UInt8 = bytes[7]
         let hasConfidence: Bool = flags & confidenceFlag != 0
         let isEstimated: Bool = flags & estimatedFlag != 0
+        let hasWeights: Bool = flags & weightsFlag != 0
 
         let width: Int = Int(readUInt32(bytes, at: 8))
         let height: Int = Int(readUInt32(bytes, at: 12))
@@ -107,7 +122,7 @@ public enum DepthMapCodec {
         }
 
         let count: Int = width * height
-        let expectedLength: Int = headerSize + count * 4 + (hasConfidence ? count : 0)
+        let expectedLength: Int = headerSize + count * 4 + (hasConfidence ? count : 0) + (hasWeights ? count * 4 : 0)
         guard bytes.count == expectedLength else {
             throw .truncated(expected: expectedLength, actual: bytes.count)
         }
@@ -125,8 +140,19 @@ public enum DepthMapCodec {
             confidence = Array(bytes[start..<(start + count)])
         }
 
+        var weights: [Float]? = nil
+        if hasWeights {
+            let start: Int = headerSize + count * 4 + (hasConfidence ? count : 0)
+            var decoded: [Float] = []
+            decoded.reserveCapacity(count)
+            for index in 0..<count {
+                decoded.append(Float(bitPattern: readUInt32(bytes, at: start + index * 4)))
+            }
+            weights = decoded
+        }
+
         return DepthMap(width: width, height: height, kind: kind, values: values,
-                        confidence: confidence, isEstimated: isEstimated)
+                        confidence: confidence, isEstimated: isEstimated, weights: weights)
     }
 
     // MARK: - Byte helpers

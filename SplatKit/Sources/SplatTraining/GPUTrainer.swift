@@ -335,6 +335,31 @@ public final class GPUTrainer {
             let term = DepthLossTerm(loss: depthLoss, priors: priors, weights: depthWeights)
             depthTerm = term
             phase4Terms.append(term)
+
+            // v1.5 normal prior: after the depth term (it adds into the depth gradient the depth term overwrote),
+            // only for views whose depth prior carries normals, and only when switched on.
+            let hasNormals: Bool = dataset.views.contains(where: { $0.depth?.normals != nil })
+            if configuration.normalPrior.isEnabled && hasNormals {
+                let normalLoss = try metalCall { () throws(MetalError) -> GPUNormalLoss in
+                    try GPUNormalLoss(context: context)
+                }
+                var normalPriors: [GPUNormalPrior?] = []
+                normalPriors.reserveCapacity(dataset.views.count)
+                for view in dataset.views {
+                    if let prior = view.depth, let normals = prior.normals {
+                        let uploaded = try metalCall { () throws(MetalError) -> GPUNormalPrior in
+                            try normalLoss.makePrior(normals: normals, width: prior.width, height: prior.height)
+                        }
+                        normalPriors.append(uploaded)
+                    } else {
+                        normalPriors.append(nil)
+                    }
+                }
+                let normalWeights = NormalLossWeights(weight: configuration.normalPrior.weight,
+                                                      alphaMask: configuration.depthPrior.alphaMask,
+                                                      minimumPixels: configuration.depthPrior.minimumPixels)
+                phase4Terms.append(NormalLossTerm(loss: normalLoss, priors: normalPriors, weights: normalWeights))
+            }
         }
         if configuration.isEnabled(.anisotropy) {
             phase4Terms.append(AnisotropyTerm(regularizers: regularizers,

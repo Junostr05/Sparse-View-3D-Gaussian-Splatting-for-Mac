@@ -21,15 +21,20 @@ public struct DepthMap: Sendable, Equatable {
     public var confidence: [UInt8]?
     /// Produced by a model (flags bit 1) rather than measured.
     public var isEstimated: Bool
+    /// Optional per-pixel loss weights, same count as `values` (for example a depth model's own
+    /// confidence, v1.5). Non-negative; larger means more reliable. `nil` means uniform. The scale is
+    /// arbitrary: `DepthPrior` normalises the weights to mean 1.
+    public var weights: [Float]?
 
     public init(width: Int, height: Int, kind: DepthKind, values: [Float],
-                confidence: [UInt8]? = nil, isEstimated: Bool = false) {
+                confidence: [UInt8]? = nil, isEstimated: Bool = false, weights: [Float]? = nil) {
         self.width = width
         self.height = height
         self.kind = kind
         self.values = values
         self.confidence = confidence
         self.isEstimated = isEstimated
+        self.weights = weights
     }
 
     /// True when the pixel at `index` has a finite, positive value and, if confidence is
@@ -65,9 +70,19 @@ public struct DepthPrior: Sendable, Equatable {
     public var isMeasuredMetric: Bool
     /// Median of valid `metricDepth` when `isMeasuredMetric`, else 0.
     public var l1Normalizer: Float
+    /// Optional per-pixel weights of the depth loss terms (v1.5 confidence weighting), normalised to
+    /// mean 1 over the pixels with a valid `correlationTarget`. `nil` means every pixel weighs 1, which
+    /// is exactly the unweighted loss.
+    public var weights: [Float]?
+    /// Optional surface-normal prior (v1.5): unit camera-frame normals (OpenCV frame, pointing towards the camera),
+    /// one per pixel; a zero vector means no prior at that pixel. Used by `NormalLoss` when the normal prior is on.
+    public var normals: [SIMD3<Float>]?
 
+    /// `weights` are sanitised (non-finite or negative values become 0) and normalised to mean 1 over
+    /// the pixels with a valid target. Weights that sum to 0 over those pixels are dropped (`nil`).
     public init(width: Int, height: Int, correlationTarget: [Float], domain: DepthDomain,
-                metricDepth: [Float]? = nil, isMeasuredMetric: Bool = false) {
+                metricDepth: [Float]? = nil, isMeasuredMetric: Bool = false, weights: [Float]? = nil,
+                normals: [SIMD3<Float>]? = nil) {
         self.width = width
         self.height = height
         self.correlationTarget = correlationTarget
@@ -75,6 +90,37 @@ public struct DepthPrior: Sendable, Equatable {
         self.metricDepth = metricDepth
         self.isMeasuredMetric = isMeasuredMetric
         self.l1Normalizer = isMeasuredMetric ? DepthPrior.median(of: metricDepth) : 0
+        self.weights = DepthPrior.normalizedWeights(weights, target: correlationTarget)
+        if let normals {
+            precondition(normals.count == correlationTarget.count, "normals must match the pixel count")
+        }
+        self.normals = normals
+    }
+
+    /// Sanitised weights with mean 1 over the valid-target pixels, or nil (see `init`).
+    static func normalizedWeights(_ weights: [Float]?, target: [Float]) -> [Float]? {
+        guard let weights else { return nil }
+        precondition(weights.count == target.count, "depth weights must match the pixel count")
+        var cleaned: [Float] = [Float](repeating: 0, count: weights.count)
+        var sum: Double = 0
+        var validCount: Int = 0
+        for index in 0..<weights.count {
+            let weight: Float = weights[index]
+            let clean: Float = (weight.isFinite && weight > 0) ? weight : 0
+            cleaned[index] = clean
+            let value: Float = target[index]
+            if value.isFinite && value > 0 {
+                sum += Double(clean)
+                validCount += 1
+            }
+        }
+        guard validCount > 0, sum > 0 else { return nil }
+        let scale: Double = Double(validCount) / sum
+        for index in 0..<cleaned.count {
+            let scaled: Double = Double(cleaned[index]) * scale
+            cleaned[index] = Float(scaled)
+        }
+        return cleaned
     }
 
     /// Median of the finite, positive entries; 0 when there are none. For an even count the

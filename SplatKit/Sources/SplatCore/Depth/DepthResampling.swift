@@ -17,7 +17,7 @@ extension DepthMap {
     /// only). Values are bilinear only when all four taps are valid and their max/min ratio is at
     /// most 1.1, which keeps depth edges sharp. Otherwise the value is the valid tap nearest to the
     /// rounded position, falling back to the nearest valid tap (raster order breaks ties), else 0.
-    /// Confidence is taken from the nearest source pixel. Invalid pixels stay invalid.
+    /// Confidence and weights are taken from the nearest source pixel. Invalid pixels stay invalid.
     public func resampled(width targetWidth: Int,
                           height targetHeight: Int,
                           allowAspectChange: Bool = false) throws(DepthResampleError) -> DepthMap {
@@ -40,6 +40,10 @@ extension DepthMap {
         if confidence != nil {
             outputConfidence = [UInt8](repeating: 0, count: outputCount)
         }
+        var outputWeights: [Float]? = nil
+        if weights != nil {
+            outputWeights = [Float](repeating: 0, count: outputCount)
+        }
 
         let scaleX: Double = Double(width) / Double(targetWidth)
         let scaleY: Double = Double(height) / Double(targetHeight)
@@ -53,10 +57,15 @@ extension DepthMap {
                     let nearest: Int = nearestIndex(sourceU: sourceU, sourceV: sourceV)
                     outputConfidence![outputIndex] = confidence[nearest]
                 }
+                if let weights, outputWeights != nil {
+                    let nearest: Int = nearestIndex(sourceU: sourceU, sourceV: sourceV)
+                    outputWeights![outputIndex] = weights[nearest]
+                }
             }
         }
         return DepthMap(width: targetWidth, height: targetHeight, kind: kind,
-                        values: outputValues, confidence: outputConfidence, isEstimated: isEstimated)
+                        values: outputValues, confidence: outputConfidence, isEstimated: isEstimated,
+                        weights: outputWeights)
     }
 
     /// Rotates the map 90° clockwise. The result is `height` wide and `width` high.
@@ -158,6 +167,10 @@ extension DepthMap {
         if confidence != nil {
             outputConfidence = [UInt8](repeating: 0, count: outputCount)
         }
+        var outputWeights: [Float]? = nil
+        if weights != nil {
+            outputWeights = [Float](repeating: 0, count: outputCount)
+        }
 
         for row in 0..<outputHeight {
             for column in 0..<outputWidth {
@@ -178,9 +191,13 @@ extension DepthMap {
                 if let confidence, outputConfidence != nil {
                     outputConfidence![outputIndex] = confidence[sourceIndex]
                 }
+                if let weights, outputWeights != nil {
+                    outputWeights![outputIndex] = weights[sourceIndex]
+                }
             }
         }
         return DepthMap(width: outputWidth, height: outputHeight, kind: kind,
-                        values: outputValues, confidence: outputConfidence, isEstimated: isEstimated)
+                        values: outputValues, confidence: outputConfidence, isEstimated: isEstimated,
+                        weights: outputWeights)
     }
 }

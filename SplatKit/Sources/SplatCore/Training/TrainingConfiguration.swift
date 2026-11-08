@@ -78,6 +78,10 @@ public enum DepthEstimatorKind: String, Codable, Sendable, CaseIterable {
     case depthAnythingV2Small
     /// MoGe-2 ViT-S (MIT). Affine-invariant camera-space depth.
     case moge2Small
+    /// Depth Anything 3 Base (Apache-2.0), the multi-view package of the pose-free pipeline (v1.5). Depth for
+    /// all training views in one pass, consistent across views up to one shared scale, plus a per-pixel
+    /// confidence. Needs the imported Depth Anything 3 package; never the default.
+    case depthAnything3
 }
 
 /// Strengths and gates of the depth prior (Phase 4 P4-P7).
@@ -92,6 +96,9 @@ public struct DepthPriorSettings: Codable, Sendable, Equatable {
     public var startIteration = 0
     public var minimumAlignmentPoints = 8
     public var minimumInlierFraction: Float = 0.3
+    /// v1.5: weight each pixel of the depth loss by the estimator's own confidence (Depth Anything 3 only;
+    /// estimators without a confidence keep uniform weights). Off by default.
+    public var confidenceWeighting: Bool = false
 
     public init() {}
 
@@ -113,6 +120,27 @@ public struct DepthPriorSettings: Codable, Sendable, Equatable {
             ?? defaults.minimumAlignmentPoints
         minimumInlierFraction = try container.decodeIfPresent(Float.self, forKey: .minimumInlierFraction)
             ?? defaults.minimumInlierFraction
+        confidenceWeighting = try container.decodeIfPresent(Bool.self, forKey: .confidenceWeighting)
+            ?? defaults.confidenceWeighting
+    }
+}
+
+/// Surface-normal prior (v1.5): camera-frame normals from MoGe-2 compared with the normals of the rendered depth
+/// (`NormalLoss`). Off by default. Needs the depth prior's depth pass (a view without a depth prior gets no normal
+/// term) and the installed MoGe-2 model.
+public struct NormalPriorSettings: Codable, Sendable, Equatable {
+    public var isEnabled: Bool = false
+    /// λ_n, weight of the mean `1 − cos` over the valid pixels.
+    public var weight: Float = 0.05
+
+    public init() {}
+
+    /// Every key is optional; missing keys fall back to the defaults above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = NormalPriorSettings()
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+        weight = try container.decodeIfPresent(Float.self, forKey: .weight) ?? defaults.weight
     }
 }
 
@@ -403,6 +431,8 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     /// Leave-one-out: names of views excluded from training and used for evaluation.
     public var heldOutViews: [String] = []
     public var depthPrior = DepthPriorSettings()
+    /// v1.5 surface-normal prior, off by default.
+    public var normalPrior = NormalPriorSettings()
     public var pseudoViews = PseudoViewSettings()
     public var artifacts = ArtifactRegularizerSettings()
     public var denseInit = DenseInitSettings()
@@ -471,6 +501,8 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
             ?? defaults.heldOutViews
         depthPrior = try container.decodeIfPresent(DepthPriorSettings.self, forKey: .depthPrior)
             ?? defaults.depthPrior
+        normalPrior = try container.decodeIfPresent(NormalPriorSettings.self, forKey: .normalPrior)
+            ?? defaults.normalPrior
         pseudoViews = try container.decodeIfPresent(PseudoViewSettings.self, forKey: .pseudoViews)
             ?? defaults.pseudoViews
         artifacts = try container.decodeIfPresent(ArtifactRegularizerSettings.self, forKey: .artifacts)

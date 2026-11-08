@@ -10,8 +10,24 @@ import SplatCore
     }
 
     @Test func estimatorKindsAreListedInPickerOrder() {
-        #expect(DepthEstimatorKind.allCases == [.depthAnythingV2Small, .moge2Small])
+        #expect(DepthEstimatorKind.allCases == [.depthAnythingV2Small, .moge2Small, .depthAnything3])
         #expect(DepthEstimatorKind.moge2Small.rawValue == "moge2Small")
+        #expect(DepthEstimatorKind.depthAnything3.rawValue == "depthAnything3")
+    }
+
+    @Test func confidenceWeightingIsOffByDefaultAndDecodes() throws {
+        #expect(!DepthPriorSettings().confidenceWeighting)
+        #expect(!TrainingConfiguration().depthPrior.confidenceWeighting)
+        let missing = try JSONDecoder().decode(DepthPriorSettings.self, from: Data("{\"pearsonWeight\": 0.2}".utf8))
+        #expect(!missing.confidenceWeighting)
+        let stored = try JSONDecoder().decode(DepthPriorSettings.self,
+                                              from: Data("{\"estimator\": \"depthAnything3\", \"confidenceWeighting\": true}".utf8))
+        #expect(stored.confidenceWeighting)
+        #expect(stored.estimator == .depthAnything3)
+        var configuration = TrainingConfiguration()
+        configuration.depthPrior.confidenceWeighting = true
+        let decoded = try JSONDecoder().decode(TrainingConfiguration.self, from: try JSONEncoder().encode(configuration))
+        #expect(decoded == configuration)
     }
 
     @Test func missingEstimatorKeyFallsBackToTheDefault() throws {

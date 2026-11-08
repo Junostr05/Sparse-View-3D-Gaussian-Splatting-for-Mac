@@ -30,6 +30,8 @@ public final class MoGeDepthEstimator: DepthProvider, @unchecked Sendable {
 
     static let pointsOutputName: String = "points"
     static let maskOutputName: String = "mask"
+    /// Optional per-pixel surface normal output (v1.5 normal prior).
+    static let normalOutputName: String = "normal"
     /// Number of channels the model takes (RGB).
     static let channelCount: Int = 3
 
@@ -77,8 +79,17 @@ public final class MoGeDepthEstimator: DepthProvider, @unchecked Sendable {
         return try MoGeDepthEstimator(packageURL: packageURL)
     }
 
-    /// Depth for one view, in the view's own orientation, resampled to the view's aspect ratio.
-    public func depthMap(for view: TrainingView) throws -> DepthMap? {
+    /// Raw model outputs of one view: values in the model frame (rotated clockwise for a portrait view).
+    struct Prediction {
+        var points: [Float]
+        var mask: [Float]
+        /// Row-major (x, y, z) normals, nil when the model has no `normal` output.
+        var normals: [Float]?
+        var isPortrait: Bool
+    }
+
+    /// Runs the model on one view. Portrait views are rotated clockwise first.
+    func predict(_ view: TrainingView) throws(MonocularDepthError) -> Prediction {
         let image: RGBImage = view.image
         let isPortrait: Bool = image.height > image.width
         let oriented: RGBImage = isPortrait ? MonocularDepthImageSupport.rotatedClockwise(image) : image
@@ -116,7 +127,23 @@ public final class MoGeDepthEstimator: DepthProvider, @unchecked Sendable {
             throw MonocularDepthError.unexpectedModelInterface(
                 "outputs have \(pointValues.count) point values and \(maskValues.count) mask values, expected \(pixelCount * 3) and \(pixelCount)")
         }
-        let depthValues: [Float] = MoGeDepthConversion.zChannel(points: pointValues, pixelCount: pixelCount)
+        var normalValues: [Float]? = nil
+        if let normal = result.featureValue(for: MoGeDepthEstimator.normalOutputName)?.multiArrayValue {
+            let values: [Float] = try MoGeDepthConversion.floats(from: normal)
+            if values.count == pixelCount * MoGeDepthEstimator.channelCount {
+                normalValues = values
+            }
+        }
+        return Prediction(points: pointValues, mask: maskValues, normals: normalValues, isPortrait: isPortrait)
+    }
+
+    /// Depth for one view, in the view's own orientation, resampled to the view's aspect ratio.
+    public func depthMap(for view: TrainingView) throws -> DepthMap? {
+        let prediction: Prediction = try predict(view)
+        let pixelCount: Int = inputWidth * inputHeight
+        let maskValues: [Float] = prediction.mask
+        let isPortrait: Bool = prediction.isPortrait
+        let depthValues: [Float] = MoGeDepthConversion.zChannel(points: prediction.points, pixelCount: pixelCount)
 
         var map: DepthMap = try MoGeDepthConversion.depthMap(zValues: depthValues,
                                                              maskValues: maskValues,
@@ -134,6 +161,19 @@ public final class MoGeDepthEstimator: DepthProvider, @unchecked Sendable {
             throw MonocularDepthError.predictionFailed("could not resample the depth map: \(error)")
         }
         return map
+    }
+
+    /// Surface normals for one view (v1.5 normal prior): unit camera-frame normals in the OpenCV frame, pointing
+    /// towards the camera, at the view's own size (`camera.width` × `camera.height`, nearest-neighbour). Pixels with
+    /// `mask` ≤ 0.5 or an unusable normal are zero. Nil when the model has no `normal` output.
+    public func normalMap(for view: TrainingView) throws -> [SIMD3<Float>]? {
+        let prediction: Prediction = try predict(view)
+        guard let raw = prediction.normals else {
+            return nil
+        }
+        return MoGeDepthConversion.viewNormals(raw, mask: prediction.mask, modelWidth: inputWidth,
+                                               modelHeight: inputHeight, isPortrait: prediction.isPortrait,
+                                               viewWidth: view.camera.width, viewHeight: view.camera.height)
     }
 
     /// Size of the output map: the model's long side kept, the short side set by the view's aspect ratio.
@@ -241,6 +281,68 @@ enum MoGeDepthConversion {
         @unknown default:
             throw .unexpectedModelInterface("unsupported output data type \(type.rawValue)")
         }
+    }
+
+    /// Sign applied to MoGe's normals so that they point towards the camera, the convention of `NormalLoss`.
+    /// Measured on the real photos (see docs/DEPTH-PRIOR-EXPERIMENTS.md): MoGe's normals already point towards the
+    /// camera in the OpenCV frame.
+    static let normalSign: Float = 1
+
+    /// Model-frame normals (row-major (x, y, z) triples, `modelWidth` × `modelHeight`) to unit normals at the view
+    /// size in the view's own camera frame.
+    ///
+    /// A portrait view was rotated clockwise for the model, so the image is rotated back counter-clockwise and the
+    /// vectors with it: a model-frame normal (x', y', z) is (y', −x', z) in the view frame. The stretch of the model
+    /// input does not change normals, because it only changes the intrinsics, not the 3D surface. The result is
+    /// nearest-neighbour sampled, so no interpolated normal needs renormalising.
+    static func viewNormals(_ raw: [Float], mask: [Float], modelWidth: Int, modelHeight: Int, isPortrait: Bool,
+                            viewWidth: Int, viewHeight: Int) -> [SIMD3<Float>] {
+        let modelCount: Int = modelWidth * modelHeight
+        precondition(raw.count == modelCount * 3 && mask.count == modelCount, "normals and mask must match the model size")
+        // Unit normals in the model frame, zero where invalid.
+        var model: [SIMD3<Float>] = [SIMD3<Float>](repeating: .zero, count: modelCount)
+        for index in 0..<modelCount where mask[index] > 0.5 {
+            let x: Float = raw[index * 3]
+            let y: Float = raw[index * 3 + 1]
+            let z: Float = raw[index * 3 + 2]
+            let squared: Float = x * x + y * y + z * z
+            guard squared.isFinite, squared > 1e-6 else { continue }
+            let inverse: Float = normalSign / squared.squareRoot()
+            model[index] = SIMD3<Float>(x * inverse, y * inverse, z * inverse)
+        }
+        // Back to the view orientation.
+        var oriented: [SIMD3<Float>] = model
+        var orientedWidth: Int = modelWidth
+        var orientedHeight: Int = modelHeight
+        if isPortrait {
+            orientedWidth = modelHeight
+            orientedHeight = modelWidth
+            oriented = [SIMD3<Float>](repeating: .zero, count: modelCount)
+            for row in 0..<orientedHeight {
+                for column in 0..<orientedWidth {
+                    // Counter-clockwise: output (x, y) takes source (x = W − 1 − y, y = x), as `DepthMap.rotated`.
+                    let sourceColumn: Int = modelWidth - 1 - row
+                    let sourceRow: Int = column
+                    let n: SIMD3<Float> = model[sourceRow * modelWidth + sourceColumn]
+                    oriented[row * orientedWidth + column] = SIMD3<Float>(n.y, -n.x, n.z)
+                }
+            }
+        }
+        // Nearest-neighbour resampling to the view size.
+        guard viewWidth > 0, viewHeight > 0 else { return [] }
+        var output: [SIMD3<Float>] = [SIMD3<Float>](repeating: .zero, count: viewWidth * viewHeight)
+        let scaleX: Double = Double(orientedWidth) / Double(viewWidth)
+        let scaleY: Double = Double(orientedHeight) / Double(viewHeight)
+        for row in 0..<viewHeight {
+            let sourceV: Double = (Double(row) + 0.5) * scaleY - 0.5
+            let sourceRow: Int = min(max(Int(sourceV.rounded()), 0), orientedHeight - 1)
+            for column in 0..<viewWidth {
+                let sourceU: Double = (Double(column) + 0.5) * scaleX - 0.5
+                let sourceColumn: Int = min(max(Int(sourceU.rounded()), 0), orientedWidth - 1)
+                output[row * viewWidth + column] = oriented[sourceRow * orientedWidth + sourceColumn]
+            }
+        }
+        return output
     }
 
     /// The z component of row-major (x, y, z) triples: `pixelCount` values from `points`.

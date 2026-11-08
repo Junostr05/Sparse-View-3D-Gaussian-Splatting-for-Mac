@@ -28,6 +28,31 @@ public enum DepthAnything3Math {
         return (name: "v\(viewCount)_\(height)x\(width)", viewCount: viewCount, height: height, width: width)
     }
 
+    /// Splits `count` views into contiguous groups for multi-view depth (v1.5): one group when
+    /// `count <= maximum`, else `ceil(count / maximum)` groups whose sizes differ by at most one, so no
+    /// group is left with a single view. Every index appears exactly once, in order. Empty for `count <= 0`.
+    ///
+    /// Groups share no anchor views: each view's depth is aligned to the SfM points on its own later, so
+    /// the scale shared within one call is not needed across calls.
+    public static func depthGroups(count: Int, maximum: Int = 16) -> [[Int]] {
+        guard count > 0 else {
+            return []
+        }
+        let limit: Int = max(1, maximum)
+        let groupCount: Int = (count + limit - 1) / limit
+        let base: Int = count / groupCount
+        let remainder: Int = count % groupCount
+        var groups: [[Int]] = []
+        groups.reserveCapacity(groupCount)
+        var start: Int = 0
+        for group in 0..<groupCount {
+            let size: Int = base + (group < remainder ? 1 : 0)
+            groups.append(Array(start..<(start + size)))
+            start += size
+        }
+        return groups
+    }
+
     /// `keep` indices spread evenly over `0..<count`, strictly increasing, including the first and the
     /// last index when `keep >= 2`. Returns all indices when `keep >= count`, and `[]` for empty input.
     public static func evenlySpacedIndices(count: Int, keep: Int) -> [Int] {

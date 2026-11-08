@@ -10,8 +10,12 @@
 //   4. depthFinalizeB   1 thread: σx, σy, ρ, degenerate flag, loss value into the stats slot
 //   5. depthGradient    per pixel (∂L/∂Draw, ∂L/∂A), zero outside the mask
 //
-// Pixel layout: rendered depth is float2 (Draw, A) per pixel, prior target and metric are one float per
-// pixel, row-major W·H. Pixel index idx = y·W + x. All reductions use 16×16 threadgroups.
+// Pixel layout: rendered depth is float2 (Draw, A) per pixel, prior target, metric and weight are one
+// float per pixel, row-major W·H. Pixel index idx = y·W + x. All reductions use 16×16 threadgroups.
+//
+// Per-pixel weights w (v1.5 confidence weighting; all 1 without weights) weight every sum: the means,
+// variances and covariance are divided by W = Σw over the mask instead of n, the L1 sum by W1 = Σw over
+// the measured pixels. With w = 1 the sums and W = n are exact, so the result equals the unweighted loss.
 
 // Mirrors `DepthLossUniforms` in GPUDepthLoss.swift (48 bytes).
 struct DepthLossUniforms {
@@ -20,17 +24,19 @@ struct DepthLossUniforms {
     uint4 size;       // x: width, y: height, z: minimumPixels, w: slot
 };
 
-// Mirrors `DepthPartial` in GPUDepthLoss.swift (32 bytes). One entry per threadgroup.
+// Mirrors `DepthPartial` in GPUDepthLoss.swift (48 bytes). One entry per threadgroup.
 struct DepthPartial {
-    float4 sums;      // pass A: (Σx, Σy, Σ|D−m|, 0); pass B: (Σ(x−μx)², Σ(y−μy)², Σ(x−μx)(y−μy), 0)
+    float4 sums;      // pass A: (Σwx, Σwy, Σw|D−m|, 0); pass B: (Σw(x−μx)², Σw(y−μy)², Σw(x−μx)(y−μy), 0)
     uint4 counts;     // pass A: (n, n1, 0, 0); pass B unused
+    float4 weights;   // pass A: (W = Σw, W1 = Σw over measured pixels, 0, 0); pass B unused
 };
 
-// Mirrors `DepthStats` in GPUDepthLoss.swift (48 bytes). One entry per slot.
+// Mirrors `DepthStats` in GPUDepthLoss.swift (64 bytes). One entry per slot.
 struct DepthStats {
     uint4 counts;     // x: n (valid pixels), y: n1 (measured pixels in the mask), z: degenerate (1/0), w: unused
     float4 means;     // x: μx, y: μy, z: normalised L1 value (0 when not applied), w: unused
     float4 spread;    // x: σx, y: σy, z: ρ (0 when degenerate), w: loss
+    float4 weightSums; // x: W (Σw over the mask), y: W1 (Σw over measured pixels), z, w: unused
 };
 
 // Compensated (Kahan) float accumulation for the single-thread finalizers.
@@ -68,6 +74,7 @@ kernel void depthMomentsA(device const float2* renderedDepth [[buffer(0)]],
                           device const float* metric [[buffer(2)]],
                           device DepthPartial* partials [[buffer(3)]],
                           constant DepthLossUniforms& u [[buffer(4)]],
+                          device const float* pixelWeights [[buffer(5)]],
                           uint2 gid [[thread_position_in_grid]],
                           uint2 tgid [[threadgroup_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]],
@@ -80,6 +87,8 @@ kernel void depthMomentsA(device const float2* renderedDepth [[buffer(0)]],
     threadgroup float groupAbs[32];
     threadgroup uint groupN[32];
     threadgroup uint groupN1[32];
+    threadgroup float groupW[32];
+    threadgroup float groupW1[32];
 
     uint w = u.size.x;
     uint h = u.size.y;
@@ -92,20 +101,25 @@ kernel void depthMomentsA(device const float2* renderedDepth [[buffer(0)]],
     float pixelAbs = 0.0f;
     uint pixelN = 0u;
     uint pixelN1 = 0u;
+    float pixelW = 0.0f;
+    float pixelW1 = 0.0f;
     if (inside) {
         uint idx = gid.y * w + gid.x;
         float2 raw = renderedDepth[idx];
         float t = target[idx];
         if (depthMaskPixel(raw, t, u.weights.z)) {
             float d = raw.x / raw.y;
+            float weight = pixelWeights[idx];
             pixelN = 1u;
-            pixelX = depthCorrelationX(d, u.weights.w, inverseDomain);
-            pixelY = t;
+            pixelW = weight;
+            pixelX = weight * depthCorrelationX(d, u.weights.w, inverseDomain);
+            pixelY = weight * t;
             if (l1Applies) {
                 float m = metric[idx];
                 if (m > 0.0f) {
                     pixelN1 = 1u;
-                    pixelAbs = fabs(d - m);
+                    pixelW1 = weight;
+                    pixelAbs = weight * fabs(d - m);
                 }
             }
         }
@@ -116,12 +130,16 @@ kernel void depthMomentsA(device const float2* renderedDepth [[buffer(0)]],
     float simdAbs = simd_sum(pixelAbs);
     uint simdN = simd_sum(pixelN);
     uint simdN1 = simd_sum(pixelN1);
+    float simdW = simd_sum(pixelW);
+    float simdW1 = simd_sum(pixelW1);
     if (lane == 0) {
         groupX[simdIndex] = simdX;
         groupY[simdIndex] = simdY;
         groupAbs[simdIndex] = simdAbs;
         groupN[simdIndex] = simdN;
         groupN1[simdIndex] = simdN1;
+        groupW[simdIndex] = simdW;
+        groupW1[simdIndex] = simdW1;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (localIndex == 0) {
@@ -131,17 +149,22 @@ kernel void depthMomentsA(device const float2* renderedDepth [[buffer(0)]],
         float totalAbs = 0.0f;
         uint totalN = 0u;
         uint totalN1 = 0u;
+        float totalW = 0.0f;
+        float totalW1 = 0.0f;
         for (uint i = 0; i < groups; ++i) {
             totalX += groupX[i];
             totalY += groupY[i];
             totalAbs += groupAbs[i];
             totalN += groupN[i];
             totalN1 += groupN1[i];
+            totalW += groupW[i];
+            totalW1 += groupW1[i];
         }
         uint tilesX = (w + 15u) / 16u;
         uint tgIndex = tgid.y * tilesX + tgid.x;
         partials[tgIndex].sums = float4(totalX, totalY, totalAbs, 0.0f);
         partials[tgIndex].counts = uint4(totalN, totalN1, 0u, 0u);
+        partials[tgIndex].weights = float4(totalW, totalW1, 0.0f, 0.0f);
     }
 }
 
@@ -158,6 +181,8 @@ kernel void depthFinalizeA(device const DepthPartial* partials [[buffer(0)]],
     float sumX = 0.0f, compX = 0.0f;
     float sumY = 0.0f, compY = 0.0f;
     float sumAbs = 0.0f, compAbs = 0.0f;
+    float sumW = 0.0f, compW = 0.0f;
+    float sumW1 = 0.0f, compW1 = 0.0f;
     uint n = 0u;
     uint n1 = 0u;
     for (uint g = 0; g < groups; ++g) {
@@ -165,6 +190,8 @@ kernel void depthFinalizeA(device const DepthPartial* partials [[buffer(0)]],
         depthKahanAdd(sumX, compX, p.sums.x);
         depthKahanAdd(sumY, compY, p.sums.y);
         depthKahanAdd(sumAbs, compAbs, p.sums.z);
+        depthKahanAdd(sumW, compW, p.weights.x);
+        depthKahanAdd(sumW1, compW1, p.weights.y);
         n += p.counts.x;
         n1 += p.counts.y;
     }
@@ -173,13 +200,14 @@ kernel void depthFinalizeA(device const DepthPartial* partials [[buffer(0)]],
     s.counts = uint4(n, n1, 0u, 0u);
     s.means = float4(0.0f, 0.0f, 0.0f, 0.0f);
     s.spread = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (n > 0u) {
-        s.means.x = sumX / float(n);
-        s.means.y = sumY / float(n);
+    s.weightSums = float4(sumW, sumW1, 0.0f, 0.0f);
+    if (n > 0u && sumW > 0.0f) {
+        s.means.x = sumX / sumW;
+        s.means.y = sumY / sumW;
     }
     float l1Value = 0.0f;
-    if (u.extra.z > 0.5f && n1 > 0u && u.extra.x > 0.0f) {
-        l1Value = sumAbs / float(n1) / u.extra.x;
+    if (u.extra.z > 0.5f && n1 > 0u && sumW1 > 0.0f && u.extra.x > 0.0f) {
+        l1Value = sumAbs / sumW1 / u.extra.x;
     }
     s.means.z = l1Value;
     stats[0] = s;
@@ -191,6 +219,7 @@ kernel void depthMomentsB(device const float2* renderedDepth [[buffer(0)]],
                           device const DepthStats* stats [[buffer(2)]],
                           device DepthPartial* partials [[buffer(3)]],
                           constant DepthLossUniforms& u [[buffer(4)]],
+                          device const float* pixelWeights [[buffer(5)]],
                           uint2 gid [[thread_position_in_grid]],
                           uint2 tgid [[threadgroup_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]],
@@ -220,9 +249,10 @@ kernel void depthMomentsB(device const float2* renderedDepth [[buffer(0)]],
             float d = raw.x / raw.y;
             float dx = depthCorrelationX(d, u.weights.w, inverseDomain) - meanX;
             float dy = t - meanY;
-            pixelXX = dx * dx;
-            pixelYY = dy * dy;
-            pixelXY = dx * dy;
+            float weight = pixelWeights[idx];
+            pixelXX = weight * (dx * dx);
+            pixelYY = weight * (dy * dy);
+            pixelXY = weight * (dx * dy);
         }
     }
 
@@ -249,6 +279,7 @@ kernel void depthMomentsB(device const float2* renderedDepth [[buffer(0)]],
         uint tgIndex = tgid.y * tilesX + tgid.x;
         partials[tgIndex].sums = float4(totalXX, totalYY, totalXY, 0.0f);
         partials[tgIndex].counts = uint4(0u, 0u, 0u, 0u);
+        partials[tgIndex].weights = float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 }
 
@@ -275,7 +306,7 @@ kernel void depthFinalizeB(device const DepthPartial* partials [[buffer(0)]],
 
     DepthStats s = stats[0];
     uint n = s.counts.x;
-    float nd = float(n);
+    float nd = s.weightSums.x;
     float lambdaP = u.weights.x;
     float lambdaL1 = u.weights.y;
 
@@ -284,7 +315,7 @@ kernel void depthFinalizeB(device const DepthPartial* partials [[buffer(0)]],
     float rho = 0.0f;
     float pearsonTerm = 0.0f;
     bool degenerate = true;
-    if (n > 0u && n >= u.size.z) {
+    if (n > 0u && n >= u.size.z && nd > 0.0f) {
         float varX = sumXX / nd;
         float varY = sumYY / nd;
         float covXY = sumXY / nd;
@@ -313,6 +344,7 @@ kernel void depthGradient(device const float2* renderedDepth [[buffer(0)]],
                           device const DepthStats* stats [[buffer(3)]],
                           device float2* gradient [[buffer(4)]],
                           constant DepthLossUniforms& u [[buffer(5)]],
+                          device const float* pixelWeights [[buffer(6)]],
                           uint2 gid [[thread_position_in_grid]])
 {
     uint w = u.size.x;
@@ -333,23 +365,24 @@ kernel void depthGradient(device const float2* renderedDepth [[buffer(0)]],
         float dxdD = depthCorrelationDX(d, nearPlane, inverseDomain);
 
         DepthStats s = stats[0];
+        float weight = pixelWeights[idx];
         float g = 0.0f;
         if (s.counts.z == 0u) {
-            float nd = float(s.counts.x);
+            float nd = s.weightSums.x;
             float sx = s.spread.x;
             float sy = s.spread.y;
             float rho = s.spread.z;
             float xhat = (x - s.means.x) / sx;
             float yhat = (t - s.means.y) / sy;
-            float dTermDx = -u.weights.x * (yhat - rho * xhat) / (nd * sx);
+            float dTermDx = -u.weights.x * weight * (yhat - rho * xhat) / (nd * sx);
             g = dTermDx * dxdD;
         }
         if (u.extra.z > 0.5f) {
             float m = metric[idx];
-            if (m > 0.0f) {
+            if (m > 0.0f && s.weightSums.y > 0.0f) {
                 float diff = d - m;
                 float sgn = (diff > 0.0f) ? 1.0f : ((diff < 0.0f) ? -1.0f : 0.0f);
-                g += u.weights.y * sgn / (float(s.counts.y) * u.extra.x);
+                g += u.weights.y * weight * sgn / (s.weightSums.y * u.extra.x);
             }
         }
         result = float2(g / raw.y, -g * d / raw.y);

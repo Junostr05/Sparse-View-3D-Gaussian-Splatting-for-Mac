@@ -58,6 +58,11 @@ public struct DepthLossResult: Sendable {
 
 /// CPU reference for the Phase 4 depth prior loss: a Pearson term in the prior's domain plus an
 /// optional L1 term against measured metric depth. Accumulates in `Double`.
+///
+/// With per-pixel weights `w` (`DepthPrior.weights`, v1.5) both terms are weighted: the Pearson
+/// correlation uses weighted means, variances and covariance (`W = Σ w` over the mask), and the L1
+/// term is `Σ w·|D − m| / Σ w` over the measured pixels. Without weights every `w` is 1 and the
+/// result is exactly the unweighted loss.
 public enum DepthLoss {
     public static func evaluate(depth: DepthRender, prior: DepthPrior,
                                 weights: DepthLossWeights) -> DepthLossResult {
@@ -75,6 +80,9 @@ public enum DepthLoss {
                      "prior and depth must have the same pixel count")
         if let metric = prior.metricDepth {
             precondition(metric.count == count, "metric depth must match the pixel count")
+        }
+        if let pixelWeights = prior.weights {
+            precondition(pixelWeights.count == count, "depth weights must match the pixel count")
         }
 
         let near: Double = Double(weights.nearPlane)
@@ -101,10 +109,14 @@ public enum DepthLoss {
         var xs = [Double](repeating: 0, count: n)
         var ys = [Double](repeating: 0, count: n)
         var dxdD = [Double](repeating: 0, count: n)
+        var ws = [Double](repeating: 1, count: n)
         for k in 0..<n {
             let p: Int = maskIndices[k]
             let d: Double = depthValues[p]
             ys[k] = Double(prior.correlationTarget[p])
+            if let pixelWeights = prior.weights {
+                ws[k] = Double(pixelWeights[p])
+            }
             switch prior.domain {
             case .depth:
                 xs[k] = d
@@ -122,13 +134,18 @@ public enum DepthLoss {
         var rho: Double = 0
         var degenerate: Bool = true
 
-        if n > 0 && n >= weights.minimumPixels {
-            let nd: Double = Double(n)
+        var weightSum: Double = 0
+        for k in 0..<n {
+            weightSum += ws[k]
+        }
+
+        if n > 0 && n >= weights.minimumPixels && weightSum > 0 {
+            let nd: Double = weightSum
             var sumX: Double = 0
             var sumY: Double = 0
             for k in 0..<n {
-                sumX += xs[k]
-                sumY += ys[k]
+                sumX += ws[k] * xs[k]
+                sumY += ws[k] * ys[k]
             }
             let mx: Double = sumX / nd
             let my: Double = sumY / nd
@@ -139,9 +156,9 @@ public enum DepthLoss {
             for k in 0..<n {
                 let dx: Double = xs[k] - mx
                 let dy: Double = ys[k] - my
-                varX += dx * dx
-                varY += dy * dy
-                covXY += dx * dy
+                varX += ws[k] * (dx * dx)
+                varY += ws[k] * (dy * dy)
+                covXY += ws[k] * (dx * dy)
             }
             varX /= nd
             varY /= nd
@@ -159,7 +176,7 @@ public enum DepthLoss {
                 for k in 0..<n {
                     let xhat: Double = (xs[k] - mx) / sx
                     let yhat: Double = (ys[k] - my) / sy
-                    let dTermDx: Double = -lambdaP * (yhat - r * xhat) / (nd * sx)
+                    let dTermDx: Double = -lambdaP * ws[k] * (yhat - r * xhat) / (nd * sx)
                     gD[k] = dTermDx * dxdD[k]
                 }
             }
@@ -171,14 +188,16 @@ public enum DepthLoss {
         let l1Normalizer: Double = Double(prior.l1Normalizer)
         if prior.isMeasuredMetric, lambdaL1 > 0, l1Normalizer > 0, let metric = prior.metricDepth {
             var n1: Int = 0
+            var weightSum1: Double = 0
             for k in 0..<n {
                 let m: Double = Double(metric[maskIndices[k]])
                 if m > 0 {
                     n1 += 1
+                    weightSum1 += ws[k]
                 }
             }
-            if n1 > 0 {
-                let n1d: Double = Double(n1)
+            if n1 > 0 && weightSum1 > 0 {
+                let n1d: Double = weightSum1
                 var sumAbs: Double = 0
                 for k in 0..<n {
                     let p: Int = maskIndices[k]
@@ -187,9 +206,9 @@ public enum DepthLoss {
                         continue
                     }
                     let diff: Double = depthValues[p] - m
-                    sumAbs += abs(diff)
+                    sumAbs += ws[k] * abs(diff)
                     let sign: Double = signOfDifference(diff)
-                    gD[k] += lambdaL1 * sign / (n1d * l1Normalizer)
+                    gD[k] += lambdaL1 * ws[k] * sign / (n1d * l1Normalizer)
                 }
                 l1Value = sumAbs / n1d / l1Normalizer
                 loss += lambdaL1 * l1Value

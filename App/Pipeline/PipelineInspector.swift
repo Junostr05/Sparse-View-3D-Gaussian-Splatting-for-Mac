@@ -428,6 +428,7 @@ extension DepthEstimatorKind {
         switch self {
         case .depthAnythingV2Small: "Depth Anything V2"
         case .moge2Small: "MoGe-2"
+        case .depthAnything3: "Depth Anything 3 (pose-free package)"
         }
     }
 }
@@ -453,7 +454,13 @@ struct DepthModelSection: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if !pipeline.isDepthReady(selected) {
-                Text("Download the model first to use it for depth.")
+                Text(selected.needsImportedPackage
+                     ? "Needs the pose-free model package. Import it in the Pose-Free Model section first."
+                     : "Download the model first to use it for depth.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if selected.needsImportedPackage {
+                Text("Experimental: uses the pose-free Depth Anything 3 package for multi-view depth.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -468,6 +475,7 @@ struct DepthModelSection: View {
         }
         .task {
             await pipeline.refreshDepthStatus()
+            await pipeline.refreshDA3Package()
         }
     }
 

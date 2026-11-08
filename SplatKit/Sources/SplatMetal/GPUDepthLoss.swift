@@ -33,20 +33,24 @@ struct DepthLossUniforms {
     var size: SIMD4<UInt32>
 }
 
-/// Mirrors `DepthPartial` in `Shaders/Depth.metal` (32 bytes), one per threadgroup.
+/// Mirrors `DepthPartial` in `Shaders/Depth.metal` (48 bytes), one per threadgroup.
 struct DepthPartial {
     var sums: SIMD4<Float>
     var counts: SIMD4<UInt32>
+    /// (Σw over the mask, Σw over measured pixels, 0, 0).
+    var weights: SIMD4<Float>
 }
 
-/// Mirrors `DepthStats` in `Shaders/Depth.metal` (48 bytes), one per slot.
+/// Mirrors `DepthStats` in `Shaders/Depth.metal` (64 bytes), one per slot.
 struct DepthStats {
     var counts: SIMD4<UInt32>
     var means: SIMD4<Float>
     var spread: SIMD4<Float>
+    /// (W, W1, 0, 0): the weight sums the means and the L1 value are divided by.
+    var weightSums: SIMD4<Float>
 }
 
-/// A depth prior uploaded to the GPU: target and metric depth, one Float per pixel.
+/// A depth prior uploaded to the GPU: target, metric depth and per-pixel weight, one Float per pixel.
 /// Created by `GPUDepthLoss.makePrior`.
 public final class GPUDepthPrior {
     public let width: Int
@@ -61,9 +65,11 @@ public final class GPUDepthPrior {
     let metricBuffer: MTLBuffer
     /// True when the prior carries metric depth, which the L1 term needs.
     let hasMetric: Bool
+    /// Per-pixel loss weight (`DepthPrior.weights`), all 1 when the prior has none.
+    let weightBuffer: MTLBuffer
 
     init(width: Int, height: Int, domain: DepthDomain, isMeasuredMetric: Bool, l1Normalizer: Float,
-         targetBuffer: MTLBuffer, metricBuffer: MTLBuffer, hasMetric: Bool) {
+         targetBuffer: MTLBuffer, metricBuffer: MTLBuffer, hasMetric: Bool, weightBuffer: MTLBuffer) {
         self.width = width
         self.height = height
         self.domain = domain
@@ -72,6 +78,7 @@ public final class GPUDepthPrior {
         self.targetBuffer = targetBuffer
         self.metricBuffer = metricBuffer
         self.hasMetric = hasMetric
+        self.weightBuffer = weightBuffer
     }
 }
 
@@ -98,6 +105,24 @@ public final class GPUDepthLoss {
     private let statsBuffer: MTLBuffer
     /// Per-slot grow-only `DepthPartial` scratch, one entry per threadgroup.
     private var partialBuffers: [MTLBuffer?] = [nil, nil]
+    /// Grow-only buffer of ones shared by every prior without weights, so the unweighted path needs no
+    /// extra memory per view. A prior keeps the buffer it was given; growing replaces it for later priors.
+    private var onesBuffer: MTLBuffer?
+
+    /// A buffer of at least `count` ones (`Float`), shared between unweighted priors.
+    private func sharedOnes(count: Int) throws(MetalError) -> MTLBuffer {
+        let length: Int = max(count, 1) * MemoryLayout<Float>.stride
+        if let existing = onesBuffer, existing.length >= length {
+            return existing
+        }
+        let buffer = try context.makeBuffer(length: length)
+        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: max(count, 1))
+        for i in 0..<max(count, 1) {
+            pointer[i] = 1
+        }
+        onesBuffer = buffer
+        return buffer
+    }
 
     public init(context: MetalContext) throws(MetalError) {
         self.context = context
@@ -109,7 +134,8 @@ public final class GPUDepthLoss {
         statsBuffer = try context.makeBuffer(length: Self.slotCount * MemoryLayout<DepthStats>.stride)
     }
 
-    /// Uploads the prior's target and metric depth. Metric depth is zero-filled when absent.
+    /// Uploads the prior's target, metric depth and weights. Metric depth is zero-filled when absent,
+    /// weights are one-filled (the unweighted loss).
     public func makePrior(_ prior: DepthPrior) throws(MetalError) -> GPUDepthPrior {
         let count: Int = prior.width * prior.height
         precondition(prior.correlationTarget.count == count, "prior target must match its size")
@@ -134,11 +160,23 @@ public final class GPUDepthLoss {
             }
         }
 
+        let weightBuffer: MTLBuffer
+        if let weights = prior.weights {
+            precondition(weights.count == count, "depth weights must match the pixel count")
+            weightBuffer = try context.makeBuffer(length: count * floatStride)
+            let weightPointer = weightBuffer.contents().bindMemory(to: Float.self, capacity: max(count, 1))
+            for i in 0..<count {
+                weightPointer[i] = weights[i]
+            }
+        } else {
+            weightBuffer = try sharedOnes(count: count)
+        }
+
         return GPUDepthPrior(width: prior.width, height: prior.height, domain: prior.domain,
                              isMeasuredMetric: prior.isMeasuredMetric,
                              l1Normalizer: prior.l1Normalizer,
                              targetBuffer: targetBuffer, metricBuffer: metricBuffer,
-                             hasMetric: prior.metricDepth != nil)
+                             hasMetric: prior.metricDepth != nil, weightBuffer: weightBuffer)
     }
 
     /// Encodes the loss of `renderedDepth` (float2 `(Draw, A)` per pixel) against `prior` into `slot`.
@@ -191,6 +229,7 @@ public final class GPUDepthLoss {
         momentsAEncoder.setBuffer(prior.metricBuffer, offset: 0, index: 2)
         momentsAEncoder.setBuffer(partials, offset: 0, index: 3)
         momentsAEncoder.setBytes(&uniforms, length: uniformLength, index: 4)
+        momentsAEncoder.setBuffer(prior.weightBuffer, offset: 0, index: 5)
         momentsAEncoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: groupSize)
         momentsAEncoder.endEncoding()
 
@@ -211,6 +250,7 @@ public final class GPUDepthLoss {
         momentsBEncoder.setBuffer(statsBuffer, offset: statsOffset, index: 2)
         momentsBEncoder.setBuffer(partials, offset: 0, index: 3)
         momentsBEncoder.setBytes(&uniforms, length: uniformLength, index: 4)
+        momentsBEncoder.setBuffer(prior.weightBuffer, offset: 0, index: 5)
         momentsBEncoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: groupSize)
         momentsBEncoder.endEncoding()
 
@@ -232,6 +272,7 @@ public final class GPUDepthLoss {
         gradientEncoder.setBuffer(statsBuffer, offset: statsOffset, index: 3)
         gradientEncoder.setBuffer(depthGradient, offset: 0, index: 4)
         gradientEncoder.setBytes(&uniforms, length: uniformLength, index: 5)
+        gradientEncoder.setBuffer(prior.weightBuffer, offset: 0, index: 6)
         gradientEncoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1),
                                         threadsPerThreadgroup: groupSize)
         gradientEncoder.endEncoding()

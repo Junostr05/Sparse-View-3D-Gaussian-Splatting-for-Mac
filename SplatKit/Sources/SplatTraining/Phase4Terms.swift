@@ -100,6 +100,38 @@ final class DepthLossTerm: AuxiliaryLoss {
     }
 }
 
+/// Surface-normal prior (v1.5) of a training view, at the `.pixelGradient` stage, encoded after `DepthLossTerm`:
+/// it adds its gradient into the depth gradient that the depth term has just overwritten. Runs only on steps with a
+/// depth pass and for views with normals.
+final class NormalLossTerm: AuxiliaryLoss {
+    let stage: AuxiliaryStage = .pixelGradient
+    private let loss: GPUNormalLoss
+    private let priors: [GPUNormalPrior?]
+    private let weights: NormalLossWeights
+
+    /// - Parameter priors: one entry per dataset view, in dataset order.
+    init(loss: GPUNormalLoss, priors: [GPUNormalPrior?], weights: NormalLossWeights) {
+        self.loss = loss
+        self.priors = priors
+        self.weights = weights
+    }
+
+    func encode(_ context: AuxiliaryContext) throws(TrainingError) {
+        guard let renderedDepth = context.renderedDepth,
+              let depthGradient = context.depthGradient,
+              context.viewIndex < priors.count,
+              let prior = priors[context.viewIndex] else {
+            return
+        }
+        let intrinsics = NormalLossIntrinsics(camera: context.camera)
+        try metalCall { () throws(MetalError) -> Void in
+            try self.loss.encode(renderedDepth: renderedDepth, prior: prior, intrinsics: intrinsics,
+                                 weights: self.weights, depthGradient: depthGradient,
+                                 commandBuffer: context.commandBuffer)
+        }
+    }
+}
+
 /// Anisotropy gradient (Phase 4 P10) on the log-scales, at the `.parameterGradient` stage. Adds into the
 /// gradients of the step, which the backward pass has just overwritten.
 final class AnisotropyTerm: AuxiliaryLoss {

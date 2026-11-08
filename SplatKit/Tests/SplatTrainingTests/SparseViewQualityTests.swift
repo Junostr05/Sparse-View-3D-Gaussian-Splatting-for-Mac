@@ -139,6 +139,20 @@ private func preparedDataset(_ scene: SyntheticScene) -> (dataset: TrainingDatas
     return (result.dataset, result.report)
 }
 
+/// v1.5 normal prior on the synthetic scene: the normals of each view's aligned depth prior (no MoGe here), so the
+/// row checks that the term is harmless when its normals agree with the depth prior.
+private func withDepthPriorNormals(_ dataset: TrainingDataset) -> TrainingDataset {
+    var result: TrainingDataset = dataset
+    for index in result.views.indices {
+        guard let prior = result.views[index].depth, let metric = prior.metricDepth else { continue }
+        let intrinsics = NormalLossIntrinsics(camera: result.views[index].camera)
+        let normals: [SIMD3<Float>] = NormalLoss.normals(depth: metric, width: prior.width, height: prior.height,
+                                                         intrinsics: intrinsics)
+        result.views[index].depth?.normals = normals
+    }
+    return result
+}
+
 /// Extent the trainer uses for the scene (camera centres and SfM points, as `GPUTrainer` estimates it).
 private func sceneExtent(_ scene: SyntheticScene) -> SceneExtent {
     SceneExtent.estimate(cameraCenters: scene.dataset.cameraCenters, points: scene.points.positions)
@@ -391,6 +405,12 @@ private let benchmarkVariants: [BenchmarkVariant] = [
                          configuration.poseRefinement.rotationLearningRate = 2e-5
                          configuration.poseRefinement.translationLearningRate = 1e-4
                      }),
+    // v1.5 normal prior (default off) on top of the "defaults" row; SPLAT_BENCHMARK_ONLY="defaults (" runs both.
+    BenchmarkVariant(name: "defaults (+ normal prior from the depth prior)", denseInit: true, prepared: true,
+                     regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
+                     configure: { (configuration: inout TrainingConfiguration) in
+                         configuration.normalPrior.isEnabled = true
+                     }),
     BenchmarkVariant(name: "ablation: exposure + anti-aliasing", denseInit: true, prepared: true,
                      regularizers: TrainingConfiguration.defaultRegularizers, leaveOneOut: false,
                      configure: { (configuration: inout TrainingConfiguration) in
@@ -498,7 +518,10 @@ struct SparseViewBenchmark {
                 // Early stopping is off in the default configuration, so the leave-one-out rows switch it on.
                 mutableConfiguration.earlyStopping.isEnabled = variant.leaveOneOut
                 let configuration: TrainingConfiguration = mutableConfiguration
-                let dataset: TrainingDataset = variant.prepared ? prepared.dataset : scene.dataset
+                var dataset: TrainingDataset = variant.prepared ? prepared.dataset : scene.dataset
+                if configuration.normalPrior.isEnabled {
+                    dataset = withDepthPriorNormals(dataset)
+                }
                 let budget: Int = configuration.maxGaussians
 
                 let cloud: GaussianCloud

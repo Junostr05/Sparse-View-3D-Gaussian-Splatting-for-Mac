@@ -125,8 +125,11 @@ public enum DepthPreparation {
                                prior: nil)
         }
 
+        // v1.5: the map's own per-pixel weights (model confidence) only when confidence weighting is on.
+        let pixelWeights: [Float]? = settings.confidenceWeighting ? resampled.weights : nil
+
         if map.kind == .metric && trustMetric {
-            return measuredOutcome(resampled)
+            return measuredOutcome(resampled, weights: pixelWeights)
         }
 
         let samples: [(prior: Double, z: Double)] = DepthAlignment.samples(points: points,
@@ -137,18 +140,18 @@ public enum DepthPreparation {
                                          minimumPoints: settings.minimumAlignmentPoints,
                                          minimumInlierFraction: Double(settings.minimumInlierFraction),
                                          seed: seed)
-            return alignedOutcome(resampled, samples: samples, fit: fit)
+            return alignedOutcome(resampled, samples: samples, fit: fit, weights: pixelWeights)
         }
 
         let fit: Result<AlignmentResult, AlignmentFailure> = fitRelative(samples,
                                                                          declaredKind: map.kind,
                                                                          settings: settings,
                                                                          seed: seed)
-        return alignedOutcome(resampled, samples: samples, fit: fit)
+        return alignedOutcome(resampled, samples: samples, fit: fit, weights: pixelWeights)
     }
 
     /// Measured metric depth: invalid pixels become 0 and the L1 term is enabled.
-    private static func measuredOutcome(_ map: DepthMap) -> ViewOutcome {
+    private static func measuredOutcome(_ map: DepthMap, weights: [Float]?) -> ViewOutcome {
         let count: Int = map.values.count
         var metric: [Float] = [Float](repeating: 0, count: count)
         var validCount: Int = 0
@@ -160,7 +163,7 @@ public enum DepthPreparation {
             return ViewOutcome(status: .rejected("measured depth has no valid pixels"), prior: nil)
         }
         let prior = DepthPrior(width: map.width, height: map.height, correlationTarget: metric,
-                               domain: .depth, metricDepth: metric, isMeasuredMetric: true)
+                               domain: .depth, metricDepth: metric, isMeasuredMetric: true, weights: weights)
         return ViewOutcome(status: .measuredMetric, prior: prior)
     }
 
@@ -206,7 +209,8 @@ public enum DepthPreparation {
     /// Builds the status and prior from a fit. Metric depth is set only when the fit succeeded.
     /// The correlation target is always the raw map in the domain of the kind it was fitted as.
     private static func alignedOutcome(_ map: DepthMap, samples: [(prior: Double, z: Double)],
-                                       fit: Result<AlignmentResult, AlignmentFailure>) -> ViewOutcome {
+                                       fit: Result<AlignmentResult, AlignmentFailure>,
+                                       weights: [Float]?) -> ViewOutcome {
         let declaredDomain: DepthDomain = (map.kind == .relativeInverseDepth) ? .inverseDepth : .depth
         switch fit {
         case .success(let alignment):
@@ -214,11 +218,12 @@ public enum DepthPreparation {
             let metric: [Float] = DepthAlignment.metricDepth(map, alignment: alignment, zMax: zMax)
             let domain: DepthDomain = (alignment.fittedKind == .relativeInverseDepth) ? .inverseDepth : .depth
             let prior = DepthPrior(width: map.width, height: map.height, correlationTarget: map.values,
-                                   domain: domain, metricDepth: metric, isMeasuredMetric: false)
+                                   domain: domain, metricDepth: metric, isMeasuredMetric: false,
+                                   weights: weights)
             return ViewOutcome(status: .aligned(alignment), prior: prior)
         case .failure(let failure):
             let prior = DepthPrior(width: map.width, height: map.height, correlationTarget: map.values,
-                                   domain: declaredDomain)
+                                   domain: declaredDomain, weights: weights)
             return ViewOutcome(status: .unaligned(failure), prior: prior)
         }
     }
