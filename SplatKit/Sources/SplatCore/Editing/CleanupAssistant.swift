@@ -33,10 +33,12 @@ public enum CleanupCriterion: String, CaseIterable, Sendable, Identifiable {
             case .high: 0.10
             }
         case .isolated:
+            // Measured on the table scene (held-out photos excluded): at 6× the median the criterion removed real
+            // fine structure (−2.4 dB on the training views, −0.4 dB held-out); at 15× it is neutral.
             switch sensitivity {
-            case .low: 10
-            case .medium: 6
-            case .high: 4
+            case .low: 25
+            case .medium: 15
+            case .high: 10
             }
         case .needle:
             switch sensitivity {

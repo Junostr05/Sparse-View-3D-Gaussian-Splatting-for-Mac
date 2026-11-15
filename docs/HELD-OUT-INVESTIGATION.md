@@ -251,3 +251,32 @@ rising from 23.2 to 36.0 dB and the cloud hits the 1.5 M Gaussian cap. The held-
 
 `cd SplatKit && swift test -c release` on the Mac (Apple M5 Pro), with the dropout change and the new
 `DropoutMetalTests`: every suite passed (59 + 96 + 370 + 43 + 502 tests, 0 failures).
+
+## Addendum: cleanup assistant on the table scene (2026-11-15)
+
+Question: does deleting what the cleanup assistant proposes change the held-out score? Setup: the table scene
+with IMG_9014/9018/9022 excluded from training, 5000 iterations, all defaults (depth model Depth Anything 3 Base),
+350 661 Gaussians. Held-out and training PSNR are classic renders of the trained cloud with the proposal removed.
+The scratch harness is not in the repository.
+
+| variant | removed | held-out dB | held-out SSIM | training dB |
+|---|---|---|---|---|
+| full cloud | 0 | 14.62 | 0.409 | 24.26 |
+| isolation ×6 (old medium), any opacity | 19 671 | 14.23 | 0.392 | 21.84 |
+| isolation ×6, opacity < 0.1 | 11 986 | 14.56 | 0.406 | 23.89 |
+| isolation ×10, any opacity | 3 388 | 14.57 | 0.406 | 23.97 |
+| isolation ×15, any opacity | 1 201 | 14.61 | 0.407 | 24.14 |
+| isolation ×25 / ×40 | 453 / 183 | 14.62 / 14.63 | 0.408 | 24.21 / 24.22 |
+| transparent only (cap-limited) | 52 599 | 14.61 | 0.409 | 24.28 |
+| old default proposal (union, cap-limited) | 52 599 | 14.58 | 0.407 | 24.10 |
+| **new default proposal (union, cap-limited)** | 52 599 | 14.61 | 0.408 | 24.23 |
+| random removal, same count as the new proposal | 52 599 | 14.52 | 0.401 | 23.22 |
+
+Readings:
+* **No held-out gain from cleanup on this scene.** Every variant is within ±0.05 dB of the full cloud or below it.
+  The floaters the heuristic finds do not sit on the held-out views.
+* **Isolation at ×6 removes real fine structure**: −2.4 dB on the training views. The threshold was changed to
+  ×15 (medium), ×25 (low) and ×10 (high). At ×15 the criterion is neutral.
+* **Transparent Gaussians** are invisible, so removing them costs nothing, but they fill the 15 % safety cap.
+* The random control costs −0.10 dB held-out and −1.0 dB on the training views, so the new proposal removes
+  less visible content than random removal of the same size.
