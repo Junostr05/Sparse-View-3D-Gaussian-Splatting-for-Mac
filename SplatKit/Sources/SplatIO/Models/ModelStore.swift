@@ -36,9 +36,13 @@ public struct ModelStore: Sendable {
     static let hashChunkSize: Int = 1 << 20
 
     public let rootDirectory: URL
+    /// Read-only models shipped in the app bundle (`Contents/Resources/Models`), or `nil` when there are none
+    /// (the command-line tool). Used by `availablePackage(for:)` only.
+    public let bundledDirectory: URL?
 
-    public init(rootDirectory: URL) {
+    public init(rootDirectory: URL, bundledDirectory: URL? = nil) {
         self.rootDirectory = rootDirectory
+        self.bundledDirectory = bundledDirectory
     }
 
     /// The version directory of the descriptor.
@@ -217,6 +221,18 @@ public struct ModelStore: Sendable {
         let package = packageURL(for: descriptor)
         let manifest = package.appendingPathComponent("Manifest.json")
         return FileManager.default.fileExists(atPath: manifest.path) ? package : nil
+    }
+
+    /// The package every caller should use: the user's imported copy first, then the copy bundled with the app.
+    /// `nil` when neither exists. This is the one lookup for packages without a download source (Depth Anything 3).
+    public func availablePackage(for descriptor: ModelDescriptor) -> AvailablePackage? {
+        if let imported = importedPackageURL(for: descriptor) {
+            return AvailablePackage(url: imported, isBundled: false)
+        }
+        if let bundled = BundledModels.packageURL(for: descriptor, baseDirectory: bundledDirectory) {
+            return AvailablePackage(url: bundled, isBundled: true)
+        }
+        return nil
     }
 
     /// Streams a file through SHA-256 in 1 MiB chunks and returns the lower-case hex digest.

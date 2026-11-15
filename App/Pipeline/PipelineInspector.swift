@@ -426,6 +426,7 @@ extension DepthEstimatorKind {
     /// Short name for the estimator picker, so it fits the inspector width. The full model name and size are in the rows.
     var pickerTitle: String {
         switch self {
+        case .automatic: "Automatic"
         case .depthAnythingV2Small: "Depth Anything V2"
         case .moge2Small: "MoGe-2"
         case .depthAnything3: "Depth Anything 3 (pose-free package)"
@@ -449,6 +450,11 @@ struct DepthModelSection: View {
             }
             .disabled(isTraining)
             .help("The model that estimates depth for each photo. Its name and size are listed below.")
+            if selected == .automatic {
+                Text("Uses Depth Anything 3 when its package is available (bundled or imported), otherwise Depth Anything V2 Small.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if isTraining {
                 Text("Stop the run to change the depth estimator.")
                     .font(.footnote)
@@ -465,6 +471,9 @@ struct DepthModelSection: View {
                     .foregroundStyle(.secondary)
             }
             Text("Gives depth guidance to projects without depth maps. Used by training when the depth prior is on.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("Depth Anything 3 \u{00A9} ByteDance, Apache-2.0; converted to Core ML and quantised by SparseSplat.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             ForEach(PipelineModel.depthDescriptors, id: \.id) { descriptor in
@@ -588,23 +597,30 @@ struct PoseFreeModelSection: View {
 
     var body: some View {
         let descriptor: ModelDescriptor = PipelineModel.da3Descriptor
+        // A bundled package is part of the app: nothing to import or remove.
+        let isBundled: Bool = pipeline.da3Package?.isBundled ?? false
         Section(isExpanded: isExpanded) {
             LabeledContent(descriptor.displayName, value: statusText)
-            Text("Fallback when Apple Photogrammetry cannot register the photos. It estimates poses without a calibrated camera and is less accurate than Apple Photogrammetry. It is not published yet: convert it with Tools/da3/convert_da3.py and import the package.")
+            Text(isBundled
+                 ? "Bundled with this app. Fallback when Apple Photogrammetry cannot register the photos. It estimates poses without a calibrated camera and is less accurate than Apple Photogrammetry."
+                 : "Fallback when Apple Photogrammetry cannot register the photos. It estimates poses without a calibrated camera and is less accurate than Apple Photogrammetry. It is not published yet: convert it with Tools/da3/convert_da3.py and import the package.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            Button("Import Package\u{2026}") {
-                chooseAndImport()
+            if !isBundled {
+                Button("Import Package\u{2026}") {
+                    chooseAndImport()
+                }
+                .buttonStyle(.bordered)
+                .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
+                .help("Import a converted Depth Anything 3 package (.mlpackage) from disk.")
             }
-            .buttonStyle(.bordered)
-            .disabled(pipeline.isImportingDA3 || pipeline.isEstimating)
-            .help("Import a converted Depth Anything 3 package (.mlpackage) from disk.")
             if pipeline.isEstimating {
                 Text("Wait until the pose estimation finishes.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            if pipeline.da3PackageURL != nil {
+            // Only an imported copy can be removed. Removing it falls back to the bundled package, if any.
+            if pipeline.da3Package != nil, !isBundled {
                 Button("Remove", role: .destructive) {
                     isConfirmingRemoval = true
                 }
@@ -634,7 +650,10 @@ struct PoseFreeModelSection: View {
         if pipeline.isImportingDA3 {
             return "Importing\u{2026}"
         }
-        return pipeline.da3PackageURL == nil ? "Not installed" : "Installed"
+        guard let package = pipeline.da3Package else {
+            return "Not installed"
+        }
+        return package.isBundled ? "Bundled with the app" : "Installed"
     }
 
     /// Opens a panel that accepts both package directories and files, so the `.mlpackage` can be selected.

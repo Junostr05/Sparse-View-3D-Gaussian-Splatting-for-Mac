@@ -24,7 +24,8 @@ struct SparseViewSettingsSection: View {
         let configuration: TrainingConfiguration = contents.manifest.training
         // Supplied maps, or the cache of the selected estimator. Another estimator's cache does not count.
         let depthPrefix: String = ProjectLayout.depthDirectory + "/"
-        let selectedCachePrefix: String = ProjectLayout.estimatedDepthDirectory(for: configuration.depthPrior.estimator) + "/"
+        let selectedEstimator: DepthEstimatorKind = pipeline.resolvedEstimator(configuration.depthPrior.estimator)
+        let selectedCachePrefix: String = ProjectLayout.estimatedDepthDirectory(for: selectedEstimator) + "/"
         let hasDepthMaps: Bool = contents.files.keys.contains { key in
             key.hasPrefix(depthPrefix) && (!key.hasPrefix(depthPrefix + "estimated/") || key.hasPrefix(selectedCachePrefix))
         }
@@ -122,6 +123,11 @@ struct SparseViewSettingsSection: View {
     @ViewBuilder
     private var depthStatusRows: some View {
         if let rows = model.depthStatuses {
+            if let note = model.depthEstimatorNote {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if rows.isEmpty {
                 Text("No images.")
                     .foregroundStyle(.secondary)

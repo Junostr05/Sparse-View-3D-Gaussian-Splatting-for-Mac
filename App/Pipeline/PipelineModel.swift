@@ -80,9 +80,11 @@ nonisolated enum PipelineWork {
                               base: ProjectContents,
                               inputKind: InputKind,
                               preference: PoseMethodPreference,
-                              da3Package: URL?) async -> PoseRun {
+                              da3Package: AvailablePackage?) async -> PoseRun {
         let apple: ApplePhotogrammetryPoseProvider = ApplePhotogrammetryPoseProvider()
-        let depthAnything: DepthAnything3PoseProvider? = da3Package.map { DepthAnything3PoseProvider(packageURL: $0) }
+        let depthAnything: DepthAnything3PoseProvider? = da3Package.map {
+            DepthAnything3PoseProvider(packageURL: $0.url, isBundled: $0.isBundled)
+        }
         var providers: [any PoseProvider] = []
         switch preference {
         case .automatic:
@@ -140,10 +142,11 @@ nonisolated enum PipelineWork {
         try await URLSessionModelDownloader().download(descriptor, to: store, progress: progress)
     }
 
-    /// The imported package of `descriptor`, if one is stored. Checks files, hence off the main actor.
+    /// The package of `descriptor` the app uses: the imported copy, else the one bundled with the app. Checks files,
+    /// hence off the main actor.
     @concurrent
-    static func importedPackage(store: ModelStore, descriptor: ModelDescriptor) async -> URL? {
-        store.importedPackageURL(for: descriptor)
+    static func availablePackage(store: ModelStore, descriptor: ModelDescriptor) async -> AvailablePackage? {
+        store.availablePackage(for: descriptor)
     }
 
     /// Copies a user-chosen package into the store. The security scope of `url` is held for the copy.
@@ -249,7 +252,7 @@ final class PipelineModel {
     static let defaultSampleInterval: Double = 0.25
     /// The downloadable depth models, one per estimator, in the order the Depth Model section lists them.
     static let depthDescriptors: [ModelDescriptor] = ModelCatalog.all.filter { descriptor in
-        DepthEstimatorKind.allCases.contains { $0.descriptor.id == descriptor.id }
+        DepthEstimatorKind.allCases.contains { $0 != .automatic && $0.descriptor.id == descriptor.id }
     }
     static let da3Descriptor: ModelDescriptor = ModelDescriptor.depthAnything3Base
     /// `UserDefaults` key of the pose method preference.
@@ -277,8 +280,12 @@ final class PipelineModel {
 
     /// The method the user picked. Kept even while its model is missing.
     private(set) var poseMethodPreference: PoseMethodPreference
-    /// The installed Depth Anything 3 package, or `nil` when none is imported.
-    private(set) var da3PackageURL: URL?
+    /// The Depth Anything 3 package in use: the imported copy, else the copy bundled with the app. `nil` when neither.
+    private(set) var da3Package: AvailablePackage?
+    /// The URL of `da3Package`, for the views that only need to know whether a package exists.
+    var da3PackageURL: URL? {
+        da3Package?.url
+    }
     private(set) var isImportingDA3: Bool = false
     private(set) var da3Error: String?
 
@@ -326,11 +333,21 @@ final class PipelineModel {
         depthStates[descriptor.id] ?? DepthModelState()
     }
 
+    /// The estimator that runs for `kind`: automatic becomes Depth Anything 3 when its package is available, else
+    /// Depth Anything V2 Small. Other kinds are returned unchanged.
+    func resolvedEstimator(_ kind: DepthEstimatorKind) -> DepthEstimatorKind {
+        kind.resolved(isDepthAnything3Available: da3Package != nil)
+    }
+
     /// `true` when the depth model of `kind` is installed and verified. Depth Anything 3 is ready when its
-    /// pose-free package is imported (it is not downloaded from the Depth Model section).
+    /// pose-free package is available (bundled or imported; it is not downloaded from the Depth Model section).
+    /// Automatic is ready when the estimator it resolves to is.
     func isDepthReady(_ kind: DepthEstimatorKind) -> Bool {
+        if kind == .automatic {
+            return isDepthReady(resolvedEstimator(kind))
+        }
         if kind.needsImportedPackage {
-            return da3PackageURL != nil
+            return da3Package != nil
         }
         if case .ready? = depthState(kind.descriptor).status {
             return true
@@ -338,9 +355,9 @@ final class PipelineModel {
         return false
     }
 
-    /// `true` when any depth model is installed. The pipeline step list reads it.
+    /// `true` when any depth model is installed. The pipeline step list reads it. Automatic is not a model of its own.
     var anyDepthModelReady: Bool {
-        DepthEstimatorKind.allCases.contains { isDepthReady($0) }
+        DepthEstimatorKind.allCases.contains { $0 != .automatic && isDepthReady($0) }
     }
 
     /// `true` while any depth model downloads.
@@ -519,7 +536,7 @@ final class PipelineModel {
         let selected: [Int] = plan.selectedInOrder
         let base: ProjectContents = document.wrappedValue.contents
         let preference: PoseMethodPreference = poseMethodPreference
-        let da3Package: URL? = da3PackageURL
+        let depthAnything3Package: AvailablePackage? = da3Package
         let gen: Int = beginGeneration()
         estimationFailed = false
         errorMessage = nil
@@ -555,7 +572,7 @@ final class PipelineModel {
                                                                     base: base,
                                                                     inputKind: inputKind,
                                                                     preference: preference,
-                                                                    da3Package: da3Package)
+                                                                    da3Package: depthAnything3Package)
                 guard gen == self.generation else { return }
                 self.finishEstimate(run, document: document, project: project)
             } catch {
@@ -663,13 +680,13 @@ final class PipelineModel {
         UserDefaults.standard.set(preference.rawValue, forKey: Self.poseMethodDefaultsKey)
     }
 
-    /// Reads the Depth Anything 3 package state from the store.
+    /// Reads the Depth Anything 3 package state from the store: the imported copy, else the bundled one.
     func refreshDA3Package() async {
         guard let store = modelStore else {
-            da3PackageURL = nil
+            da3Package = nil
             return
         }
-        da3PackageURL = await PipelineWork.importedPackage(store: store, descriptor: Self.da3Descriptor)
+        da3Package = await PipelineWork.availablePackage(store: store, descriptor: Self.da3Descriptor)
     }
 
     /// Copies a converted Depth Anything 3 package into the store, replacing any earlier one.
@@ -861,7 +878,8 @@ final class PipelineModel {
         return preference
     }
 
-    /// `Application Support/SparseSplat/Models` inside the app container.
+    /// `Application Support/SparseSplat/Models` inside the app container. Models bundled with the app are read from
+    /// `Contents/Resources/Models` of the bundle.
     static func makeModelStore() -> ModelStore? {
         guard let support = try? FileManager.default.url(for: .applicationSupportDirectory,
                                                          in: .userDomainMask,
@@ -872,6 +890,7 @@ final class PipelineModel {
         let root: URL = support
             .appending(path: "SparseSplat", directoryHint: .isDirectory)
             .appending(path: "Models", directoryHint: .isDirectory)
-        return ModelStore(rootDirectory: root)
+        let bundled: URL? = Bundle.main.resourceURL?.appending(path: "Models", directoryHint: .isDirectory)
+        return ModelStore(rootDirectory: root, bundledDirectory: bundled)
     }
 }

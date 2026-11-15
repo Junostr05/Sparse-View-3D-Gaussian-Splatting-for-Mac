@@ -21,12 +21,15 @@ public struct DepthAnything3PoseProvider: PoseProvider {
     public let packageURL: URL
     /// Upper bound on the returned points, spread evenly over the back-projected points.
     public let maximumPoints: Int
+    /// `true` when the package is bundled with the app (read-only; compiled into the caches).
+    public let isBundled: Bool
 
     private let models: DepthAnything3ModelCache
 
-    public init(packageURL: URL, maximumPoints: Int = 20_000) {
+    public init(packageURL: URL, maximumPoints: Int = 20_000, isBundled: Bool = false) {
         self.packageURL = packageURL
         self.maximumPoints = maximumPoints
+        self.isBundled = isBundled
         self.models = DepthAnything3ModelCache()
     }
 
@@ -40,12 +43,14 @@ public struct DepthAnything3PoseProvider: PoseProvider {
 
         let packageURL: URL = self.packageURL
         let maximumPoints: Int = self.maximumPoints
+        let isBundled: Bool = self.isBundled
         let models: DepthAnything3ModelCache = self.models
         let work: Task<Result<PoseEstimationResult, PoseEstimationFailure>, Never> = Task.detached(priority: .userInitiated) {
             () -> Result<PoseEstimationResult, PoseEstimationFailure> in
             do throws(PoseEstimationFailure) {
                 let result: PoseEstimationResult = try DepthAnything3Inference.estimate(frames: frames,
                                                                                         packageURL: packageURL,
+                                                                                        isBundled: isBundled,
                                                                                         maximumPoints: maximumPoints,
                                                                                         models: models)
                 return .success(result)
@@ -69,8 +74,8 @@ final class DepthAnything3ModelCache: @unchecked Sendable {
     private var models: [String: MLModel] = [:]
 
     /// Returns the loaded function, loading it on first use. Loading goes through the compiled-model cache
-    /// next to the package. Failures are reported as `.unavailable`.
-    func model(packageURL: URL, functionName: String) throws(PoseEstimationFailure) -> MLModel {
+    /// next to the package (or, for a bundled package, the caches folder). Failures are reported as `.unavailable`.
+    func model(packageURL: URL, functionName: String, isBundled: Bool) throws(PoseEstimationFailure) -> MLModel {
         lock.lock()
         defer { lock.unlock() }
         if let cached: MLModel = models[functionName] {
@@ -81,7 +86,9 @@ final class DepthAnything3ModelCache: @unchecked Sendable {
         configuration.functionName = functionName
         let loaded: MLModel
         do {
-            loaded = try MonocularDepthEstimator.loadModel(packageURL: packageURL, configuration: configuration)
+            loaded = try MonocularDepthEstimator.loadModel(packageURL: packageURL,
+                                                           configuration: configuration,
+                                                           isBundled: isBundled)
         } catch {
             let reason: String
             switch error {
@@ -121,6 +128,7 @@ enum DepthAnything3Inference {
 
     static func estimate(frames: [CapturedFrame],
                          packageURL: URL,
+                         isBundled: Bool,
                          maximumPoints: Int,
                          models: DepthAnything3ModelCache) throws(PoseEstimationFailure) -> PoseEstimationResult {
         // Orientation is decided by the majority of the input frames, from their headers only.
@@ -155,7 +163,7 @@ enum DepthAnything3Inference {
             views.append(try prepareView(frames[index], width: function.width, height: function.height))
         }
 
-        let model: MLModel = try models.model(packageURL: packageURL, functionName: function.name)
+        let model: MLModel = try models.model(packageURL: packageURL, functionName: function.name, isBundled: isBundled)
         let input: MLMultiArray = try makeInput(views: views,
                                                 viewCount: function.viewCount,
                                                 height: function.height,

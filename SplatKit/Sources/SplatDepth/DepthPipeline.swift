@@ -36,8 +36,10 @@ public nonisolated struct DepthPreparedRun: Sendable {
     /// Maps the monocular model produced in this run, keyed by image name. The project stores them under
     /// `estimator`, so the next run with the same model skips inference.
     public let estimatedMaps: [String: DepthMap]
-    /// The estimator that produced `estimatedMaps`.
+    /// The estimator that produced `estimatedMaps`, after `automatic` was resolved.
     public let estimator: DepthEstimatorKind
+    /// Which estimator the run uses and why, for example "Depth: Depth Anything 3 (automatic)". Shown with the depth status.
+    public let estimatorNote: String
     /// Non-fatal problems: unreadable depth files, a depth model that would not load or is not installed.
     public let warnings: [String]
 }
@@ -78,8 +80,13 @@ public nonisolated enum DepthPipeline {
                                                                      useRefinedPoses: useRefinedPoses)
 
         var warnings: [String] = []
+        // Automatic becomes Depth Anything 3 when its package is available (imported or bundled), else V2 Small.
+        // Everything below uses the resolved kind, so caches and warnings name the estimator that actually runs.
+        let chosen: DepthEstimatorKind = configuration.depthPrior.estimator
+        let depthAnything3Package: AvailablePackage? = store?.availablePackage(for: ModelDescriptor.depthAnything3Base)
+        let estimator: DepthEstimatorKind = chosen.resolved(isDepthAnything3Available: depthAnything3Package != nil)
+        let estimatorNote: String = Self.estimatorNote(chosen: chosen, resolved: estimator, package: depthAnything3Package)
         // Supplied maps and the cache of the chosen estimator only; another estimator's maps are never read.
-        let estimator: DepthEstimatorKind = configuration.depthPrior.estimator
         let sources: DepthSources = ProjectBundle.depthSources(contents, estimator: estimator)
         if !sources.suppliedFailures.isEmpty {
             let names: String = sources.suppliedFailures.keys.sorted().joined(separator: ", ")
@@ -104,6 +111,7 @@ public nonisolated enum DepthPipeline {
             do {
                 // Multi-view estimators (Depth Anything 3) run on all views of the dataset together.
                 if let provider = try DepthEstimatorFactory.installed(estimator, in: store, views: dataset.views) {
+                    // `installed` already picks the imported or the bundled Depth Anything 3 package.
                     let created = EstimatedDepthRecorder(estimator: provider)
                     recorder = created
                     providers.append(created)
@@ -184,8 +192,29 @@ public nonisolated enum DepthPipeline {
             statuses: statuses,
             estimatedMaps: recorder?.maps ?? [:],
             estimator: estimator,
+            estimatorNote: estimatorNote,
             warnings: warnings
         )
+    }
+
+    /// "Depth: Depth Anything 3 (automatic)", naming the resolved estimator. Depth Anything 3 says where its package comes from.
+    static func estimatorNote(chosen: DepthEstimatorKind,
+                              resolved: DepthEstimatorKind,
+                              package: AvailablePackage?) -> String {
+        let name: String
+        switch resolved {
+        case .automatic, .depthAnythingV2Small:
+            name = "Depth Anything V2 Small"
+        case .moge2Small:
+            name = "MoGe-2 Small"
+        case .depthAnything3:
+            if let package {
+                name = package.isBundled ? "Depth Anything 3, bundled" : "Depth Anything 3, imported"
+            } else {
+                name = "Depth Anything 3, not installed"
+            }
+        }
+        return chosen == .automatic ? "Depth: \(name) (automatic)" : "Depth: \(name)"
     }
 
     /// The first cloud the viewport shows, before any run has a preview: the initializer applied to the full

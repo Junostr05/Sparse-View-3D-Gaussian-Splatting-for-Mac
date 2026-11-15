@@ -74,20 +74,32 @@ public enum RegularizerKind: String, Codable, Sendable, CaseIterable {
 /// The monocular depth model that fills in depth for views without a supplied map. The raw value is the
 /// stable id used in storage (for example the per-estimator depth cache directory of a project).
 public enum DepthEstimatorKind: String, Codable, Sendable, CaseIterable {
-    /// Depth Anything V2 Small (Apache-2.0). Relative inverse depth, the default.
+    /// Depth Anything 3 when its package is available (bundled with the app or imported), else Depth Anything V2
+    /// Small. The default. Never runs as a model of its own: `resolved(isDepthAnything3Available:)` picks the kind.
+    case automatic
+    /// Depth Anything V2 Small (Apache-2.0). Relative inverse depth.
     case depthAnythingV2Small
     /// MoGe-2 ViT-S (MIT). Affine-invariant camera-space depth.
     case moge2Small
     /// Depth Anything 3 Base (Apache-2.0), the multi-view package of the pose-free pipeline (v1.5). Depth for
     /// all training views in one pass, consistent across views up to one shared scale, plus a per-pixel
-    /// confidence. Needs the imported Depth Anything 3 package; never the default.
+    /// confidence. Needs the Depth Anything 3 package (bundled or imported); chosen explicitly it is never silently replaced.
     case depthAnything3
+
+    /// The estimator that runs for this choice. `automatic` becomes Depth Anything 3 when its package is available,
+    /// else Depth Anything V2 Small. Every other kind returns itself.
+    public func resolved(isDepthAnything3Available: Bool) -> DepthEstimatorKind {
+        guard self == .automatic else {
+            return self
+        }
+        return isDepthAnything3Available ? .depthAnything3 : .depthAnythingV2Small
+    }
 }
 
 /// Strengths and gates of the depth prior (Phase 4 P4-P7).
 public struct DepthPriorSettings: Codable, Sendable, Equatable {
-    /// Monocular model used for views without a supplied depth map. Depth Anything V2 Small by default.
-    public var estimator: DepthEstimatorKind = .depthAnythingV2Small
+    /// Monocular model used for views without a supplied depth map. Automatic by default (see `DepthEstimatorKind`).
+    public var estimator: DepthEstimatorKind = .automatic
     public var pearsonWeight: Float = 0.05
     public var l1Weight: Float = 0.1
     /// Pixels with rendered opacity below this are excluded from the depth terms.

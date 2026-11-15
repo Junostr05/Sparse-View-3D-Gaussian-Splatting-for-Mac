@@ -24,23 +24,27 @@ import SplatIO
 /// - A view outside the set gets no map (`nil`).
 public final class DepthAnything3DepthEstimator: DepthProvider, Sendable {
     public let packageURL: URL
+    /// `true` when the package is bundled with the app (read-only; compiled into the caches).
+    public let isBundled: Bool
     private let views: [TrainingView]
     private let models: DepthAnything3ModelCache
     /// Maps by view name once the batch has run, or the failure of that run.
     private let state: Mutex<Result<[String: DepthMap], MonocularDepthError>?> = Mutex(nil)
 
-    public init(packageURL: URL, views: [TrainingView]) {
+    public init(packageURL: URL, views: [TrainingView], isBundled: Bool = false) {
         self.packageURL = packageURL
         self.views = views
+        self.isBundled = isBundled
         self.models = DepthAnything3ModelCache()
     }
 
-    /// Builds the estimator from the store when the Depth Anything 3 package is imported, else nil.
+    /// Builds the estimator from the store when a Depth Anything 3 package is available (imported first, then
+    /// bundled with the app), else nil.
     public static func installed(in store: ModelStore, views: [TrainingView]) -> DepthAnything3DepthEstimator? {
-        guard let url = store.importedPackageURL(for: ModelDescriptor.depthAnything3Base) else {
+        guard let package = store.availablePackage(for: ModelDescriptor.depthAnything3Base) else {
             return nil
         }
-        return DepthAnything3DepthEstimator(packageURL: url, views: views)
+        return DepthAnything3DepthEstimator(packageURL: package.url, views: views, isBundled: package.isBundled)
     }
 
     public func depthMap(for view: TrainingView) throws -> DepthMap? {
@@ -103,7 +107,7 @@ public final class DepthAnything3DepthEstimator: DepthProvider, Sendable {
         let depth: [Float]
         let confidence: [Float]
         do throws(PoseEstimationFailure) {
-            let model: MLModel = try models.model(packageURL: packageURL, functionName: function.name)
+            let model: MLModel = try models.model(packageURL: packageURL, functionName: function.name, isBundled: isBundled)
             let input: MLMultiArray = try DepthAnything3Inference.makeInput(views: prepared,
                                                                             viewCount: function.viewCount,
                                                                             height: function.height,

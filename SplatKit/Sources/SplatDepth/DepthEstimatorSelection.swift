@@ -3,9 +3,11 @@ import SplatIO
 
 extension DepthEstimatorKind {
     /// The catalogue entry of the model that backs this estimator.
+    /// Automatic has no model of its own: callers resolve it first (`resolved(isDepthAnything3Available:)`).
+    /// Its descriptor is the fallback model, Depth Anything V2 Small.
     public var descriptor: ModelDescriptor {
         switch self {
-        case .depthAnythingV2Small:
+        case .automatic, .depthAnythingV2Small:
             return ModelCatalog.depthAnythingV2Small
         case .moge2Small:
             return ModelCatalog.moge2SmallInt8
@@ -31,6 +33,10 @@ public enum DepthEstimatorFactory {
                                  in store: ModelStore,
                                  views: [TrainingView] = []) throws(MonocularDepthError) -> (any DepthProvider)? {
         switch kind {
+        case .automatic:
+            // Automatic runs whichever estimator it resolves to, with the same package lookup as the explicit kinds.
+            let depthAnything3Available: Bool = store.availablePackage(for: ModelDescriptor.depthAnything3Base) != nil
+            return try installed(kind.resolved(isDepthAnything3Available: depthAnything3Available), in: store, views: views)
         case .depthAnythingV2Small:
             guard let estimator: MonocularDepthEstimator = try MonocularDepthEstimator.installed(in: store,
                                                                                                 descriptor: kind.descriptor) else {

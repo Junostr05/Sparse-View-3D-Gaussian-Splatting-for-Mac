@@ -128,6 +128,10 @@ enum SparseSplatCLI {
                     return fail(command: "train", message: "the model store could not be opened", json: options.json)
                 }
                 let estimator: DepthEstimatorKind = contents.manifest.training.depthPrior.estimator
+                // Automatic has no model of its own, so a depth model can only be imported for a concrete estimator.
+                guard estimator != .automatic else {
+                    return fail(command: "train", message: "set the depth estimator to a specific model before importing a depth model", json: options.json)
+                }
                 let source: URL = URL(fileURLWithPath: modelPath, isDirectory: true)
                 try store.importPackage(from: source, for: estimator.descriptor)
                 noteLine("Imported depth model from \(modelPath) for \(estimator.rawValue).", json: options.json)
