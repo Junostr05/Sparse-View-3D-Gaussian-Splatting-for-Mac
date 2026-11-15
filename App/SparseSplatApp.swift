@@ -25,7 +25,13 @@ struct SparseSplatApp: App {
         .commands {
             LibraryCommands(store: library)
             PaletteCommands()
+            AcknowledgementsCommands()
         }
+
+        Window("Acknowledgements", id: AcknowledgementsWindow.id) {
+            AcknowledgementsView()
+        }
+        .defaultLaunchBehavior(.suppressed)
 
         // Documents open from the library, Finder or Open. Launching the app never opens them.
         DocumentGroup(newDocument: ProjectDocument()) { file in

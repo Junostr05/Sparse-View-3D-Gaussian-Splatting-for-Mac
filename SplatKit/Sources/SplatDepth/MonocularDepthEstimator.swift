@@ -128,8 +128,13 @@ public final class MonocularDepthEstimator: DepthProvider, @unchecked Sendable {
 
     /// Loads a `.mlpackage` through the compiled-model cache next to it. Shared with the Depth Anything 3
     /// pose provider, which sets `configuration.functionName` for its multi-function package.
+    /// `isBundled` loads a package shipped inside the app bundle through `loadBundledModel`.
     static func loadModel(packageURL: URL,
-                          configuration: MLModelConfiguration) throws(MonocularDepthError) -> MLModel {
+                          configuration: MLModelConfiguration,
+                          isBundled: Bool = false) throws(MonocularDepthError) -> MLModel {
+        if isBundled {
+            return try loadBundledModel(packageURL: packageURL, configuration: configuration)
+        }
         let fileManager: FileManager = FileManager.default
         let cacheURL: URL = compiledCacheURL(for: packageURL)
 
@@ -152,6 +157,65 @@ public final class MonocularDepthEstimator: DepthProvider, @unchecked Sendable {
         do {
             try fileManager.moveItem(at: compiledURL, to: cacheURL)
             loadURL = cacheURL
+        } catch {
+            loadURL = compiledURL
+        }
+
+        do {
+            return try MLModel(contentsOf: loadURL, configuration: configuration)
+        } catch {
+            throw .modelNotFound("could not load \(packageURL.lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
+    /// Loads a package bundled with the app. The bundle is read-only, so the compiled model goes to
+    /// `<Caches>/SparseSplat/Compiled/<id>-<stamp>/` instead of next to the package. `BundledModels.cacheDirectoryName`
+    /// changes with the package's manifest, so a rebuilt package is compiled again. Older directories of the same
+    /// package are removed.
+    static func loadBundledModel(packageURL: URL,
+                                 configuration: MLModelConfiguration) throws(MonocularDepthError) -> MLModel {
+        let fileManager: FileManager = FileManager.default
+        let id: String = packageURL.deletingLastPathComponent().lastPathComponent
+        guard let key: String = BundledModels.cacheDirectoryName(for: packageURL, id: id) else {
+            throw .modelNotFound("cannot read the manifest of \(packageURL.lastPathComponent)")
+        }
+        guard let caches: URL = try? fileManager.url(for: .cachesDirectory,
+                                                     in: .userDomainMask,
+                                                     appropriateFor: nil,
+                                                     create: true) else {
+            throw .modelNotFound("the caches folder is unavailable")
+        }
+        let compiledRoot: URL = caches.appending(path: "SparseSplat/Compiled", directoryHint: .isDirectory)
+        let cacheDirectory: URL = compiledRoot.appending(path: key, directoryHint: .isDirectory)
+        let stem: String = packageURL.deletingPathExtension().lastPathComponent
+        let cachedModel: URL = cacheDirectory.appending(path: stem + ".mlmodelc", directoryHint: .isDirectory)
+
+        // The directory name carries the manifest stamp, so an existing copy is current.
+        if fileManager.fileExists(atPath: cachedModel.path),
+           let cached = try? MLModel(contentsOf: cachedModel, configuration: configuration) {
+            return cached
+        }
+
+        // Remove the copies of other versions of this package and any copy that did not load.
+        if let entries = try? fileManager.contentsOfDirectory(at: compiledRoot, includingPropertiesForKeys: nil) {
+            for entry in entries where entry.lastPathComponent.hasPrefix(id + "-") {
+                try? fileManager.removeItem(at: entry)
+            }
+        }
+
+        let compiledURL: URL
+        do {
+            compiledURL = try MLModel.compileModel(at: packageURL)
+        } catch {
+            throw .modelNotFound("could not compile \(packageURL.lastPathComponent): \(error.localizedDescription)")
+        }
+
+        // Keep the compiled model in the caches. If the move fails, load from the temporary copy.
+        var loadURL: URL = compiledURL
+        do {
+            try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            try fileManager.moveItem(at: compiledURL, to: cachedModel)
+            loadURL = cachedModel
         } catch {
             loadURL = compiledURL
         }

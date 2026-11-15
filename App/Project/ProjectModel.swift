@@ -227,6 +227,8 @@ final class ProjectModel {
     var warningMessage: String?
     /// Depth outcome per image from the last preparation. `nil` until a run has prepared depth.
     private(set) var depthStatuses: [DepthStatusRow]?
+    /// Which depth estimator the last preparation used, for example "Depth: Depth Anything 3, bundled (automatic)".
+    private(set) var depthEstimatorNote: String?
     /// The viewport model. Created from the stored checkpoint, or from the initial cloud of a run.
     private(set) var viewer: ViewerModel?
 
@@ -323,6 +325,7 @@ final class ProjectModel {
         errorMessage = nil
         warningMessage = nil
         depthStatuses = nil
+        depthEstimatorNote = nil
     }
 
     // MARK: - Viewer
@@ -542,6 +545,7 @@ final class ProjectModel {
                                                                       store: PipelineModel.makeModelStore(),
                                                                       useRefinedPoses: useRefinedPoses)
         depthStatuses = depth.statuses
+        depthEstimatorNote = depth.estimatorNote
         warningMessage = depth.warnings.isEmpty ? nil : depth.warnings.joined(separator: " ")
         if !depth.estimatedMaps.isEmpty {
             // Cache the inferred maps in the project under their estimator, so the next run with that model skips it.
