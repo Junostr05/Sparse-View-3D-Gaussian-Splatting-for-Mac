@@ -82,7 +82,7 @@ Guidance for Claude Code when working in this repository.
 ## Licensing (hard rules)
 - Repo is Apache-2.0.
 - **Never port code from `graphdeco-inria/gaussian-splatting`** or its rasterizer (non-commercial license). gsplat (Apache-2.0) is the allowed code reference; implement FSGS/SparseGS-style methods from the papers.
-- Only commercially usable models in the app bundle (Depth Anything V2 Small). Non-commercial models (MASt3R, larger Depth Anything) are optional user downloads, never shipped.
+- Only commercially usable models in the app bundle: Depth Anything V2 Small, and Depth Anything 3 Base (Apache-2.0, bundled only in release DMGs via `make_dmg.sh --bundle-model`, with the licence text and modification notice in `Tools/release/licenses/`). Non-commercial models (MASt3R, Depth Anything 3 Large/Giant/Nested, VGGT-1B) are optional user downloads, never shipped.
 
 ## Git
 - Never commit secrets, datasets, trained scenes (`*.ply`, `*.splat`) or large binaries — keep them out of git.
