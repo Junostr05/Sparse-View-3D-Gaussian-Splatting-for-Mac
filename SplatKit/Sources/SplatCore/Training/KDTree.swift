@@ -97,8 +97,9 @@ public struct KDTree: Sendable {
     private static let leafSize = 8
 
     private let points: [SIMD3<Float>]
-    /// Permutation of point indices; each node's range is contiguous in this array.
-    private let order: [Int]
+    /// Permutation of point indices; each node's range is contiguous in this array. Walking it visits points in tree
+    /// order, so queries made in that order touch the same nodes one after another.
+    let order: [Int]
     /// Node 0 is the root.
     private let nodes: [Node]
 
@@ -163,13 +164,10 @@ public struct KDTree: Sendable {
             axis = 2
         }
 
-        // Order the range by (coordinate on axis, index) and split at the median.
-        order[lower..<upper].sort { a, b in
-            let ca = component(points[a], axis)
-            let cb = component(points[b], axis)
-            return ca < cb || (ca == cb && a < b)
-        }
+        // Place the median (by coordinate on axis, then index) at mid; everything before it is not larger,
+        // everything after it is not smaller. Quickselect is linear per level, so the build is O(n log n) overall.
         let mid = (lower + upper) / 2
+        selectMedian(points: points, order: &order, axis: axis, lower: lower, upper: upper, target: mid)
         let split = component(points[order[mid]], axis)
 
         // Placeholder; children are appended after it and the entry is completed below.
@@ -181,7 +179,105 @@ public struct KDTree: Sendable {
         return nodeIndex
     }
 
+    /// Hoare-partition quickselect on `order[lower..<upper]`: afterwards `order[target]` holds the element that a full
+    /// sort by (coordinate on axis, index) would place there, with smaller-or-equal elements before it and
+    /// larger-or-equal elements after it. The total order (index as tie-break) keeps every partition step well-defined.
+    private static func selectMedian(points: [SIMD3<Float>], order: inout [Int], axis: Int,
+                                     lower: Int, upper: Int, target: Int) {
+        func less(_ a: Int, _ b: Int) -> Bool {
+            let ca = component(points[a], axis)
+            let cb = component(points[b], axis)
+            return ca < cb || (ca == cb && a < b)
+        }
+        var lo = lower
+        var hi = upper - 1
+        while hi > lo {
+            let pivot = order[(lo + hi) / 2]
+            var i = lo
+            var j = hi
+            while i <= j {
+                while less(order[i], pivot) { i += 1 }
+                while less(pivot, order[j]) { j -= 1 }
+                if i <= j {
+                    order.swapAt(i, j)
+                    i += 1
+                    j -= 1
+                }
+            }
+            // Now order[lo...j] is not larger than the pivot and order[i...hi] is not smaller; j < i.
+            if target <= j {
+                hi = j
+            } else if target >= i {
+                lo = i
+            } else {
+                // The target lies between j and i, where the elements equal the pivot: already in place.
+                return
+            }
+        }
+    }
+
     // MARK: - Query
+
+    /// Squared distance from `query` to its k-th nearest point, skipping the point with index `excluded` (-1 skips
+    /// nothing). With fewer than k points available, the squared distance of the farthest available point is returned
+    /// instead. Nil only when no point is available. `scratch` is reused across calls, so a loop over many queries
+    /// allocates nothing; its contents afterwards are unspecified.
+    public func kthNearestSquaredDistance(to query: SIMD3<Float>, k: Int, excluding excluded: Int,
+                                          scratch: inout [Float]) -> Float? {
+        guard k > 0, !points.isEmpty else { return nil }
+        scratch.removeAll(keepingCapacity: true)
+        kthSearch(node: 0, query: query, excluded: excluded, k: k, heap: &scratch)
+        // The heap keeps the largest kept value at its root, so the root is the k-th distance, or the farthest
+        // available point when fewer than k were found.
+        return scratch.first
+    }
+
+    private func kthSearch(node nodeIndex: Int, query: SIMD3<Float>, excluded: Int, k: Int,
+                           heap: inout [Float]) {
+        let node = nodes[nodeIndex]
+        if node.axis < 0 {
+            for position in node.lower..<node.upper {
+                let candidate = order[position]
+                if candidate == excluded { continue }
+                Self.offerToMaxHeap(Self.squaredDistance(points[candidate], query), capacity: k, heap: &heap)
+            }
+            return
+        }
+        let offset = Self.component(query, node.axis) - node.split
+        let nearChild = offset < 0 ? node.left : node.right
+        let farChild = offset < 0 ? node.right : node.left
+        kthSearch(node: nearChild, query: query, excluded: excluded, k: k, heap: &heap)
+        if heap.count < k || offset * offset <= heap[0] {
+            kthSearch(node: farChild, query: query, excluded: excluded, k: k, heap: &heap)
+        }
+    }
+
+    /// Keeps the `capacity` smallest values in a max-heap whose root is the largest kept value.
+    private static func offerToMaxHeap(_ value: Float, capacity: Int, heap: inout [Float]) {
+        if heap.count < capacity {
+            heap.append(value)
+            var child = heap.count - 1
+            while child > 0 {
+                let parent = (child - 1) / 2
+                if heap[parent] >= heap[child] { break }
+                heap.swapAt(parent, child)
+                child = parent
+            }
+        } else if value < heap[0] {
+            heap[0] = value
+            var parent = 0
+            while true {
+                let left = 2 * parent + 1
+                let right = left + 1
+                var largest = parent
+                if left < heap.count && heap[left] > heap[largest] { largest = left }
+                if right < heap.count && heap[right] > heap[largest] { largest = right }
+                if largest == parent { break }
+                heap.swapAt(parent, largest)
+                parent = largest
+            }
+        }
+    }
 
     private func search(node nodeIndex: Int,
                         query: SIMD3<Float>,

@@ -145,6 +145,32 @@ import SplatCore
         }
     }
 
+    @Test func isolationDistancesWithSubsampledReferenceMatchBruteForce() {
+        // Forty points with a reference cap of ten: every fourth point is a neighbour candidate, the others only query.
+        var positions: [SIMD3<Float>] = []
+        var state: UInt32 = 777
+        for _ in 0..<40 {
+            var coords: [Float] = []
+            for _ in 0..<3 {
+                state = state &* 1_664_525 &+ 1_013_904_223
+                coords.append(Float(state >> 8) / Float(1 << 24) * 10)
+            }
+            positions.append(SIMD3<Float>(coords[0], coords[1], coords[2]))
+        }
+        let step: Int = 4
+        let distances = ViewerColors.isolationDistances(positions: positions, k: 3, maxReference: 10)
+        #expect(distances.count == positions.count)
+        for i in 0..<positions.count {
+            var others: [Float] = []
+            for r in stride(from: 0, to: positions.count, by: step) where r != i {
+                let delta: SIMD3<Float> = positions[r] - positions[i]
+                others.append((delta * delta).sum().squareRoot())
+            }
+            others.sort()
+            #expect(abs(distances[i] - others[2]) < 1e-4)
+        }
+    }
+
     @Test func isolationDistancesHandleTinyInputs() {
         #expect(ViewerColors.isolationDistances(positions: []).isEmpty)
         #expect(ViewerColors.isolationDistances(positions: [SIMD3<Float>(1, 2, 3)]) == [0])

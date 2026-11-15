@@ -174,30 +174,31 @@ public enum ViewerColors {
         let n: Int = positions.count
         guard n > 1, k > 0 else { return [Float](repeating: 0, count: n) }
         let step: Int = max(1, (n + maxReference - 1) / maxReference)
-        var referenceIndices: [Int] = []
         var reference: [SIMD3<Float>] = []
-        referenceIndices.reserveCapacity(n / step + 1)
         reference.reserveCapacity(n / step + 1)
         for index in Swift.stride(from: 0, to: n, by: step) {
-            referenceIndices.append(index)
             reference.append(positions[index])
         }
         let tree = KDTree(points: reference)
         var distances: [Float] = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            // One extra candidate, so that the point itself can be dropped when it belongs to the reference set.
-            let candidates: [Int] = tree.nearestNeighbors(to: positions[i], k: k + 1)
-            var kept: Int = 0
-            var last: Float = 0
-            for local in candidates {
-                let global: Int = referenceIndices[local]
-                if global == i { continue }
-                let delta: SIMD3<Float> = positions[global] - positions[i]
-                last = (delta * delta).sum().squareRoot()
-                kept += 1
-                if kept == k { break }
+        var scratch: [Float] = []
+        scratch.reserveCapacity(k)
+        // Reference points are queried in tree order, which keeps consecutive searches on the same nodes. A reference
+        // point is excluded from its own neighbours; the other points (only when subsampled) follow in index order.
+        for reference in tree.order {
+            let i: Int = reference * step
+            if let squared = tree.kthNearestSquaredDistance(to: positions[i], k: k, excluding: reference,
+                                                            scratch: &scratch) {
+                distances[i] = squared.squareRoot()
             }
-            distances[i] = last
+        }
+        if step > 1 {
+            for i in 0..<n where i % step != 0 {
+                if let squared = tree.kthNearestSquaredDistance(to: positions[i], k: k, excluding: -1,
+                                                                scratch: &scratch) {
+                    distances[i] = squared.squareRoot()
+                }
+            }
         }
         return distances
     }
