@@ -1,0 +1,12 @@
+Depth Anything 3 Base (DA3-BASE)
+Copyright (c) ByteDance Ltd. and/or its affiliates
+Licensed under the Apache License, Version 2.0 (see DepthAnything3-LICENSE.txt).
+Original model and code: https://github.com/ByteDance-Seed/Depth-Anything-3
+Original weights: https://huggingface.co/depth-anything/DA3-BASE (license: Apache-2.0)
+
+Modifications made by the SparseSplat project (Apache-2.0 section 4(b)): the network was converted to Core ML
+(multi-function package, one function per view count and image shape) with Tools/da3/convert_da3.py; the weights
+were quantised to int8; bicubic upsampling was replaced by bilinear upsampling, the rotary-position grid and the DPT
+head's UV grid are built from constants, and the reference-view reordering is switched off. The converted package is
+distributed as DepthAnything3BaseQ8.mlpackage inside the SparseSplat application bundle. It is not an official
+release of ByteDance.
