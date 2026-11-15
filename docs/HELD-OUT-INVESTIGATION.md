@@ -280,3 +280,22 @@ Readings:
 * **Transparent Gaussians** are invisible, so removing them costs nothing, but they fill the 15 % safety cap.
 * The random control costs −0.10 dB held-out and −1.0 dB on the training views, so the new proposal removes
   less visible content than random removal of the same size.
+
+## Addendum: Fixer on the held-out renders (2026-11-15, decision 62)
+
+Single-step Fixer (NVIDIA, Cosmos-Predict2 0.6B based) run in a scratch PyTorch port on MPS (DiT fp32, tokenizer bf16
+TorchScript from the checkpoint). Input: the 600×450 held-out render resized to 768×576, output back to 600×450,
+timestep 250, no text condition. Target: the held-out photo at 600×450.
+
+| view | render dB | Fixer dB | Δ | colour-fit render | colour-fit Fixer | Δ |
+|---|---|---|---|---|---|---|
+| IMG_9014 | 14.60 | 15.40 | +0.80 | 16.52 | 16.87 | +0.35 |
+| IMG_9018 | 15.10 | 15.86 | +0.76 | 15.75 | 16.54 | +0.79 |
+| IMG_9022 | 14.36 | 14.14 | −0.22 | 15.23 | 15.08 | −0.15 |
+| mean | 14.69 | 15.13 | +0.45 | 15.83 | 16.17 | +0.33 |
+
+Identity check: Fixer on clean photos changes them by 26–29 dB PSNR, so it is not a no-op on clean input.
+Not run: more views, other timesteps or resolutions. Three views and one run are not enough for a decision on their own.
+
+Not built: the Core ML conversion of the 0.6B DiT ran out of memory on this 24 GB Mac (fp32 and fp16, exit 137)
+after fixing trace, alias, outer-product and dtype problems. Decision 62 keeps Fixer out of 1.6.
