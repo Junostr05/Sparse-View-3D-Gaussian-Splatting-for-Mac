@@ -135,6 +135,9 @@ struct SparseViewSettingsSection: View {
             ForEach(rows) { row in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name)
+                    Text(Self.sourceText(row.source))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     Text(Self.statusText(row.status))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -143,6 +146,18 @@ struct SparseViewSettingsSection: View {
         } else {
             Text("Not checked yet. Depth is checked when training starts.")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Where a view's depth map came from: with the project, or from the depth model.
+    static func sourceText(_ source: DepthMapSource) -> String {
+        switch source {
+        case .supplied:
+            return "Source: supplied depth map (came with the photos)"
+        case .estimated:
+            return "Source: estimated by the depth model"
+        case .none:
+            return "Source: none"
         }
     }
 

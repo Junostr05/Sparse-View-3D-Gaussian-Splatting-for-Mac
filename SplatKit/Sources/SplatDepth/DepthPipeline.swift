@@ -3,16 +3,28 @@ import Synchronization
 import SplatCore
 import SplatIO
 
+/// Where a view's depth map came from in the last preparation.
+public nonisolated enum DepthMapSource: Sendable, Equatable {
+    /// A map that came with the project: a depth file next to the photos, or one imported by hand.
+    case supplied
+    /// A map the depth model produced, either in this run or in an earlier run (its cache).
+    case estimated
+    /// No depth map for this view.
+    case none
+}
+
 /// One image's depth outcome from the last preparation, in dataset order.
 public nonisolated struct DepthStatusRow: Identifiable, Sendable {
     public let name: String
     public let status: ViewDepthStatus
+    public let source: DepthMapSource
 
     public var id: String { name }
 
-    public init(name: String, status: ViewDepthStatus) {
+    public init(name: String, status: ViewDepthStatus, source: DepthMapSource = .none) {
         self.name = name
         self.status = status
+        self.source = source
     }
 }
 
@@ -178,10 +190,24 @@ public nonisolated enum DepthPipeline {
             DenseInitializer.initialize(runDataset, configuration: configuration, maxCount: cap)
         }
 
+        // Where each view's map came from: a supplied map wins over the model, as in the provider order above.
+        let suppliedNames: Set<String> = Set(sources.supplied.keys)
+        var estimatedNames: Set<String> = Set(cachedMaps.keys)
+        if let recorder {
+            estimatedNames.formUnion(recorder.maps.keys)
+        }
         var statuses: [DepthStatusRow] = []
         statuses.reserveCapacity(prepared.dataset.views.count)
         for (index, view) in prepared.dataset.views.enumerated() where index < prepared.report.views.count {
-            statuses.append(DepthStatusRow(name: view.name, status: prepared.report.views[index]))
+            let source: DepthMapSource
+            if suppliedNames.contains(view.name) {
+                source = .supplied
+            } else if estimatedNames.contains(view.name) {
+                source = .estimated
+            } else {
+                source = .none
+            }
+            statuses.append(DepthStatusRow(name: view.name, status: prepared.report.views[index], source: source))
         }
 
         return DepthPreparedRun(
