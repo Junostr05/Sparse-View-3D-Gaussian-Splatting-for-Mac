@@ -165,6 +165,11 @@ struct PipelineInspector: View {
                     Text(scanningText)
                 }
             }
+            if pipeline.photoDepthCount > 0 {
+                Text("Depth maps found for \(pipeline.photoDepthCount) photo\(pipeline.photoDepthCount == 1 ? "" : "s"). They are used automatically.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if pipeline.plan != nil {
                 if case .video = pipeline.source {
                     Picker("Sampling interval", selection: intervalBinding) {

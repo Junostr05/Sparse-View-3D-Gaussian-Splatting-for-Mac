@@ -27,6 +27,21 @@ nonisolated enum PipelineWork {
         }
     }
 
+    /// Reads the `<photo>.sdpt` depth maps next to the photos in the folder, keyed by photo file name.
+    @concurrent
+    static func scanDepthMaps(folder: URL) async throws -> [String: DepthMap] {
+        try ProjectImport.withSecurityScope(folder) { () throws -> [String: DepthMap] in
+            let entries: [URL] = try FileManager.default.contentsOfDirectory(at: folder,
+                                                                             includingPropertiesForKeys: nil,
+                                                                             options: [.skipsHiddenFiles])
+            var files: [(fileName: String, data: Data)] = []
+            for entry in entries where entry.lastPathComponent.hasSuffix(PhotoDepthMatching.suffix) {
+                files.append((fileName: entry.lastPathComponent, data: (try? Data(contentsOf: entry)) ?? Data()))
+            }
+            return PhotoDepthMatching.decodeMaps(files)
+        }
+    }
+
     /// Reads the given image files, as dropped onto the window. Each file's security scope is held for the read only.
     @concurrent
     static func scanPhotos(urls: [URL]) async throws -> [CapturedFrame] {
@@ -290,6 +305,10 @@ final class PipelineModel {
     private(set) var da3Error: String?
 
     @ObservationIgnored private var photoFrames: [CapturedFrame] = []
+    /// Depth maps found next to the imported photos (`<photo>.sdpt`), keyed by photo file name.
+    @ObservationIgnored private var photoDepthMaps: [String: DepthMap] = [:]
+    /// How many photos of the imported folder have a depth map. Shown in the pipeline; the maps are used automatically.
+    private(set) var photoDepthCount: Int = 0
     @ObservationIgnored private var videoCandidates: [VideoCandidate] = []
     @ObservationIgnored private var videoURL: URL?
     /// The video URL when the system granted a security scope. Released by `discard`, or on deinit.
@@ -402,8 +421,12 @@ final class PipelineModel {
         work = Task {
             do {
                 let frames: [CapturedFrame] = try await PipelineWork.scanPhotos(folder: folder)
+                // Depth maps are optional: a folder without them imports as before.
+                let maps: [String: DepthMap] = (try? await PipelineWork.scanDepthMaps(folder: folder)) ?? [:]
                 guard gen == self.generation else { return }
                 self.photoFrames = frames
+                self.photoDepthMaps = maps
+                self.photoDepthCount = maps.count
                 self.adoptCandidates(Self.photoItems(frames))
                 self.isScanning = false
             } catch {
@@ -484,6 +507,8 @@ final class PipelineModel {
         scopedURL = nil
         videoURL = nil
         photoFrames = []
+        photoDepthMaps = [:]
+        photoDepthCount = 0
         videoCandidates = []
         source = nil
         candidates = []
@@ -547,6 +572,7 @@ final class PipelineModel {
             do {
                 let inputKind: InputKind
                 let frames: [CapturedFrame]
+                var depthByFrame: [String: DepthMap] = [:]
                 switch source {
                 case .photos:
                     inputKind = .photos
@@ -555,6 +581,9 @@ final class PipelineModel {
                         picked.append(self.photoFrames[index])
                     }
                     frames = picked
+                    depthByFrame = PhotoDepthMatching.depthByFrame(
+                        frames: picked.map { (name: $0.name, sourceName: $0.sourceName) },
+                        maps: self.photoDepthMaps)
                 case .video:
                     guard let url = self.videoURL else {
                         throw CocoaError(.fileNoSuchFile)
@@ -574,7 +603,7 @@ final class PipelineModel {
                                                                     preference: preference,
                                                                     da3Package: depthAnything3Package)
                 guard gen == self.generation else { return }
-                self.finishEstimate(run, document: document, project: project)
+                self.finishEstimate(run, depth: depthByFrame, document: document, project: project)
             } catch {
                 guard gen == self.generation else { return }
                 self.isEstimating = false
@@ -585,10 +614,13 @@ final class PipelineModel {
         }
     }
 
-    private func finishEstimate(_ run: PoseRun, document: Binding<ProjectDocument>, project: ProjectModel) {
+    private func finishEstimate(_ run: PoseRun, depth: [String: DepthMap],
+                                document: Binding<ProjectDocument>, project: ProjectModel) {
         switch run {
         case .imported(let contents, let summary):
-            project.adopt(contents, into: document)
+            // The depth maps of the photos go into the project next to their images, as `depth/<image>.sdpt`.
+            let updated: ProjectContents = depth.isEmpty ? contents : ProjectBundle.withDepthMaps(contents, depth)
+            project.adopt(updated, into: document)
             discard()
             poseSummary = summary
         case .failed(let message):
