@@ -14,6 +14,7 @@ struct TrainingSection: View {
         Section("Training") {
             presetPicker
             resolutionControl
+            focusControl
             trainingControls
             if model.isContinuing {
                 LabeledContent("Round", value: "\(model.round)")
@@ -108,6 +109,44 @@ struct TrainingSection: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// Focus on the object: train only the cylinder the camera poses point at. On by default; the size scales the cylinder.
+    private var focusControl: some View {
+        let settings: ObjectRegionSettings = document.wrappedValue.contents.manifest.training.effectiveObjectRegion
+        return VStack(alignment: .leading, spacing: 4) {
+            Toggle("Focus on the object", isOn: focusBinding)
+                .disabled(model.isTraining)
+                .help("Train only the cylinder around the object the cameras look at. The background is not reconstructed.")
+            if settings.isEnabled {
+                Slider(value: Binding(
+                    get: { Double(settings.radiusScale) },
+                    set: { value in
+                        var updated: ObjectRegionSettings = document.wrappedValue.contents.manifest.training.effectiveObjectRegion
+                        updated.radiusScale = Float(value)
+                        document.wrappedValue.contents.manifest.training.objectRegion = updated
+                    }
+                ), in: 0.5...2.0, step: 0.1) {
+                    Text("Object size")
+                }
+                .disabled(model.isTraining)
+                .accessibilityValue(String(format: "%.1f times the default", settings.radiusScale))
+                Text("A taller cylinder than wide. Larger sizes keep more of the scene.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var focusBinding: Binding<Bool> {
+        Binding(
+            get: { document.wrappedValue.contents.manifest.training.effectiveObjectRegion.isEnabled },
+            set: { enabled in
+                var updated: ObjectRegionSettings = document.wrappedValue.contents.manifest.training.effectiveObjectRegion
+                updated.isEnabled = enabled
+                document.wrappedValue.contents.manifest.training.objectRegion = updated
+            }
+        )
     }
 
     private var presetBinding: Binding<TrainingPreset?> {

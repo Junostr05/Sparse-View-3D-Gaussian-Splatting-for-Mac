@@ -144,6 +144,8 @@ extension TrainingConfiguration {
         configuration.mcmc.isEnabled = false
         configuration.antiAliasing.isEnabled = false
         configuration.poseRefinement.isEnabled = false
+        // The CPU reference trainer does not implement object focus, so CPU-versus-GPU comparisons turn it off.
+        configuration.objectRegion = ObjectRegionSettings(isEnabled: false)
         return configuration
     }
 }

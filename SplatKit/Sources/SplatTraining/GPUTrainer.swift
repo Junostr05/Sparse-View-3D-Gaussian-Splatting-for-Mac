@@ -110,6 +110,8 @@ public final class GPUTrainer {
     private let context: MetalContext
     private let configuration: TrainingConfiguration
     private let views: [TrainingView]
+    /// The object cylinder of the run, nil when object focus is off. Gaussians outside it are removed at densification.
+    private let objectRegion: ObjectRegion?
     private let targets: [MTLBuffer]
     private var sampler: ViewSampler
     private let store: GaussianBuffers
@@ -198,8 +200,14 @@ public final class GPUTrainer {
         guard !dataset.views.isEmpty else {
             throw .noViews
         }
-        precondition(initialCloud.shDegree == configuration.shDegree,
-                     "initial cloud SH degree \(initialCloud.shDegree) does not match the configuration")
+        // Object focus (v1.6): the start cloud keeps only the Gaussians inside the cylinder from the camera poses.
+        let objectRegion: ObjectRegion? = configuration.effectiveObjectRegion.isEnabled
+            ? ObjectRegion.estimate(cameras: dataset.views.map(\.camera),
+                                    radiusScale: configuration.effectiveObjectRegion.radiusScale)
+            : nil
+        let startCloud: GaussianCloud = Self.keepingRegion(initialCloud, objectRegion)
+        precondition(startCloud.shDegree == configuration.shDegree,
+                     "initial cloud SH degree \(startCloud.shDegree) does not match the configuration")
 
         // Pseudo-view pool (P9), built once from the metric views; empty unless `.pseudoViews` is on.
         let pseudoPool: [PseudoView] = configuration.isEnabled(.pseudoViews)
@@ -224,17 +232,17 @@ public final class GPUTrainer {
             shDegree: configuration.shDegree,
             reservedBytes: reservedBytes,
             configuredMax: configuration.maxGaussians)
-        guard initialCloud.count <= budget else {
-            throw .initialCloudExceedsBudget(count: initialCloud.count, cap: budget)
+        guard startCloud.count <= budget else {
+            throw .initialCloudExceedsBudget(count: startCloud.count, cap: budget)
         }
 
         // Initial capacity per decision D2: min(budget, max(2·n0, 65 536)), never below n0 (the guard above
         // makes n0 ≤ budget). Densification grows it later (GPUDensifier.densify).
-        let d2Capacity: Int = min(budget, max(2 * initialCloud.count, 65_536))
-        let capacity: Int = max(initialCloud.count, capacityOverride ?? d2Capacity)
+        let d2Capacity: Int = min(budget, max(2 * startCloud.count, 65_536))
+        let capacity: Int = max(startCloud.count, capacityOverride ?? d2Capacity)
         let shDegree = configuration.shDegree
         let store = try metalCall { () throws(MetalError) -> GaussianBuffers in
-            try GaussianBuffers(context: context, cloud: initialCloud, capacity: capacity)
+            try GaussianBuffers(context: context, cloud: startCloud, capacity: capacity)
         }
         let adamState = try metalCall { () throws(MetalError) -> AdamBuffers in
             try AdamBuffers(context: context, capacity: capacity, shDegree: shDegree)
@@ -387,6 +395,7 @@ public final class GPUTrainer {
         self.imageLoss = imageLoss
         self.adam = adam
         self.densifier = densifier
+        self.objectRegion = objectRegion
         self.samplingRateKernel = samplingRateKernel
         self.phase4Terms = phase4Terms
         self.depthTerm = depthTerm
@@ -589,6 +598,10 @@ public final class GPUTrainer {
             }
             summary = result
             samplingRatesStale = true
+            // Object focus: densification may have placed Gaussians outside the cylinder. Remove them again.
+            if objectRegion != nil, try pruneOutsideRegion() > 0 {
+                samplingRatesStale = true
+            }
         }
 
         // Step 9b (v1.2): MCMC relocation and growth at its boundaries, after the wait above. Replaces densification.
@@ -786,6 +799,62 @@ public final class GPUTrainer {
     /// are reset in their own command buffer that is waited on here. Nothing changes when nothing is pruned.
     /// The model is never emptied: `IsolationPruning` keeps at least one Gaussian and `compact` checks it.
     /// Returns the number of Gaussians removed.
+    /// The cloud without the Gaussians outside `region`. The original when nothing would be left.
+    private static func keepingRegion(_ cloud: GaussianCloud, _ region: ObjectRegion?) -> GaussianCloud {
+        guard let region, cloud.count > 0 else {
+            return cloud
+        }
+        var outside: [Int] = []
+        for index in 0..<cloud.count {
+            let position = SIMD3<Float>(cloud.positions[3 * index], cloud.positions[3 * index + 1],
+                                        cloud.positions[3 * index + 2])
+            if !region.contains(position) {
+                outside.append(index)
+            }
+        }
+        guard outside.count < cloud.count else {
+            return cloud
+        }
+        guard let kept = try? cloud.removing(SelectionMask(count: cloud.count, indices: outside)) else {
+            return cloud
+        }
+        return kept
+    }
+
+    /// Removes the Gaussians outside the object cylinder from the trainer's parameters, with the Adam moments kept
+    /// aligned, as isolation pruning does. Returns how many were removed.
+    private func pruneOutsideRegion() throws(TrainingError) -> Int {
+        guard let region = objectRegion else {
+            return 0
+        }
+        let total = store.count
+        let positions = store.readPositions()
+        var keep = [Bool](repeating: true, count: total)
+        var pruned = 0
+        for index in 0..<total where !region.contains(positions[index]) {
+            keep[index] = false
+            pruned += 1
+        }
+        guard pruned > 0 else {
+            return 0
+        }
+        store.compact(keeping: keep)
+        adamState.m.compact(keeping: keep)
+        adamState.v.compact(keeping: keep)
+        guard let resetBuffer = context.queue.makeCommandBuffer() else {
+            throw .metal("cannot create command buffer")
+        }
+        try metalCall { () throws(MetalError) -> Void in
+            try self.statistics.encodeReset(commandBuffer: resetBuffer)
+        }
+        resetBuffer.commit()
+        resetBuffer.waitUntilCompleted()
+        if resetBuffer.status == .error {
+            throw .metal(resetBuffer.error?.localizedDescription ?? "unknown GPU error")
+        }
+        return pruned
+    }
+
     private func pruneIsolated(iteration: Int) throws(TrainingError) -> Int {
         let artifacts = configuration.artifacts
         let total = store.count

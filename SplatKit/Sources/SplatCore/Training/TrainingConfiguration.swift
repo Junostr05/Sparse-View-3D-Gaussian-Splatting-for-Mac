@@ -360,6 +360,27 @@ public struct MCMCSettings: Codable, Sendable, Equatable {
 
 /// Anti-aliasing after Mip-Splatting (v1.2): a 3D smoothing filter limits every Gaussian to what the training
 /// cameras can resolve, and a 2D box-like filter with compensation replaces the fixed 0.3 px dilation.
+/// Focus on the object: training keeps only the Gaussians inside the cylinder that `ObjectRegion` estimates from the
+/// camera poses. On by default. `radiusScale` sets the cylinder's radius as a multiple of the default.
+public struct ObjectRegionSettings: Codable, Sendable, Equatable {
+    public var isEnabled: Bool = true
+    public var radiusScale: Float = 1
+
+    public init() {}
+
+    public init(isEnabled: Bool, radiusScale: Float = 1) {
+        self.isEnabled = isEnabled
+        self.radiusScale = radiusScale
+    }
+
+    /// Every key is optional; a missing key is the default.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        radiusScale = try container.decodeIfPresent(Float.self, forKey: .radiusScale) ?? 1
+    }
+}
+
 public struct AntiAliasingSettings: Codable, Sendable, Equatable {
     public var isEnabled = true
     /// Variance of the 3D filter, in squared pixels at the training resolution (Mip-Splatting: 0.2).
@@ -478,6 +499,13 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
     public var appearance = AppearanceSettings()
     public var mcmc = MCMCSettings()
     public var antiAliasing = AntiAliasingSettings()
+    /// Focus on the object (cylinder from the camera poses). nil means the default: on, radius scale 1. Optional so a
+    /// configuration that keeps the default encodes exactly as before (manifest JSON and optimizer configuration hash).
+    public var objectRegion: ObjectRegionSettings? = nil
+    /// The object-region settings in effect.
+    public var effectiveObjectRegion: ObjectRegionSettings {
+        objectRegion ?? ObjectRegionSettings()
+    }
     public var poseRefinement = PoseRefinementSettings()
     /// Experimental DropGaussian dropout (see `GaussianDropoutSettings`). nil (the default) is off; optional so a
     /// configuration without it encodes exactly as before (manifest JSON and `OptimizerState.configurationHash`).
@@ -559,6 +587,7 @@ public struct TrainingConfiguration: Codable, Sendable, Equatable {
         poseRefinement = try container.decodeIfPresent(PoseRefinementSettings.self, forKey: .poseRefinement)
             ?? defaults.poseRefinement
         dropout = try container.decodeIfPresent(GaussianDropoutSettings.self, forKey: .dropout)
+        objectRegion = try container.decodeIfPresent(ObjectRegionSettings.self, forKey: .objectRegion)
         autosaveInterval = try container.decodeIfPresent(Int.self, forKey: .autosaveInterval)
             ?? defaults.autosaveInterval
     }
