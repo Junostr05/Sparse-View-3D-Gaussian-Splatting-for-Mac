@@ -38,3 +38,6 @@ outputs/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Local research scripts (Depth Pro 2 is licensed for research only): never committed.
+Tools/research/

@@ -13,6 +13,7 @@ struct TrainingSection: View {
     var body: some View {
         Section("Training") {
             presetPicker
+            resolutionControl
             trainingControls
             if model.isContinuing {
                 LabeledContent("Round", value: "\(model.round)")
@@ -85,6 +86,27 @@ struct TrainingSection: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// The longer image side the photos are read at, in pixels. It overrides the preset's value. The photos are
+    /// reduced by a whole factor, so the effective size steps: 1200 px photos train at 1200, 600 or 400 px.
+    private var resolutionControl: some View {
+        let current: Int = document.wrappedValue.contents.manifest.training.maxImageSide
+        return VStack(alignment: .leading, spacing: 4) {
+            Slider(value: Binding(
+                get: { Double(current) },
+                set: { value in
+                    document.wrappedValue.contents.manifest.training.maxImageSide = Int(value.rounded())
+                }
+            ), in: 400...2400, step: 100) {
+                Text("Working resolution")
+            }
+            .disabled(model.isTraining)
+            .accessibilityValue("\(current) pixels")
+            Text("Longer side up to \(current) px. Higher values train slower and use more memory.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
