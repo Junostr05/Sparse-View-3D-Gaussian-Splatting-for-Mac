@@ -111,6 +111,8 @@ public struct DepthPriorSettings: Codable, Sendable, Equatable {
     /// v1.5: weight each pixel of the depth loss by the estimator's own confidence (Depth Anything 3 only;
     /// estimators without a confidence keep uniform weights). Off by default.
     public var confidenceWeighting: Bool = false
+    /// Compute depth on the iPhone companion when one is on the local network (v1.6 alpha). nil means off.
+    public var companionDevice: Bool? = nil
 
     public init() {}
 
@@ -134,6 +136,7 @@ public struct DepthPriorSettings: Codable, Sendable, Equatable {
             ?? defaults.minimumInlierFraction
         confidenceWeighting = try container.decodeIfPresent(Bool.self, forKey: .confidenceWeighting)
             ?? defaults.confidenceWeighting
+        companionDevice = try container.decodeIfPresent(Bool.self, forKey: .companionDevice)
     }
 }
 

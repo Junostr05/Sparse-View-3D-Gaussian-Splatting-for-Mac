@@ -114,6 +114,18 @@ public nonisolated enum DepthPipeline {
         if !sources.supplied.isEmpty {
             providers.append(SuppliedDepthProvider(maps: sources.supplied))
         }
+        // Depth from an iPhone companion, when the project asks for it and one answers on the network.
+        var companionMaps: [String: DepthMap] = [:]
+        #if os(macOS)
+        if configuration.depthPrior.companionDevice == true {
+            companionMaps = await RemoteDepthWorker.depthMaps(for: dataset.views, model: "depth-anything-3-base")
+            if companionMaps.isEmpty {
+                warnings.append("No iPhone companion answered on the network. Depth is computed on this Mac.")
+            } else {
+                providers.append(SuppliedDepthProvider(maps: companionMaps))
+            }
+        }
+        #endif
         let cachedMaps: [String: DepthMap] = sources.cached
         if !cachedMaps.isEmpty {
             providers.append(SuppliedDepthProvider(maps: cachedMaps))
@@ -193,6 +205,7 @@ public nonisolated enum DepthPipeline {
         // Where each view's map came from: a supplied map wins over the model, as in the provider order above.
         let suppliedNames: Set<String> = Set(sources.supplied.keys)
         var estimatedNames: Set<String> = Set(cachedMaps.keys)
+        estimatedNames.formUnion(companionMaps.keys)
         if let recorder {
             estimatedNames.formUnion(recorder.maps.keys)
         }

@@ -35,6 +35,30 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.6.0"
         CURRENT_PROJECT_VERSION: "1"
+  SparseSplatCompanion:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - CompanionApp
+    dependencies:
+      - package: SplatKit
+        product: SplatCore
+      - package: SplatKit
+        product: SplatIO
+      - package: SplatKit
+        product: SplatWorkProtocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.junostr05.SparseSplat.Companion
+        SWIFT_VERSION: "6.0"
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: CompanionApp/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.6.0"
+        CURRENT_PROJECT_VERSION: "1"
   sparsesplat:
     type: tool
     platform: macOS

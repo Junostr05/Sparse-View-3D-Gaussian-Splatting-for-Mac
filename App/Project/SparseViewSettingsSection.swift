@@ -95,6 +95,9 @@ struct SparseViewSettingsSection: View {
                     .foregroundStyle(.secondary)
             }
 
+            Toggle("Use iPhone companion for depth", isOn: companionBinding)
+                .disabled(model.isTraining)
+                .help("Compute depth on an iPhone running SparseSplat Companion on the same network. Falls back to this Mac when none answers.")
             Button("Import Depth Maps\u{2026}") {
                 isImportingDepth = true
             }
@@ -203,6 +206,15 @@ struct SparseViewSettingsSection: View {
     }
 
     // MARK: - Bindings into the stored training settings
+
+    private var companionBinding: Binding<Bool> {
+        Binding(
+            get: { document.wrappedValue.contents.manifest.training.depthPrior.companionDevice ?? false },
+            set: { enabled in
+                document.wrappedValue.contents.manifest.training.depthPrior.companionDevice = enabled
+            }
+        )
+    }
 
     private var depthBinding: Binding<Bool> {
         Binding(

@@ -4,11 +4,15 @@ import PackageDescription
 var products: [Product] = [
     .library(name: "SplatCore", targets: ["SplatCore"]),
     .library(name: "SplatIO", targets: ["SplatIO"]),
+    .library(name: "SplatWorkProtocol", targets: ["SplatWorkProtocol"]),
 ]
 
 var targets: [Target] = [
     .target(name: "SplatCore"),
     .target(name: "SplatIO", dependencies: ["SplatCore"]),
+    // Work messages between the Mac and a companion device (v1.6 alpha). Platform-neutral: no Metal, no Core ML.
+    .target(name: "SplatWorkProtocol", dependencies: ["SplatCore", "SplatIO"]),
+    .testTarget(name: "SplatWorkProtocolTests", dependencies: ["SplatWorkProtocol", "SplatCore", "SplatIO"]),
     .testTarget(name: "SplatCoreTests", dependencies: ["SplatCore"], resources: [.copy("Fixtures")]),
     .testTarget(name: "SplatIOTests", dependencies: ["SplatIO"], resources: [.copy("Fixtures")]),
 ]
@@ -41,7 +45,7 @@ targets += [
     // depth estimator, which loads its model through SplatIO's ModelStore. Nonisolated default isolation.
     .target(
         name: "SplatDepth",
-        dependencies: ["SplatCore", "SplatIO"]
+        dependencies: ["SplatCore", "SplatIO", "SplatWorkProtocol"]
     ),
     .testTarget(
         name: "SplatDepthTests",
@@ -52,7 +56,7 @@ targets += [
 
 let package = Package(
     name: "SplatKit",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v26), .iOS(.v26)],
     products: products,
     targets: targets
 )
